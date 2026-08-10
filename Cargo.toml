@@ -1,0 +1,10 @@
+[package]
+name = "nextjson"
+version = "0.1.0"
+edition = "2021"
+authors = ["blueokanna"]
+description = "A JSON parser and serializer for Rust."
+
+[features]
+
+[dependencies]
