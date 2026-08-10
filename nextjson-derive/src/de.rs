@@ -44,7 +44,7 @@ fn field_decode_expr(field: &crate::Field, fa: &FieldAttrs, cp: &str, decoder: &
         format!("{m}::deserialize({decoder})?")
     } else {
         format!(
-            "<{} as {cp}::NsonDeserialize<'de>>::decode({decoder})?",
+            "<{} as {cp}::NsonDeserialize<'de>>::nextdecode({decoder})?",
             field.ty
         )
     }
@@ -121,12 +121,12 @@ pub(crate) fn deserialize_struct(
                     field.ty
                 ));
             }
-            let decode = if has_flatten {
-                gen_map_decode(f, ca, cp, "__d")
+            let nextdecode = if has_flatten {
+                gen_map_nextdecode(f, ca, cp, "__d")
             } else {
-                gen_match_decode(f, ca, cp, "__d")
+                gen_match_nextdecode(f, ca, cp, "__d")
             };
-            c.l(&decode);
+            c.l(&nextdecode);
             let assigns: Vec<String> = f
                 .iter()
                 .enumerate()
@@ -171,7 +171,7 @@ pub(crate) fn deserialize_struct(
                 }
                 if fa.skip_deserializing {
                     c.l(&format!(
-                        "let {id} = {{ <{cp}::Value as {cp}::NsonDeserialize<'de>>::decode(__d)?; <{} as ::core::default::Default>::default() }};",
+                        "let {id} = {{ <{cp}::Value as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?; <{} as ::core::default::Default>::default() }};",
                         field.ty
                     ));
                 } else {
@@ -192,7 +192,7 @@ pub(crate) fn deserialize_struct(
 }
 
 /// Key-match based object decoding.
-fn gen_match_decode(
+fn gen_match_nextdecode(
     fields: &[crate::Field],
     ca: &ContainerAttrs,
     cp: &str,
@@ -243,7 +243,7 @@ fn gen_match_decode(
             c.l(&format!("let __v = {expr};"));
             c.l(&write_value(*i, "__v"));
         } else {
-            c.l(&format!("__slot{i}.decode({decoder})?;"));
+            c.l(&format!("__slot{i}.nextdecode({decoder})?;"));
         }
         c.l("}");
     }
@@ -279,7 +279,12 @@ fn gen_match_decode(
 }
 
 /// Map-based object decoding (used with `flatten`).
-fn gen_map_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, decoder: &str) -> String {
+fn gen_map_nextdecode(
+    fields: &[crate::Field],
+    ca: &ContainerAttrs,
+    cp: &str,
+    decoder: &str,
+) -> String {
     let tracked: Vec<(usize, &crate::Field, FieldAttrs)> = fields
         .iter()
         .enumerate()
@@ -304,7 +309,7 @@ fn gen_map_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, decode
     }
 
     c.l(&format!(
-        "let mut __map = <{cp}::Map as {cp}::NsonDeserialize<'de>>::decode({decoder})?;"
+        "let mut __map = <{cp}::Map as {cp}::NsonDeserialize<'de>>::nextdecode({decoder})?;"
     ));
 
     for (i, f, fa) in &tracked {
@@ -313,7 +318,7 @@ fn gen_map_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, decode
             let wv = write_value(*i, "__decoded");
             c.l("{");
             c.l(&format!(
-                "let __decoded = {cp}::private::decode_value::<{}>({cp}::Value::Object(__map.clone()))?;",
+                "let __decoded = {cp}::private::nextdecode_value::<{}>({cp}::Value::Object(__map.clone()))?;",
                 f.ty
             ));
             c.l(&wv);
@@ -331,7 +336,7 @@ fn gen_map_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, decode
         c.l("match __found {");
         c.l("::core::option::Option::Some(__val) => {");
         c.l(&format!(
-            "let __decoded = {cp}::private::decode_value::<{}>(__val)?;",
+            "let __decoded = {cp}::private::nextdecode_value::<{}>(__val)?;",
             f.ty
         ));
         c.l(&wv);
@@ -357,7 +362,7 @@ fn gen_map_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, decode
 // ---------------------------------------------------------------------------
 
 /// Decode a struct variant into local slots and construct `Self::Variant`.
-fn gen_variant_struct_decode(
+fn gen_variant_struct_nextdecode(
     variant: &str,
     fields: &[crate::Field],
     ca: &ContainerAttrs,
@@ -373,12 +378,12 @@ fn gen_variant_struct_decode(
             f.ty
         ));
     }
-    let decode = if has_flatten {
-        gen_map_decode(fields, ca, cp, decoder)
+    let nextdecode = if has_flatten {
+        gen_map_nextdecode(fields, ca, cp, decoder)
     } else {
-        gen_match_decode(fields, ca, cp, decoder)
+        gen_match_nextdecode(fields, ca, cp, decoder)
     };
-    c.l(&decode);
+    c.l(&nextdecode);
     let mut assigns = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         let ident = f.ident.clone().unwrap_or_default();
@@ -457,7 +462,7 @@ fn deserialize_external(
                     }
                     if fa.skip_deserializing {
                         sub.l(&format!(
-                            "let {id} = {{ <{cp}::Value as {cp}::NsonDeserialize<'de>>::decode(__d)?; <{} as ::core::default::Default>::default() }};",
+                            "let {id} = {{ <{cp}::Value as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?; <{} as ::core::default::Default>::default() }};",
                             field.ty
                         ));
                     } else {
@@ -479,7 +484,7 @@ fn deserialize_external(
             }
             Fields::Named(f) => {
                 let constructed =
-                    gen_variant_struct_decode(&v.ident, f, ca, cp, "__d", has_flatten);
+                    gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__d", has_flatten);
                 format!("__out.write({constructed});")
             }
         };
@@ -569,7 +574,7 @@ fn deserialize_internal(
                     "let __tokens = {cp}::private::tokens_to_object(__rest); \
                      let mut __sub = {cp}::private::from_tokens(__tokens); \
                      let __sub = &mut __sub; \
-                     let ({}) = <({}) as {cp}::NsonDeserialize<'de>>::decode(__sub)?; \
+                     let ({}) = <({}) as {cp}::NsonDeserialize<'de>>::nextdecode(__sub)?; \
                      __out.write(Self::{}({}));",
                     pats.join(", "),
                     tys.join(", "),
@@ -579,7 +584,7 @@ fn deserialize_internal(
             }
             Fields::Named(f) => {
                 let constructed =
-                    gen_variant_struct_decode(&v.ident, f, ca, cp, "__sub", has_flatten);
+                    gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__sub", has_flatten);
                 format!(
                     "let __tokens = {cp}::private::tokens_to_object(__rest); \
                      let mut __sub = {cp}::private::from_tokens(__tokens); \
@@ -675,7 +680,7 @@ fn deserialize_adjacent(
                     "let __c = __content.ok_or_else(|| {cp}::Error::missing_field({content:?}))?; \
                      let mut __sub = {cp}::private::from_tokens(__c); \
                      let __sub = &mut __sub; \
-                     let ({}) = <({}) as {cp}::NsonDeserialize<'de>>::decode(__sub)?; \
+                     let ({}) = <({}) as {cp}::NsonDeserialize<'de>>::nextdecode(__sub)?; \
                      __out.write(Self::{}({}));",
                     pats.join(", "),
                     tys.join(", "),
@@ -684,7 +689,7 @@ fn deserialize_adjacent(
                 )
             }
             Fields::Named(f) => {
-                let constructed = gen_variant_struct_decode(&v.ident, f, ca, cp, "__sub", has_flatten);
+                let constructed = gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__sub", has_flatten);
                 format!(
                     "let __c = __content.ok_or_else(|| {cp}::Error::missing_field({content:?}))?; \
                      let mut __sub = {cp}::private::from_tokens(__c); \
@@ -749,7 +754,7 @@ fn deserialize_untagged(
                     }
                 }
                 format!(
-                    "let ({}) = <({}) as {cp}::NsonDeserialize<'de>>::decode(__d)?; \
+                    "let ({}) = <({}) as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?; \
                      ::core::result::Result::Ok(Self::{}({}))",
                     pats.join(", "),
                     tys.join(", "),
@@ -759,7 +764,7 @@ fn deserialize_untagged(
             }
             Fields::Named(f) => {
                 let constructed =
-                    gen_variant_struct_decode(&v.ident, f, ca, cp, "__d", has_flatten);
+                    gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__d", has_flatten);
                 format!("let __v = {constructed}; ::core::result::Result::Ok(__v)")
             }
         };

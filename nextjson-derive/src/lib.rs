@@ -570,7 +570,7 @@ pub(crate) fn generate_impls(input: &Input) -> TokenStream {
          }}\n\
          #[automatically_derived]\n\
          impl {ig} {cp}::NsonSerialize for {name}{tg}{wc} {{\n\
-         \x20   fn encode<__W: {cp}::Write>(&self, __e: &mut {cp}::Encoder<__W>) -> {cp}::Result<()> {{\n\
+         \x20   fn nextencode<__W: {cp}::Write>(&self, __e: &mut {cp}::Encoder<__W>) -> {cp}::Result<()> {{\n\
          {body}\n\
          \x20   }}\n\
          }}"
@@ -595,9 +595,9 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
     let out = format!(
         "#[automatically_derived]\n\
          impl {ig} {cp}::NsonDeserialize<'de> for {name}{tg}{wc} {{\n\
-         \x20   fn decode_into(\n\
+         \x20   fn nextdecode_into(\n\
          \x20       __d: &mut {cp}::Decoder<'de>,\n\
-         \x20       __out: &mut ::core::mem::MaybeUninit<Self>,\n\
+         \x20       __out: &mut {cp}::DecodeSlot<Self>,\n\
          \x20   ) -> {cp}::Result<()> {{\n\
          {body}\n\
          \x20   }}\n\

@@ -1,15 +1,14 @@
 //! Runtime helpers used by macro-generated code (`#[doc(hidden)]`).
 //!
-//! All complex logic (content replay, token splicing, `Value`-driven decode,
+//! All complex logic (content replay, token splicing, `Value`-driven nextdecode,
 //! internal-tag merging) is consolidated here so the derive only emits glue.
 
 use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::mem::MaybeUninit;
 
 use crate::de::{read_token_tree, Decoder, NsonDeserialize};
-use crate::encode::Encoder;
+use crate::encoding::Encoder;
 use crate::error::Result;
 use crate::ser::NsonSerialize;
 use crate::value::Value;
@@ -19,7 +18,7 @@ pub use crate::de::{
     Decoder as DecoderReexport, NsonDeserialize as NsonDeserializeReexport, Token,
     Token as TokenReexport,
 };
-pub use crate::encode::Encoder as EncoderReexport;
+pub use crate::encoding::Encoder as EncoderReexport;
 pub use crate::ser::NsonSerialize as NsonSerializeReexport;
 
 /// RAII storage used by derive-generated decoders for one struct field.
@@ -29,35 +28,27 @@ pub use crate::ser::NsonSerialize as NsonSerializeReexport;
 /// partially decoded structs and duplicate fields normal Rust drop semantics.
 #[doc(hidden)]
 pub struct InitSlot<T> {
-    value: MaybeUninit<T>,
-    initialized: bool,
+    value: Option<T>,
 }
 
 impl<T> InitSlot<T> {
     /// Create an empty field slot.
     pub const fn new() -> Self {
-        InitSlot {
-            value: MaybeUninit::uninit(),
-            initialized: false,
-        }
+        InitSlot { value: None }
     }
 
-    /// Decode a field directly into this slot.
-    pub fn decode<'de>(&mut self, decoder: &mut Decoder<'de>) -> Result<()>
+    /// Next-decode a field directly into this slot.
+    pub fn nextdecode<'de>(&mut self, decoder: &mut Decoder<'de>) -> Result<()>
     where
         T: NsonDeserialize<'de>,
     {
-        self.clear();
-        T::decode_into(decoder, &mut self.value)?;
-        self.initialized = true;
+        self.value = Some(T::nextdecode(decoder)?);
         Ok(())
     }
 
     /// Replace the slot with an already constructed value.
     pub fn write(&mut self, value: T) {
-        self.clear();
-        self.value.write(value);
-        self.initialized = true;
+        self.value = Some(value);
     }
 
     /// Move the initialized value out of the slot.
@@ -65,40 +56,15 @@ impl<T> InitSlot<T> {
     /// # Panics
     /// Panics if the generated decoder did not initialize this field.
     pub fn take(&mut self) -> T {
-        assert!(
-            self.initialized,
-            "nextjson derive: uninitialized field slot"
-        );
-        self.initialized = false;
-        // SAFETY: the flag is set only after `write` or a successful
-        // `decode_into`, both of which fully initialize `value`.
-        #[allow(unsafe_code)]
-        unsafe {
-            self.value.assume_init_read()
-        }
-    }
-
-    fn clear(&mut self) {
-        if self.initialized {
-            self.initialized = false;
-            // SAFETY: the flag is set only after successful initialization.
-            #[allow(unsafe_code)]
-            unsafe {
-                self.value.assume_init_drop();
-            }
-        }
+        self.value
+            .take()
+            .expect("nextjson derive: uninitialized field slot")
     }
 }
 
 impl<T> Default for InitSlot<T> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<T> Drop for InitSlot<T> {
-    fn drop(&mut self) {
-        self.clear();
     }
 }
 
@@ -150,10 +116,10 @@ pub fn token_to_string<'de>(tokens: &[Token<'de>]) -> Result<String> {
 }
 
 /// Decode any type from a [`Value`] (owned, any lifetime).
-pub fn decode_value<T: for<'de> NsonDeserialize<'de>>(value: Value) -> Result<T> {
+pub fn nextdecode_value<T: for<'de> NsonDeserialize<'de>>(value: Value) -> Result<T> {
     let tokens = value_to_tokens(&value);
     let mut decoder = Decoder::from_tokens(tokens);
-    let decoded = T::decode(&mut decoder)?;
+    let decoded = T::nextdecode(&mut decoder)?;
     decoder.end()?;
     Ok(decoded)
 }
@@ -202,7 +168,7 @@ pub fn write_tagged_object<W: Write>(
             encoder.write_str(variant_name)?;
             for (k, v) in m.iter() {
                 encoder.key(k)?;
-                NsonSerialize::encode(v, encoder)?;
+                NsonSerialize::nextencode(v, encoder)?;
             }
             encoder.end_object()
         }
@@ -234,7 +200,7 @@ mod tests {
         ]));
         let tokens = value_to_tokens(&v);
         let mut d = Decoder::from_tokens(tokens);
-        let back: Map = NsonDeserialize::decode(&mut d).unwrap();
+        let back: Map = NsonDeserialize::nextdecode(&mut d).unwrap();
         assert_eq!(
             back.get("a").unwrap(),
             &Value::Array(vec![Value::Number(1.into()), Value::Null])

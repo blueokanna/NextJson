@@ -70,14 +70,14 @@ impl EncodeConfig {
     }
 }
 
-/// Serialization trait: encode `Self` into an [`Encoder`].
+/// Serialization trait: nextencode `Self` into an [`Encoder`].
 ///
 /// Unlike serde's trait-object-based `Serializer`, the writer is a generic
 /// parameter, so method bodies are monomorphized at compile time with no
 /// dynamic dispatch.
 pub trait NsonSerialize: NsonSchema {
-    /// Encode `self` into `encoder`.
-    fn encode<W: Write>(&self, encoder: &mut Encoder<W>) -> Result<()>;
+    /// Next-encode `self` into `encoder`.
+    fn nextencode<W: Write>(&self, encoder: &mut Encoder<W>) -> Result<()>;
 }
 
 /// JSON encoder with internal buffering and indentation state.
@@ -92,6 +92,7 @@ pub struct Encoder<W: Write> {
     pretty: bool,
     indent: &'static str,
     escape_non_ascii: bool,
+    flush_threshold: usize,
 }
 
 const FLUSH_THRESHOLD: usize = 8192;
@@ -112,6 +113,7 @@ impl<W: Write> Encoder<W> {
             pretty: config.pretty,
             indent: config.indent,
             escape_non_ascii: config.escape_non_ascii,
+            flush_threshold: FLUSH_THRESHOLD,
         }
     }
 
@@ -132,7 +134,7 @@ impl<W: Write> Encoder<W> {
 
     #[inline]
     fn maybe_flush(&mut self) -> Result<()> {
-        if self.buf.len() >= FLUSH_THRESHOLD {
+        if self.buf.len() >= self.flush_threshold {
             self.writer.write_all(&self.buf)?;
             self.buf.clear();
         }
@@ -276,35 +278,25 @@ impl<W: Write> Encoder<W> {
 
     /// Write an `i64`.
     pub fn write_i64(&mut self, v: i64) -> Result<()> {
-        if v < 0 {
-            self.buf.push(b'-');
-            write_u64_into(&mut self.buf, v.unsigned_abs());
-        } else {
-            write_u64_into(&mut self.buf, v as u64);
-        }
+        write_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u64`.
     pub fn write_u64(&mut self, v: u64) -> Result<()> {
-        write_u64_into(&mut self.buf, v);
+        write_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write an `i128`.
     pub fn write_i128(&mut self, v: i128) -> Result<()> {
-        if v < 0 {
-            self.buf.push(b'-');
-            write_u128_into(&mut self.buf, v.unsigned_abs());
-        } else {
-            write_u128_into(&mut self.buf, v as u128);
-        }
+        write_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u128`.
     pub fn write_u128(&mut self, v: u128) -> Result<()> {
-        write_u128_into(&mut self.buf, v);
+        write_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
@@ -316,30 +308,33 @@ impl<W: Write> Encoder<W> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
-        if v == 0.0 && v.is_sign_negative() {
-            self.buf.extend_from_slice(b"-0.0");
-        } else {
-            let mut sb = StackBuf::new();
-            let _ = core::fmt::Write::write_fmt(&mut sb, format_args!("{v}"));
-            let text = sb.as_str();
-            if !text.contains('.') && !text.contains('e') && !text.contains('E') {
-                self.buf.extend_from_slice(text.as_bytes());
-                self.buf.extend_from_slice(b".0");
-            } else {
-                self.buf.extend_from_slice(text.as_bytes());
-            }
-        }
+        let mut buffer = zmij::Buffer::new();
+        self.buf
+            .extend_from_slice(buffer.format_finite(v).as_bytes());
         self.maybe_flush()
     }
 
-    /// Write an `f32` (promoted to `f64`).
+    /// Write an `f32` using its shortest round-trip representation.
     pub fn write_f32(&mut self, v: f32) -> Result<()> {
-        self.write_f64(v as f64)
+        if !v.is_finite() {
+            return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
+        }
+        let mut buffer = zmij::Buffer::new();
+        self.buf
+            .extend_from_slice(buffer.format_finite(v).as_bytes());
+        self.maybe_flush()
     }
 
     fn write_str_inner(&mut self, s: &str) -> Result<()> {
         self.buf.push(b'"');
         let bytes = s.as_bytes();
+        if bytes.iter().all(|&byte| {
+            byte >= 0x20 && byte != b'"' && byte != b'\\' && (!self.escape_non_ascii || byte < 0x80)
+        }) {
+            self.buf.extend_from_slice(bytes);
+            self.buf.push(b'"');
+            return Ok(());
+        }
         let mut i = 0;
         while i < bytes.len() {
             let b = bytes[i];
@@ -372,6 +367,19 @@ impl<W: Write> Encoder<W> {
     }
 }
 
+impl Encoder<Vec<u8>> {
+    pub(crate) fn for_vec(config: EncodeConfig) -> Self {
+        let mut encoder = Encoder::with_config(Vec::new(), config);
+        encoder.flush_threshold = usize::MAX;
+        encoder
+    }
+
+    pub(crate) fn finish_vec(mut self) -> Vec<u8> {
+        debug_assert!(self.writer.is_empty());
+        core::mem::take(&mut self.buf)
+    }
+}
+
 /// Write a char as `\uXXXX` (surrogate pair when needed).
 fn write_unicode_escape(buf: &mut Vec<u8>, ch: char) {
     fn hex4(buf: &mut Vec<u8>, cp: u32) {
@@ -392,66 +400,10 @@ fn write_unicode_escape(buf: &mut Vec<u8>, ch: char) {
     }
 }
 
-/// Stack-allocated `fmt::Write` buffer for float formatting (no allocation).
-struct StackBuf {
-    data: [u8; 64],
-    len: usize,
-}
-
-impl StackBuf {
-    fn new() -> Self {
-        StackBuf {
-            data: [0u8; 64],
-            len: 0,
-        }
-    }
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.data[..self.len]).expect("valid utf-8")
-    }
-}
-
-impl core::fmt::Write for StackBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let b = s.as_bytes();
-        if self.len + b.len() > self.data.len() {
-            return Err(core::fmt::Error);
-        }
-        self.data[self.len..self.len + b.len()].copy_from_slice(b);
-        self.len += b.len();
-        Ok(())
-    }
-}
-
-/// itoa-style `u64` output (no allocation).
-fn write_u64_into(buf: &mut Vec<u8>, mut n: u64) {
-    if n == 0 {
-        buf.push(b'0');
-        return;
-    }
-    let mut tmp = [0u8; 20];
-    let mut i = 20;
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    buf.extend_from_slice(&tmp[i..]);
-}
-
-/// itoa-style `u128` output (no allocation).
-fn write_u128_into(buf: &mut Vec<u8>, mut n: u128) {
-    if n == 0 {
-        buf.push(b'0');
-        return;
-    }
-    let mut tmp = [0u8; 39];
-    let mut i = 39;
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    buf.extend_from_slice(&tmp[i..]);
+/// Integer output using itoa's stack buffer (no allocation).
+fn write_integer_into<I: itoa::Integer>(buf: &mut Vec<u8>, value: I) {
+    let mut buffer = itoa::Buffer::new();
+    buf.extend_from_slice(buffer.format(value).as_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +416,7 @@ macro_rules! impl_scalar {
             const SCHEMA: TypeSchema = $schema;
         }
         impl NsonSerialize for $t {
-            fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+            fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
                 e.$write(*self as $cast_to)
             }
         }
@@ -493,7 +445,7 @@ impl NsonSchema for char {
     const SCHEMA: TypeSchema = TypeSchema::Char;
 }
 impl NsonSerialize for char {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_char(*self)
     }
 }
@@ -502,7 +454,7 @@ impl NsonSchema for str {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
 impl NsonSerialize for str {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(self)
     }
 }
@@ -511,7 +463,7 @@ impl NsonSchema for String {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
 impl NsonSerialize for String {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(self)
     }
 }
@@ -520,7 +472,7 @@ impl<'a> NsonSchema for Cow<'a, str> {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
 impl<'a> NsonSerialize for Cow<'a, str> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(self)
     }
 }
@@ -529,8 +481,8 @@ impl<T: NsonSerialize + ?Sized> NsonSchema for Box<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + ?Sized> NsonSerialize for Box<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(self, e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(self, e)
     }
 }
 
@@ -538,8 +490,8 @@ impl<T: NsonSerialize + ?Sized> NsonSchema for &T {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + ?Sized> NsonSerialize for &T {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(*self, e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(*self, e)
     }
 }
 
@@ -547,8 +499,8 @@ impl<T: NsonSerialize + ?Sized> NsonSchema for &mut T {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + ?Sized> NsonSerialize for &mut T {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(&**self, e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(&**self, e)
     }
 }
 
@@ -556,8 +508,8 @@ impl<T: NsonSerialize> NsonSchema for Rc<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize> NsonSerialize for Rc<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(self, e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(self, e)
     }
 }
 
@@ -565,8 +517,8 @@ impl<T: NsonSerialize> NsonSchema for Arc<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize> NsonSerialize for Arc<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(self, e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(self, e)
     }
 }
 
@@ -574,8 +526,8 @@ impl<T: NsonSerialize + Copy> NsonSchema for Cell<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + Copy> NsonSerialize for Cell<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(&self.get(), e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(&self.get(), e)
     }
 }
 
@@ -583,8 +535,8 @@ impl<T: NsonSerialize> NsonSchema for RefCell<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize> NsonSerialize for RefCell<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        T::encode(&self.borrow(), e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        T::nextencode(&self.borrow(), e)
     }
 }
 
@@ -592,9 +544,9 @@ impl<T: NsonSerialize> NsonSchema for Option<T> {
     const SCHEMA: TypeSchema = TypeSchema::Optional(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for Option<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         match self {
-            Some(v) => T::encode(v, e),
+            Some(v) => T::nextencode(v, e),
             None => e.write_null(),
         }
     }
@@ -622,16 +574,16 @@ impl<T: NsonSerialize, E: NsonSerialize> NsonSchema for core::result::Result<T, 
     });
 }
 impl<T: NsonSerialize, E: NsonSerialize> NsonSerialize for core::result::Result<T, E> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_object()?;
         match self {
             Ok(v) => {
                 e.key("Ok")?;
-                T::encode(v, e)?;
+                T::nextencode(v, e)?;
             }
             Err(v) => {
                 e.key("Err")?;
-                E::encode(v, e)?;
+                E::nextencode(v, e)?;
             }
         }
         e.end_object()
@@ -642,11 +594,11 @@ impl<T: NsonSerialize> NsonSchema for Vec<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for Vec<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -656,11 +608,11 @@ impl<T: NsonSerialize> NsonSchema for [T] {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for [T] {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -670,11 +622,11 @@ impl<T: NsonSerialize, const N: usize> NsonSchema for [T; N] {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize, const N: usize> NsonSerialize for [T; N] {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -684,11 +636,11 @@ impl<T: NsonSerialize> NsonSchema for VecDeque<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for VecDeque<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -698,11 +650,11 @@ impl<T: NsonSerialize> NsonSchema for LinkedList<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for LinkedList<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -712,11 +664,11 @@ impl<T: NsonSerialize> NsonSchema for BTreeSet<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for BTreeSet<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -726,11 +678,11 @@ impl<T: NsonSerialize + Ord> NsonSchema for BinaryHeap<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize + Ord> NsonSerialize for BinaryHeap<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -740,12 +692,12 @@ impl<K: NsonSerialize, V: NsonSerialize> NsonSchema for BTreeMap<K, V> {
     const SCHEMA: TypeSchema = TypeSchema::Map(&V::SCHEMA);
 }
 impl<K: NsonSerialize, V: NsonSerialize> NsonSerialize for BTreeMap<K, V> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_object()?;
         for (k, v) in self {
             let key = key_to_str(k)?;
             e.key(&key)?;
-            V::encode(v, e)?;
+            V::nextencode(v, e)?;
         }
         e.end_object()
     }
@@ -761,12 +713,12 @@ impl<K: NsonSerialize + core::hash::Hash + Eq, V: NsonSerialize> NsonSchema
 impl<K: NsonSerialize + core::hash::Hash + Eq, V: NsonSerialize> NsonSerialize
     for std::collections::HashMap<K, V>
 {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_object()?;
         for (k, v) in self {
             let key = key_to_str(k)?;
             e.key(&key)?;
-            V::encode(v, e)?;
+            V::nextencode(v, e)?;
         }
         e.end_object()
     }
@@ -778,11 +730,11 @@ impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSchema for std::collections::
 }
 #[cfg(feature = "std")]
 impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSerialize for std::collections::HashSet<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
-            T::encode(item, e)?;
+            T::nextencode(item, e)?;
         }
         e.end_array()
     }
@@ -791,7 +743,7 @@ impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSerialize for std::collection
 /// Convert a map key to a string (only string keys are supported).
 fn key_to_str<K: NsonSerialize>(k: &K) -> Result<String> {
     let mut encoder = Encoder::new(Vec::new());
-    K::encode(k, &mut encoder)?;
+    K::nextencode(k, &mut encoder)?;
     let bytes = encoder.finish()?;
     if bytes.first() == Some(&b'"') {
         let mut d = crate::de::Decoder::new(&bytes);
@@ -812,7 +764,7 @@ impl NsonSchema for () {
     const SCHEMA: TypeSchema = TypeSchema::Unit;
 }
 impl NsonSerialize for () {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_null()
     }
 }
@@ -821,7 +773,7 @@ impl<T: ?Sized> NsonSchema for PhantomData<T> {
     const SCHEMA: TypeSchema = TypeSchema::Unit;
 }
 impl<T: ?Sized> NsonSerialize for PhantomData<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_null()
     }
 }
@@ -830,7 +782,7 @@ impl NsonSchema for Duration {
     const SCHEMA: TypeSchema = TypeSchema::U64;
 }
 impl NsonSerialize for Duration {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_u64(self.as_nanos() as u64)
     }
 }
@@ -841,7 +793,7 @@ impl NsonSchema for std::path::Path {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::path::Path {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(&self.to_string_lossy())
     }
 }
@@ -851,8 +803,8 @@ impl NsonSchema for std::path::PathBuf {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::path::PathBuf {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        self.as_path().encode(e)
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+        self.as_path().nextencode(e)
     }
 }
 
@@ -862,7 +814,7 @@ impl NsonSchema for std::net::IpAddr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::IpAddr {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -872,7 +824,7 @@ impl NsonSchema for std::net::Ipv4Addr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::Ipv4Addr {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -882,7 +834,7 @@ impl NsonSchema for std::net::Ipv6Addr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::Ipv6Addr {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -892,7 +844,7 @@ impl NsonSchema for std::net::SocketAddr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::SocketAddr {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -901,12 +853,12 @@ impl<T: NsonSerialize> NsonSchema for Range<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA, T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for Range<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
-        T::encode(&self.start, e)?;
+        T::nextencode(&self.start, e)?;
         e.separator()?;
-        T::encode(&self.end, e)?;
+        T::nextencode(&self.end, e)?;
         e.end_array()
     }
 }
@@ -915,12 +867,12 @@ impl<T: NsonSerialize> NsonSchema for RangeInclusive<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA, T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeInclusive<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
-        T::encode(self.start(), e)?;
+        T::nextencode(self.start(), e)?;
         e.separator()?;
-        T::encode(self.end(), e)?;
+        T::nextencode(self.end(), e)?;
         e.end_array()
     }
 }
@@ -929,10 +881,10 @@ impl<T: NsonSerialize> NsonSchema for RangeFrom<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeFrom<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
-        T::encode(&self.start, e)?;
+        T::nextencode(&self.start, e)?;
         e.end_array()
     }
 }
@@ -941,10 +893,10 @@ impl<T: NsonSerialize> NsonSchema for RangeTo<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeTo<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
-        T::encode(&self.end, e)?;
+        T::nextencode(&self.end, e)?;
         e.end_array()
     }
 }
@@ -953,10 +905,10 @@ impl<T: NsonSerialize> NsonSchema for RangeToInclusive<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeToInclusive<T> {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
-        T::encode(&self.end, e)?;
+        T::nextencode(&self.end, e)?;
         e.end_array()
     }
 }
@@ -967,9 +919,9 @@ macro_rules! impl_atomic {
             const SCHEMA: TypeSchema = <$inner as NsonSchema>::SCHEMA;
         }
         impl NsonSerialize for $t {
-            fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+            fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
                 let v = self.load(core::sync::atomic::Ordering::SeqCst);
-                <$inner as NsonSerialize>::encode(&v, e)
+                <$inner as NsonSerialize>::nextencode(&v, e)
             }
         }
     )*};
@@ -995,14 +947,14 @@ macro_rules! impl_tuple_ser {
         }
         impl<$First: NsonSerialize $(, $T: NsonSerialize)*> NsonSerialize for ($First, $( $T, )*) {
             #[allow(non_snake_case)]
-            fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+            fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
                 let ($first, $( $i, )*) = self;
                 e.begin_array()?;
                 e.separator()?;
-                $First::encode($first, e)?;
+                $First::nextencode($first, e)?;
                 $(
                     e.separator()?;
-                    $T::encode($i, e)?;
+                    $T::nextencode($i, e)?;
                 )*
                 e.end_array()
             }
@@ -1033,7 +985,7 @@ impl NsonSchema for Number {
     const SCHEMA: TypeSchema = TypeSchema::Opaque;
 }
 impl NsonSerialize for Number {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.write_number(self)
     }
 }
@@ -1042,11 +994,11 @@ impl NsonSchema for Map {
     const SCHEMA: TypeSchema = TypeSchema::Map(&TypeSchema::Opaque);
 }
 impl NsonSerialize for Map {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         e.begin_object()?;
         for (k, v) in self.iter() {
             e.key(k)?;
-            NsonSerialize::encode(v, e)?;
+            NsonSerialize::nextencode(v, e)?;
         }
         e.end_object()
     }
@@ -1056,7 +1008,7 @@ impl NsonSchema for Value {
     const SCHEMA: TypeSchema = TypeSchema::Opaque;
 }
 impl NsonSerialize for Value {
-    fn encode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
         match self {
             Value::Null => e.write_null(),
             Value::Bool(b) => e.write_bool(*b),
@@ -1066,11 +1018,11 @@ impl NsonSerialize for Value {
                 e.begin_array()?;
                 for v in a {
                     e.separator()?;
-                    NsonSerialize::encode(v, e)?;
+                    NsonSerialize::nextencode(v, e)?;
                 }
                 e.end_array()
             }
-            Value::Object(m) => NsonSerialize::encode(m, e),
+            Value::Object(m) => NsonSerialize::nextencode(m, e),
         }
     }
 }
@@ -1082,13 +1034,13 @@ mod tests {
     #[test]
     fn itoa_basics() {
         let mut buf = Vec::new();
-        write_u64_into(&mut buf, 0);
+        write_integer_into(&mut buf, 0_u64);
         assert_eq!(buf, b"0");
         let mut buf = Vec::new();
-        write_u64_into(&mut buf, 12345);
+        write_integer_into(&mut buf, 12345_u64);
         assert_eq!(buf, b"12345");
         let mut buf = Vec::new();
-        write_u64_into(&mut buf, u64::MAX);
+        write_integer_into(&mut buf, u64::MAX);
         assert_eq!(buf, b"18446744073709551615");
     }
 
@@ -1115,6 +1067,13 @@ mod tests {
         assert!(e.write_f64(f64::NAN).is_err());
         let mut e = Encoder::new(Vec::new());
         assert!(e.write_f64(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn f32_uses_its_own_shortest_representation() {
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.write_f32(1.2_f32).unwrap();
+        assert_eq!(encoder.finish().unwrap(), b"1.2");
     }
 
     #[test]

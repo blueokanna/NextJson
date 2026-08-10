@@ -1,6 +1,6 @@
 //! # NextJson
 //!
-//! A high-performance, zero-dependency, `no_std`-ready JSON serialization /
+//! A high-performance, `no_std`-ready JSON serialization /
 //! deserialization library for Rust with an **original architecture**.
 //!
 //! ## Design philosophy
@@ -10,31 +10,30 @@
 //!
 //! | Aspect | `serde` | `nextjson` |
 //! |---|---|---|
-//! | Core abstraction | `Serializer` / `Deserializer` + `Visitor` | `Encoder` / `Decoder` + `decode_into` |
+//! | Core abstraction | `Serializer` / `Deserializer` + `Visitor` | `Encoder` / `Decoder` + `nextdecode_into` |
 //! | Metadata | derive is fully expanded, no runtime shape | `const SCHEMA: TypeSchema` runtime-introspectable tree |
-//! | Deserialization | per-field `Visitor::visit_*` callbacks | direct decode into a `MaybeUninit` slot |
+//! | Deserialization | per-field `Visitor::visit_*` callbacks | direct nextdecode into a checked `DecodeSlot` |
 //! | Zero-copy | needs `#[serde(borrow)]` + care | parser returns `Cow::Borrowed` for unescaped strings |
 //!
 //! ### Innovations
 //!
-//! 1. **Visitor-free dual contract** — `NsonSerialize::encode` writes bytes
-//!    directly; `NsonDeserialize::decode_into` decodes into a caller-provided
-//!    uninitialized slot, supporting memory reuse with zero initialization cost.
+//! 1. **Visitor-free dual contract** — `NsonSerialize::nextencode` writes bytes
+//!    directly; `NsonDeserialize::nextdecode_into` decodes into a caller-provided
+//!    checked nextdecode slot, supporting memory reuse without a placeholder value.
 //! 2. **Compile-time schema** — every type carries `const SCHEMA: TypeSchema`,
 //!    a runtime-introspectable metadata tree (usable for JSON Schema generation,
 //!    validation, tooling), unlike serde's compiled-away derives.
 //! 3. **Unified token stream** — the byte-stream lexer and the content-replay
-//!    reader share identical decode primitives, so internally-tagged,
+//!    reader share identical nextdecode primitives, so internally-tagged,
 //!    adjacently-tagged, and untagged enums plus `Value` round-trips reuse one
 //!    engine.
 //! 4. **Lazy single-token lookahead** — the parser lexes one token at a time;
 //!    unescaped strings borrow the input with zero allocation; integer parsing
 //!    is hand-rolled with overflow detection.
-//! 5. **Safety boundary** — the library itself is `#![deny(unsafe_code)]`;
-//!    narrowly scoped exceptions cover the documented post-success
-//!    `assume_init` and the RAII field slot's move/drop operations. `no_std` is
-//!    fully supported: the core uses only `core` +
-//!    `alloc`, with `std`-only types behind the `std` feature.
+//! 5. **Safety boundary** - the library is `#![deny(unsafe_code)]`, including
+//!    nextdecode slots and partial-initialization cleanup. `no_std` is fully
+//!    supported: the core uses only `core` + `alloc`, with `std`-only types
+//!    behind the `std` feature.
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -49,8 +48,8 @@ extern crate std;
 #[cfg(feature = "derive")]
 pub use nextjson_derive::{NsonDeserialize, NsonSerialize};
 
-pub use crate::de::{DecodeConfig, Decoder, NsonDeserialize, Token};
-pub use crate::encode::{EncodeConfig, Encoder};
+pub use crate::de::{DecodeConfig, DecodeSlot, Decoder, NsonDeserialize, Token};
+pub use crate::encoding::{EncodeConfig, Encoder};
 pub use crate::error::{Error, Result};
 pub use crate::map::Map;
 pub use crate::number::Number;
@@ -62,7 +61,7 @@ pub use crate::value::Value;
 pub use crate::write::Write;
 
 pub mod de;
-pub mod encode;
+pub mod encoding;
 pub mod error;
 mod json_schema;
 pub mod map;
@@ -71,6 +70,8 @@ mod number;
 pub mod private;
 mod schema;
 mod ser;
+#[cfg(feature = "serde")]
+pub mod serde_compat;
 mod value;
 mod write;
 
@@ -94,17 +95,26 @@ use alloc::vec::Vec;
 // Top-level serialization entry points
 // ---------------------------------------------------------------------------
 
+/// Encode a value into a compact JSON byte vector using the native NextJson
+/// data model.
+///
+/// This is the canonical native encoding entry point. Unescaped string data is
+/// copied directly into the output buffer without an intermediate JSON value.
+pub fn nextencode<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    let mut encoder = Encoder::for_vec(EncodeConfig::compact());
+    NsonSerialize::nextencode(value, &mut encoder)?;
+    Ok(encoder.finish_vec())
+}
+
 /// Serialize a value into a compact JSON string.
 pub fn to_string<T: NsonSerialize + ?Sized>(value: &T) -> Result<String> {
-    let bytes = to_vec(value)?;
+    let bytes = nextencode(value)?;
     String::from_utf8(bytes).map_err(|e| Error::custom(format!("invalid utf-8: {e}")))
 }
 
 /// Serialize a value into a compact JSON byte vector.
 pub fn to_vec<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::new(Vec::new());
-    NsonSerialize::encode(value, &mut encoder)?;
-    encoder.finish()
+    nextencode(value)
 }
 
 /// Serialize a value into a pretty-printed JSON string.
@@ -115,9 +125,9 @@ pub fn to_string_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<String> 
 
 /// Serialize a value into a pretty-printed JSON byte vector.
 pub fn to_vec_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::with_config(Vec::new(), EncodeConfig::pretty());
-    NsonSerialize::encode(value, &mut encoder)?;
-    encoder.finish()
+    let mut encoder = Encoder::for_vec(EncodeConfig::pretty());
+    NsonSerialize::nextencode(value, &mut encoder)?;
+    Ok(encoder.finish_vec())
 }
 
 /// Serialize a value to any `Write` sink.
@@ -127,7 +137,7 @@ where
     T: NsonSerialize + ?Sized,
 {
     let mut encoder = Encoder::new(writer);
-    NsonSerialize::encode(value, &mut encoder)?;
+    NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
 }
@@ -139,7 +149,7 @@ where
     T: NsonSerialize + ?Sized,
 {
     let mut encoder = Encoder::with_config(writer, EncodeConfig::pretty());
-    NsonSerialize::encode(value, &mut encoder)?;
+    NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
 }
@@ -152,7 +162,7 @@ where
     T: NsonSerialize + ?Sized,
 {
     let mut encoder = Encoder::new(crate::write::StdWriter(writer));
-    NsonSerialize::encode(value, &mut encoder)?;
+    NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
 }
@@ -161,17 +171,25 @@ where
 // Top-level deserialization entry points
 // ---------------------------------------------------------------------------
 
+/// Decode one complete JSON value using the native NextJson data model.
+///
+/// The input lifetime is preserved, so implementations may borrow unescaped
+/// strings directly from `input` without allocation.
+pub fn nextdecode<'de, T: NsonDeserialize<'de>>(input: &'de [u8]) -> Result<T> {
+    let mut decoder = Decoder::new(input);
+    let value = T::nextdecode(&mut decoder)?;
+    decoder.end()?;
+    Ok(value)
+}
+
 /// Deserialize from a `&str`. The `'de` lifetime allows types to borrow input.
 pub fn from_str<'de, T: NsonDeserialize<'de>>(s: &'de str) -> Result<T> {
-    from_slice(s.as_bytes())
+    nextdecode(s.as_bytes())
 }
 
 /// Deserialize from a `&[u8]`. The `'de` lifetime allows types to borrow input.
 pub fn from_slice<'de, T: NsonDeserialize<'de>>(slice: &'de [u8]) -> Result<T> {
-    let mut decoder = Decoder::new(slice);
-    let value = T::decode(&mut decoder)?;
-    decoder.end()?;
-    Ok(value)
+    nextdecode(slice)
 }
 
 /// Deserialize from a `std::io::Read` (requires the `std` feature).
@@ -203,7 +221,7 @@ pub fn from_value<T>(value: Value) -> Result<T>
 where
     T: for<'de> NsonDeserialize<'de>,
 {
-    private::decode_value(value)
+    private::nextdecode_value(value)
 }
 
 /// Get the compile-time [`TypeSchema`] of a type (runtime-introspectable).

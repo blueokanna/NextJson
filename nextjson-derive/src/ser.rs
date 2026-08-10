@@ -127,7 +127,7 @@ fn field_ser_call(field: &crate::Field, fa: &FieldAttrs, cp: &str) -> String {
         format!("{m}::serialize(&self.{ident}, __e)?;")
     } else {
         format!(
-            "<{} as {cp}::NsonSerialize>::encode(&self.{ident}, __e)?;",
+            "<{} as {cp}::NsonSerialize>::nextencode(&self.{ident}, __e)?;",
             field.ty
         )
     }
@@ -140,7 +140,7 @@ fn field_ser_call_indexed(field: &crate::Field, i: usize, fa: &FieldAttrs, cp: &
         format!("{m}::serialize(&self.{i}, __e)?;")
     } else {
         format!(
-            "<{} as {cp}::NsonSerialize>::encode(&self.{i}, __e)?;",
+            "<{} as {cp}::NsonSerialize>::nextencode(&self.{i}, __e)?;",
             field.ty
         )
     }
@@ -306,7 +306,7 @@ fn variant_field_call(_field: &crate::Field, fa: &FieldAttrs, binder: &str, cp: 
     } else if let Some(m) = &fa.with {
         format!("{m}::serialize({binder}, __e)?;")
     } else {
-        format!("{cp}::NsonSerialize::encode({binder}, __e)?;")
+        format!("{cp}::NsonSerialize::nextencode({binder}, __e)?;")
     }
 }
 

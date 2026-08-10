@@ -311,7 +311,7 @@ fn depth_limit_protection() {
         deep.as_bytes(),
         nextjson::DecodeConfig::default().max_depth(1000),
     );
-    assert!(Value::decode(&mut d).is_ok());
+    assert!(Value::nextdecode(&mut d).is_ok());
 }
 
 #[test]

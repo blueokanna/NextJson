@@ -1,7 +1,6 @@
-use core::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use nextjson::{Error, NsonDeserialize, Value, Write};
+use nextjson::{DecodeSlot, Error, NsonDeserialize, Value, Write};
 
 #[test]
 fn top_level_rejects_trailing_values_and_garbage() {
@@ -14,9 +13,39 @@ fn top_level_rejects_trailing_values_and_garbage() {
 }
 
 #[test]
+fn rejects_non_standard_trailing_commas() {
+    for input in ["[1,]", "[1, ]", r#"{"x":1,}"#, r#"{"x":1, }"#] {
+        assert!(
+            nextjson::from_str::<Value>(input).is_err(),
+            "accepted trailing comma: {input:?}"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct BrokenDecode;
+
+impl<'de> NsonDeserialize<'de> for BrokenDecode {
+    fn nextdecode_into(
+        decoder: &mut nextjson::Decoder<'de>,
+        _out: &mut DecodeSlot<Self>,
+    ) -> nextjson::Result<()> {
+        decoder.unit()
+    }
+}
+
+#[test]
+fn invalid_safe_decode_impl_returns_error_instead_of_causing_ub() {
+    let error = nextjson::from_str::<BrokenDecode>("null").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("returned success without writing a value"));
+}
+
+#[test]
 fn direct_decoder_can_validate_its_end() {
     let mut decoder = nextjson::Decoder::new(b"7 false");
-    assert_eq!(u8::decode(&mut decoder).unwrap(), 7);
+    assert_eq!(u8::nextdecode(&mut decoder).unwrap(), 7);
     assert!(decoder.end().is_err());
 }
 
@@ -114,11 +143,11 @@ impl Drop for DropProbe {
 }
 
 impl<'de> NsonDeserialize<'de> for DropProbe {
-    fn decode_into(
+    fn nextdecode_into(
         decoder: &mut nextjson::Decoder<'de>,
-        out: &mut MaybeUninit<Self>,
+        out: &mut DecodeSlot<Self>,
     ) -> nextjson::Result<()> {
-        let _: &str = NsonDeserialize::decode(decoder)?;
+        let _: &str = NsonDeserialize::nextdecode(decoder)?;
         out.write(DropProbe);
         Ok(())
     }
@@ -163,4 +192,16 @@ fn map_key_replay_handles_escapes_and_rejects_prefix_parses() {
     let malformed_numeric_key =
         nextjson::from_str::<std::collections::BTreeMap<u32, u32>>(r#"{"1x":7}"#);
     assert!(malformed_numeric_key.is_err());
+}
+
+#[test]
+fn canonical_nextencode_nextdecode_entry_points_round_trip() {
+    let expected = nextjson::json!({
+        "name": "next-api",
+        "values": [1, 2, 3],
+        "enabled": true
+    });
+    let bytes = nextjson::nextencode(&expected).unwrap();
+    let actual: nextjson::Value = nextjson::nextdecode(&bytes).unwrap();
+    assert_eq!(actual, expected);
 }

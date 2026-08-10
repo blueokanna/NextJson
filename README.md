@@ -1,10 +1,10 @@
 # NextJson
 
-> **零依赖、高性能、原创架构的 JSON 库** / *A zero-dependency, high-performance JSON library with an original architecture*
+> **高性能、no_std、原创架构的 JSON 库** / *A high-performance, no_std JSON library with an original architecture*
 
 <p align="center">
-  <strong>非 serde 的复制品，而是一套全新的设计 —— 无 Visitor、编译期 Schema、统一 Token 流</strong><br/>
-  <em>Not a serde clone — a fresh design: visitor-free, compile-time Schema, unified token stream</em>
+  <strong>一套全新的 JSON 设计 —— 无 Visitor、编译期 Schema、统一 Token 流</strong><br/>
+  <em>A fresh design: visitor-free, compile-time Schema, unified token stream</em>
 </p>
 
 <p align="center">
@@ -30,11 +30,11 @@
 
 ## 🌟 简介 / Introduction
 
-`NextJson` 是一个从零实现的 JSON 序列化 / 反序列化库。与市面上主流的 `serde_json` 不同，它**刻意没有沿用 serde 的 `Visitor` 设计模式**，而是采用了一套原创的架构：**schema 驱动（schema-driven）的解码引擎**、**编译期结构元数据（`TypeSchema`）**、以及**统一的 Token 流抽象**。
+`NextJson` 是一个从零实现的 JSON 序列化 / 反序列化库。与市面上主流的 `serde_json` 不同，它**没有沿用 serde 的 `Visitor` 设计模式**，而是采用了一套原创的架构：**schema 驱动（schema-driven）的解码引擎**、**编译期结构元数据（`TypeSchema`）**、以及**统一的 Token 流抽象**。
 
-- ✅ **零第三方依赖**（`[dependencies]` 为空：主库仅依赖自身派生宏，派生宏仅用标准库 `proc_macro` —— 无 `syn` / `quote` / `proc-macro2`，手写递归下降解析器）
+- ✅ **精简且可审计的依赖**：热路径使用 `itoa` / `zmij` / `memchr`，Serde 互操作为可选 feature；派生宏仍仅使用标准库 `proc_macro`
 - ✅ **原生 `no_std`**：库体 `#![no_std]` + `extern crate alloc`，自定义 `write::Write` 特质替代 `std::io::Write`；`std` 特性可选
-- ✅ 库本体默认拒绝 unsafe；局部豁免仅覆盖成功解码后的 `assume_init` 与 RAII 字段槽的 move/drop / Unsafe is confined to audited `MaybeUninit` completion and field-slot move/drop boundaries
+- ✅ 核心库 `#![deny(unsafe_code)]`；公开 `DecodeSlot` 和派生字段槽全部使用安全状态检查 / The core library denies unsafe code and uses checked safe nextdecode slots
 - ✅ 完整的中英双语文档，代码注释一律使用英文
 
 ### 特性开关 / Feature flags
@@ -43,6 +43,8 @@
 |---|---|---|
 | `std` | ✅ | 启用 `from_reader`、`to_io_writer`、标准库网络/路径/同步类型；字符串与切片入口始终可用 / Enables reader, IO writer, and std-only type integrations; string/slice APIs remain available without it |
 | `derive` | ✅ | 启用 `NsonSerialize` / `NsonDeserialize` 派生宏（`nextjson-derive`） |
+| `serde` | ❌ | 启用直接复用 `Encoder` / `Decoder` 的 Serde 互操作层；不经过中间 `Value`，支持借用字符串 |
+| `transcode` | ❌ | 启用 JSON 与其他 Serde 格式之间的流式转换；要求 `std`，不构造中间 `Value` |
 
 ```toml
 # 纯 no_std 用法（核心 + alloc，无派生宏）
@@ -50,7 +52,33 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 
 # 完整 no_std（仅核心 + alloc）
 nextjson = { version = "0.1", default-features = false }
+
+# Serde 互操作（同样支持 no_std + alloc）
+nextjson = { version = "0.1", features = ["serde"] }
+
+# 跨格式流式转换（启用 std + serde）
+nextjson = { version = "0.1", features = ["transcode"] }
 ```
+
+### 跨格式流式转换 / Cross-format streaming
+
+`transcode` 特性把 NextJson 的 JSON `Deserializer` / `Serializer` 直接接到其他
+Serde 格式，不构造 `nextjson::Value` 或 `serde_json::Value`：
+
+```rust,ignore
+let input = br#"{"name":"streamed","values":[1,2,3]}"#;
+let mut messagepack = Vec::new();
+let mut target = rmp_serde::Serializer::new(&mut messagepack).with_struct_map();
+nextjson::serde_compat::transcode::json_to(input, &mut target)?;
+
+let mut source = rmp_serde::Deserializer::new(std::io::Cursor::new(&messagepack));
+let json = nextjson::serde_compat::transcode::json_from(&mut source)?;
+```
+
+`json_to` 会验证 JSON 尾部没有第二个值或垃圾数据；`json_from` 消费外部
+Deserializer 的一个值，源格式是否已经到达 EOF 必须使用该格式自己的 API 验证。
+无模式转码只保留自描述的 Serde 数据事件。非自描述格式的枚举、字节串和特殊扩展
+可能需要目标格式配置或显式 Rust 类型，不能无依据地承诺跨格式语义完全相同。
 
 ---
 
@@ -72,13 +100,13 @@ impl<'de> Deserialize<'de> for Point {
 
 // NextJson 风格：直接把值就地解码进调用方提供的未初始化槽位
 impl<'de> NsonDeserialize<'de> for Point {
-    fn decode_into(d: &mut Decoder<'de>, out: &mut MaybeUninit<Self>) -> Result<()> {
+    fn nextdecode_into(d: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
         // ... 把 x/y 直接写入 out 指向的内存 ...
     }
 }
 ```
 
-**`decode_into` 的意义**：值被直接写入调用方提供的 `MaybeUninit` 槽位 —— 支持**内存复用**（解码到已分配的对象池 / 缓冲区中）与**零初始化开销**（无需先 `Default` 再覆盖）。这是 serde 的 `Deserialize::deserialize` 无法直接做到的（它总是返回新分配的值）。
+**`nextdecode_into` 的意义**：值被直接写入调用方提供的 `DecodeSlot` —— 无需 `T: Default` 或先构造占位值。槽位状态可安全检查，错误的第三方实现无法让库读取未初始化内存。
 
 ### 2. 编译期 Schema（Compile-time Schema）
 
@@ -153,17 +181,16 @@ fn main() {
         note: String::new(),
     };
 
-    // 序列化
-    let text = nextjson::to_string(&u).unwrap();
+    // 标准入口：nextencode / nextdecode
+    let bytes = nextjson::nextencode(&u).unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
     assert_eq!(text, r#"{"firstName":"Ada","lastName":"Lovelace","age":36}"#);
 
     // 美化输出
     println!("{}", nextjson::to_string_pretty(&u).unwrap());
 
-    // 反序列化（字段可乱序、缺失可选字段）
-    let back: User = nextjson::from_str(
-        r#"{"age":36,"firstName":"Ada","lastName":"Lovelace"}"#,
-    ).unwrap();
+    // 反序列化；输入生命周期会传递给可借用字段
+    let back: User = nextjson::nextdecode(&bytes).unwrap();
     assert_eq!(back, u);
 
     // 无类型 Value + json! 宏
@@ -195,7 +222,7 @@ graph TD
         G[Number / Map / Error]
     end
 
-    A -->|encode_into / decode_into| D
+    A -->|nextencode / nextdecode_into| D
     A -->|const SCHEMA| F
     E -->|Bytes 惰性词法| E
     E -->|Tree 内容重放| E
@@ -212,7 +239,7 @@ nextjson/
 │   ├── lib.rs          # 顶层入口：to_string / from_str / json! 等
 │   ├── ser.rs          # NsonSerialize + Encoder（序列化端）
 │   ├── de.rs           # NsonDeserialize + Decoder + 词法器（反序列化端）
-│   ├── encode.rs       # 编码器再导出
+│   ├── encoding.rs       # 编码器再导出
 │   ├── schema.rs       # TypeSchema 编译期元数据
 │   ├── error.rs        # 带行列位置的错误模型
 │   ├── number.rs       # 精确整数 Number（I64 / U64 / I128 / U128 / F64）
@@ -234,7 +261,7 @@ nextjson/
 |---|---|
 | `fmt` | `rustfmt --check`：任何格式漂移立即失败 / fails on any formatting drift |
 | `clippy` | 全特性（`--all-features`）与纯 no_std（`--no-default-features`）两种配置下 `clippy -D warnings` |
-| `test` | **stable + MSRV 1.70** × **Ubuntu / Windows / macOS** 矩阵：全特性测试、no_std 单元测试、release 构建 |
+| `test` | **stable + MSRV 1.71** × **Ubuntu / Windows / macOS** 矩阵：全特性测试、no_std 单元测试、release 构建 |
 | `docs` | `RUSTDOCFLAGS="-D warnings"` 下 `cargo doc`（含 `missing_docs` 强制） |
 
 本地复现任一作业 / Reproduce any job locally:
@@ -249,7 +276,7 @@ cargo build --release --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 
-MSRV 说明：`rust-version = "1.70"` 由 CI 矩阵中的 `1.70.0` 工具链实际编译验证；`Cargo.lock` 固定为 v3 格式，以便 1.70 的 Cargo 读取。
+MSRV 说明：`rust-version = "1.71"` 由 CI 矩阵中的 `1.71.0` 工具链实际编译验证；`Cargo.lock` 固定为 v3 格式，以便 1.71 的 Cargo 读取。
 
 ---
 
@@ -334,15 +361,15 @@ assert!(matches!(escaped, Cow::Owned(_)));
 - **零分配热路径**：整数 / 布尔 / 无转义字符串 / 结构化的键匹配，全程无堆分配；
 - **惰性词法**：每次只 lex 一个 token，不做全量预解析；
 - **局部性**：字符串解析直接扫字节，无中间缓冲（仅转义字符串复用 `scratch`）；
-- **泛型单态化**：`NsonSerialize::encode<W: Write>` 在编译期实例化，无 trait 对象间接跳转；
+- **泛型单态化**：`NsonSerialize::nextencode<W: Write>` 在编译期实例化，无 trait 对象间接跳转；
 - **no_std 无妥协**：整数 / 浮点写出与字符串转义全部在 `core` 上实现（手写 itoa 与格式化缓冲），`no_std` 与 `std` 构建共享完全相同的热路径。
 
-Unescaped `&str` values borrow their exact byte range from the input. Escaped strings decode into owned `String`/`Cow::Owned`, because JSON escape processing necessarily creates different UTF-8 bytes. `no_std` mode requires `alloc`, but never requires `std` or a third-party crate.
+Unescaped `&str` values borrow their exact byte range from the input. Escaped strings nextdecode into owned `String`/`Cow::Owned`, because JSON escape processing necessarily creates different UTF-8 bytes. `no_std` mode requires `alloc`, but never requires `std` or a third-party crate.
 
 ### 安全性
 
-- 核心库默认 `#![deny(unsafe_code)]`；局部豁免集中在两个可审计边界：`NsonDeserialize::decode` 成功后的 `assume_init`，以及 `InitSlot<T>` 按初始化标志执行的 move/drop；
-- 派生宏为每个字段生成栈上 `InitSlot<T>`：字段直接解码进 `MaybeUninit`，RAII 在失败或重复字段覆盖时析构已初始化值，最终仅一次写入父对象；unsafe 不向安全的公开调用方泄漏 / Generated field slots combine direct `MaybeUninit` decoding with RAII cleanup and a single final parent write;
+- 核心库使用 `#![deny(unsafe_code)]`；`DecodeSlot<T>` 在读取前检查初始化状态，错误实现返回显式错误；
+- 派生宏为每个字段生成安全的栈上 `InitSlot<T>`；`Option<T>` 的正常析构语义覆盖失败和重复字段替换路径；
 - **深度限制**：默认 128 层嵌套限制（可配置），防止恶意输入导致栈溢出；
 - **错误定位**：解析错误携带精确的 1-based 行列与字节偏移；
 - **严格语法**：拒绝前导零、字面量粘连、未转义控制字符、孤立代理项等非法输入。
@@ -357,19 +384,19 @@ Unescaped `&str` values borrow their exact byte range from the input. Escaped st
 
 | 维度 | `serde_json` | `nextjson` |
 |---|---|---|
-| 核心抽象 | `Serializer` / `Deserializer` + `Visitor` | `Encoder` / `Decoder` + `decode_into` |
+| 核心抽象 | `Serializer` / `Deserializer` + `Visitor` | `Encoder` / `Decoder` + `nextdecode_into` |
 | 结构元数据 | derive 编译即消失，不可内省 | `const SCHEMA: TypeSchema` 运行时可内省 |
-| 就地解码 | 不支持（总是返回新值） | 支持（解码进 `MaybeUninit` 槽位，可复用内存） |
+| 就地解码 | 不支持（总是返回新值） | 支持（解码进安全、状态可检查的 `DecodeSlot`） |
 | 枚举标签 | 三套机制 | 统一 Token 流一套机制 |
-| 依赖 | `serde` + `itoa` + `ryu` + `memchr` 等 | **零第三方依赖**（主库 + 派生宏） |
+| 依赖 | `serde` + `itoa` + `zmij` + `memchr` 等 | 热路径使用 `itoa` + `zmij` + `memchr`；Serde 为可选 feature；派生宏零依赖 |
 | `no_std` | 需额外 feature 与配置 | **原生支持**（核心 + `alloc`） |
-| 安全声明 | 有少量 unsafe | 文档化的 `MaybeUninit` 边界 + RAII 字段槽 / documented boundary with RAII field slots |
+| 安全声明 | 有少量 unsafe | 核心库 `deny(unsafe_code)` + checked `DecodeSlot` + safe field slots |
 | 浮点语义 | `1.0` 输出 `1.0` | `1.0` 输出 `1.0`（保持一致） |
 | 数字表示 | `PosInt(u64)` / `NegInt(i64)` / `Float` | `I64` / `U64` / `I128` / `U128` / `F64`，Rust 128 位整数精确往返 / exact Rust 128-bit integer round trips |
 
 ### 设计取舍（诚实说明）
 
-- `nextjson` 的目标是**教学清晰、架构原创、零依赖**；在极端微基准上，`serde_json` 经过多年优化通常更快；
+- `nextjson` 的目标是可验证的安全、zero-copy 与可复现性能；当前对比方法见 `BENCHMARKS.md`，不得脱离数据集和机器环境宣称普遍更快；
 - `nextjson` 不支持 serde 的 `#[serde(with)]` 生态（如 `serde_bytes`、`chrono` 集成），自定义逻辑需手写 `with` 模块；
 - `flatten` 反序列化需要字段类型满足 `for<'a> NsonDeserialize<'a>`（不支持 `flatten` + 借用组合），且 `flatten` + `with` 组合会被编译器拒绝。
 

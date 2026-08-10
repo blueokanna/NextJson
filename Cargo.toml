@@ -5,11 +5,11 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.71"
 authors = ["blueokanna"]
 license = "Apache-2.0"
 repository = "https://github.com/blueokanna/NextJson"
-description = "A high-performance, zero-dependency, no_std JSON library for Rust with an original schema-driven, visitor-free design."
+description = "A high-performance, no_std JSON library for Rust with a schema-driven, visitor-free design and optional Serde interoperability."
 
 [workspace.dependencies]
 nextjson = { path = "nextjson", version = "0.1.0" }
