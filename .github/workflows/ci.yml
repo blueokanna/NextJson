@@ -19,40 +19,15 @@ env:
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
 
-x-checkout: &checkout
-  name: Checkout current revision
-  shell: bash
-  env:
-    REPOSITORY_TOKEN: ${{ github.token }}
-  run: |
-    set -euo pipefail
-    git init --initial-branch=main . 2>/dev/null || git init .
-    auth="$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)"
-    url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
-    for attempt in 1 2 3 4 5; do
-      echo "::group::fetch attempt ${attempt}/5"
-      if git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
-             -c http.version=HTTP/1.1 \
-             -c http.lowSpeedLimit=1000 \
-             -c http.lowSpeedTime=60 \
-             fetch --depth=1 "${url}" "${GITHUB_SHA}"; then
-        git checkout --detach FETCH_HEAD
-        echo "::endgroup::"
-        exit 0
-      fi
-      echo "::endgroup::"
-      echo "fetch failed (attempt ${attempt}/5); retrying in $((attempt * 5))s"
-      sleep "$((attempt * 5))"
-    done
-    echo "checkout failed after 5 attempts" >&2
-    exit 1
-
 jobs:
+  # ---------------------------------------------------------------------------
+  # Dependency gate: the lockfile must never reference a third-party source.
+  # ---------------------------------------------------------------------------
   dependency-audit:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Reject external lockfile sources
@@ -62,18 +37,25 @@ jobs:
             echo 'Cargo.lock contains an external package source'
             exit 1
           fi
-          cargo tree --workspace --all-features --edges normal,build,dev
+          cargo tree --workspace --all-features --edges normal,build,dev --locked
 
+  # ---------------------------------------------------------------------------
+  # Formatting gate: fails the pipeline on any rustfmt drift.
+  # ---------------------------------------------------------------------------
   fmt:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # ---------------------------------------------------------------------------
+  # Lint gate: clippy with warnings denied, for the full feature set, the bare
+  # no_std configuration, and no_std + derive.
+  # ---------------------------------------------------------------------------
   clippy:
     name: clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -88,12 +70,17 @@ jobs:
           - name: no-std-derive
             args: -p nextjson --no-default-features --features derive
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component clippy
       - name: Run clippy
         run: cargo clippy ${{ matrix.args }} --locked -- -D warnings
 
+  # ---------------------------------------------------------------------------
+  # Test gate: full test suite on stable and MSRV (rust-version = 1.71) across
+  # all three hosted OS families, plus the no_std unit suite and a release
+  # build.
+  # ---------------------------------------------------------------------------
   test:
     name: test (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
@@ -103,7 +90,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, 1.71.0]
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust ${{ matrix.rust }}
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
       - name: Run all tests
@@ -113,11 +100,15 @@ jobs:
       - name: Build release
         run: cargo +${{ matrix.rust }} build --release --workspace --locked
 
+  # ---------------------------------------------------------------------------
+  # Docs gate: rustdoc warnings (including missing_docs) are errors; also
+  # reproduce the docs.rs build to catch cfg(docsrs) issues early.
+  # ---------------------------------------------------------------------------
   docs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Build documentation
@@ -129,11 +120,15 @@ jobs:
       - name: Reproduce docs.rs build for nextjson-derive
         run: cargo rustdoc -p nextjson-derive --locked -- --cfg docsrs -D warnings
 
+  # ---------------------------------------------------------------------------
+  # Package gate: verify both crates package cleanly for crates.io (offline,
+  # using the local derive crate for the core crate).
+  # ---------------------------------------------------------------------------
   package:
     name: crates.io package verification
     runs-on: ubuntu-latest
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Verify derive crate package
@@ -141,11 +136,14 @@ jobs:
       - name: Verify core crate package with the unpublished local derive crate
         run: cargo package -p nextjson --locked --offline --config "patch.crates-io.nextjson-derive.path='nextjson-derive'"
 
+  # ---------------------------------------------------------------------------
+  # Benchmark gate: ensure the criterion benchmark target compiles.
+  # ---------------------------------------------------------------------------
   benchmark:
     name: benchmark compile
     runs-on: ubuntu-latest
     steps:
-      - <<: *checkout
+      - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Compile benchmark
