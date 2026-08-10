@@ -9,7 +9,7 @@ rust-version = "1.71"
 authors = ["blueokanna"]
 license = "Apache-2.0"
 repository = "https://github.com/blueokanna/NextJson"
-description = "A high-performance, no_std JSON library for Rust with a schema-driven, visitor-free design and optional Serde interoperability."
+description = "A dependency-free, no_std JSON and CBOR library with a schema-driven, visitor-free design."
 
 [workspace.dependencies]
 nextjson = { path = "nextjson", version = "0.1.0" }

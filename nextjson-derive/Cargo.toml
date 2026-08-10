@@ -6,7 +6,8 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description.workspace = true
+documentation = "https://docs.rs/nextjson-derive"
+description = "Dependency-free derive macros for NextJson serialization, decoding, and schemas."
 keywords = ["json", "serialization", "deserialization", "derive", "macro"]
 categories = ["encoding"]
 readme = "../README.md"
@@ -15,3 +16,6 @@ readme = "../README.md"
 proc-macro = true
 
 [dependencies]
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]

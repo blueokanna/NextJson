@@ -2,7 +2,7 @@
 //! standard-library implementations.
 //!
 //! Design points:
-//! - hand-written itoa-style integer output and shortest-round-trip floats;
+//! - hand-written stack-buffer integer and float output;
 //! - single-pass string escaping with bulk copy for unescaped input;
 //! - per-container first-element flag stack for zero-cost separators.
 
@@ -14,6 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::fmt::{self, Write as _};
 use core::marker::PhantomData;
 use core::ops::{Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive};
 use core::time::Duration;
@@ -72,9 +73,8 @@ impl EncodeConfig {
 
 /// Serialization trait: nextencode `Self` into an [`Encoder`].
 ///
-/// Unlike serde's trait-object-based `Serializer`, the writer is a generic
-/// parameter, so method bodies are monomorphized at compile time with no
-/// dynamic dispatch.
+/// The writer is a generic parameter, so method bodies are monomorphized at
+/// compile time with no dynamic dispatch.
 pub trait NsonSerialize: NsonSchema {
     /// Next-encode `self` into `encoder`.
     fn nextencode<W: Write>(&self, encoder: &mut Encoder<W>) -> Result<()>;
@@ -278,39 +278,37 @@ impl<W: Write> Encoder<W> {
 
     /// Write an `i64`.
     pub fn write_i64(&mut self, v: i64) -> Result<()> {
-        write_integer_into(&mut self.buf, v);
+        write_signed_integer_into(&mut self.buf, v as i128);
         self.maybe_flush()
     }
 
     /// Write a `u64`.
     pub fn write_u64(&mut self, v: u64) -> Result<()> {
-        write_integer_into(&mut self.buf, v);
+        write_unsigned_integer_into(&mut self.buf, v as u128);
         self.maybe_flush()
     }
 
     /// Write an `i128`.
     pub fn write_i128(&mut self, v: i128) -> Result<()> {
-        write_integer_into(&mut self.buf, v);
+        write_signed_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u128`.
     pub fn write_u128(&mut self, v: u128) -> Result<()> {
-        write_integer_into(&mut self.buf, v);
+        write_unsigned_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write an `f64` (shortest round-trip; non-finite values error).
     ///
-    /// Like ryu / serde_json, integral floats are written as `1.0` rather than
-    /// `1` so float-ness survives round-trips.
+    /// Integral floats are written as `1.0` rather than `1` so float-ness
+    /// survives round-trips.
     pub fn write_f64(&mut self, v: f64) -> Result<()> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
-        let mut buffer = zmij::Buffer::new();
-        self.buf
-            .extend_from_slice(buffer.format_finite(v).as_bytes());
+        write_float_into(&mut self.buf, v)?;
         self.maybe_flush()
     }
 
@@ -319,9 +317,7 @@ impl<W: Write> Encoder<W> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
-        let mut buffer = zmij::Buffer::new();
-        self.buf
-            .extend_from_slice(buffer.format_finite(v).as_bytes());
+        write_float_into(&mut self.buf, v)?;
         self.maybe_flush()
     }
 
@@ -400,10 +396,68 @@ fn write_unicode_escape(buf: &mut Vec<u8>, ch: char) {
     }
 }
 
-/// Integer output using itoa's stack buffer (no allocation).
-fn write_integer_into<I: itoa::Integer>(buf: &mut Vec<u8>, value: I) {
-    let mut buffer = itoa::Buffer::new();
-    buf.extend_from_slice(buffer.format(value).as_bytes());
+/// Integer output using a stack buffer (no allocation).
+fn write_unsigned_integer_into(buf: &mut Vec<u8>, mut value: u128) {
+    let mut digits = [0_u8; 39];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    buf.extend_from_slice(&digits[cursor..]);
+}
+
+fn write_signed_integer_into(buf: &mut Vec<u8>, value: i128) {
+    if value < 0 {
+        buf.push(b'-');
+        write_unsigned_integer_into(buf, value.wrapping_neg() as u128);
+    } else {
+        write_unsigned_integer_into(buf, value as u128);
+    }
+}
+
+struct FloatBuffer {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl FloatBuffer {
+    fn new() -> Self {
+        FloatBuffer {
+            bytes: [0; 64],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl fmt::Write for FloatBuffer {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self.len.checked_add(value.len()).ok_or(fmt::Error)?;
+        let output = self.bytes.get_mut(self.len..end).ok_or(fmt::Error)?;
+        output.copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn write_float_into<T: fmt::Display>(buf: &mut Vec<u8>, value: T) -> Result<()> {
+    let mut formatted = FloatBuffer::new();
+    core::write!(&mut formatted, "{value}")
+        .map_err(|_| Error::custom("internal float formatting buffer exhausted"))?;
+    let bytes = formatted.as_bytes();
+    buf.extend_from_slice(bytes);
+    if !bytes.iter().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        buf.extend_from_slice(b".0");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,16 +1086,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn itoa_basics() {
+    fn integer_formatting_basics() {
         let mut buf = Vec::new();
-        write_integer_into(&mut buf, 0_u64);
+        write_unsigned_integer_into(&mut buf, 0);
         assert_eq!(buf, b"0");
         let mut buf = Vec::new();
-        write_integer_into(&mut buf, 12345_u64);
+        write_unsigned_integer_into(&mut buf, 12345);
         assert_eq!(buf, b"12345");
         let mut buf = Vec::new();
-        write_integer_into(&mut buf, u64::MAX);
+        write_unsigned_integer_into(&mut buf, u64::MAX as u128);
         assert_eq!(buf, b"18446744073709551615");
+        let mut buf = Vec::new();
+        write_signed_integer_into(&mut buf, i128::MIN);
+        assert_eq!(buf, b"-170141183460469231731687303715884105728");
     }
 
     #[test]

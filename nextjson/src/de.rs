@@ -125,8 +125,8 @@ impl<T> Default for DecodeSlot<T> {
 
 /// Deserialization trait.
 ///
-/// Unlike serde's visitor callbacks, [`nextdecode_into`](NsonDeserialize::nextdecode_into)
-/// decodes a value directly into caller-provided storage, supporting memory
+/// [`nextdecode_into`](NsonDeserialize::nextdecode_into) decodes a value
+/// directly into caller-provided storage, supporting memory
 /// reuse without requiring `T: Default` or constructing a placeholder `T`.
 pub trait NsonDeserialize<'de>: Sized {
     /// Decode into `out`.
@@ -290,14 +290,18 @@ impl<'de> BytesReader<'de> {
         let input = self.input;
         let start = self.pos + 1;
         let tail = &input[start..];
-        let Some(relative) = memchr::memchr2(b'"', b'\\', tail) else {
-            if let Some(control) = tail.iter().position(|&byte| byte < 0x20) {
-                return Err(self.err_at(ErrorKind::ControlCharInString, start + control));
+        let mut relative = 0;
+        while relative < tail.len() {
+            match tail[relative] {
+                b'"' | b'\\' => break,
+                0x00..=0x1f => {
+                    return Err(self.err_at(ErrorKind::ControlCharInString, start + relative));
+                }
+                _ => relative += 1,
             }
+        }
+        if relative == tail.len() {
             return Err(self.err_at(ErrorKind::Eof, input.len()));
-        };
-        if let Some(control) = tail[..relative].iter().position(|&byte| byte < 0x20) {
-            return Err(self.err_at(ErrorKind::ControlCharInString, start + control));
         }
         let end = start + relative;
         if input[end] == b'\\' {

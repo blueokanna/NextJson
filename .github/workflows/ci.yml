@@ -20,23 +20,48 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Formatting gate: fails the pipeline on any rustfmt drift.
-  # ---------------------------------------------------------------------------
+  dependency-audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: Reject external lockfile sources
+        shell: bash
+        run: |
+          if grep -q '^source =' Cargo.lock; then
+            echo 'Cargo.lock contains an external package source'
+            exit 1
+          fi
+          cargo tree --workspace --all-features --edges normal,build,dev
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable)
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  # ---------------------------------------------------------------------------
-  # Lint gate: clippy with warnings denied, for both the full feature set and
-  # the bare no_std configuration.
-  # ---------------------------------------------------------------------------
   clippy:
     name: clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -48,28 +73,23 @@ jobs:
             args: --workspace --all-targets --all-features
           - name: no-default-features
             args: -p nextjson --no-default-features
-          - name: no-std-serde
-            args: -p nextjson --no-default-features --features serde
+          - name: no-std-derive
+            args: -p nextjson --no-default-features --features derive
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable)
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component clippy
-      - name: Restore cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
       - name: Run clippy
-        run: cargo clippy ${{ matrix.args }} -- -D warnings
+        run: cargo clippy ${{ matrix.args }} --locked -- -D warnings
 
-  # ---------------------------------------------------------------------------
-  # Test gate: full test suite on stable and MSRV (rust-version = 1.71) across
-  # all three hosted OS families, plus the no_std unit suite and a release
-  # build.
-  # ---------------------------------------------------------------------------
   test:
     name: test (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
@@ -79,63 +99,82 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, 1.71.0]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
       - name: Install Rust ${{ matrix.rust }}
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
-      - name: Restore cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.rust }}-test-${{ hashFiles('**/Cargo.lock') }}
-      - name: Run tests (all features)
-        run: cargo +${{ matrix.rust }} test --workspace --all-features
-      - name: Run no_std unit tests
-        run: cargo +${{ matrix.rust }} test -p nextjson --no-default-features --lib
+      - name: Run all tests
+        run: cargo +${{ matrix.rust }} test --workspace --all-features --locked
+      - name: Run no_std library tests
+        run: cargo +${{ matrix.rust }} test -p nextjson --no-default-features --lib --locked
       - name: Build release
-        run: cargo +${{ matrix.rust }} build --release --workspace
+        run: cargo +${{ matrix.rust }} build --release --workspace --locked
 
-  # ---------------------------------------------------------------------------
-  # Docs gate: rustdoc warnings (including missing_docs) are errors.
-  # ---------------------------------------------------------------------------
   docs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable)
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
-      - name: Restore cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-docs-${{ hashFiles('**/Cargo.lock') }}
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps --locked
+      - name: Reproduce docs.rs build for nextjson
+        run: cargo rustdoc -p nextjson --all-features --locked -- --cfg docsrs -D warnings
+      - name: Reproduce docs.rs build for nextjson-derive
+        run: cargo rustdoc -p nextjson-derive --locked -- --cfg docsrs -D warnings
 
-  # Compile the comparison benchmark in release mode. Performance thresholds
-  # are intentionally not enforced on shared CI runners.
-  benchmark:
-    name: benchmark (compile)
+  package:
+    name: crates.io package verification
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable)
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
-      - name: Restore cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
-      - name: Compile comparison benchmark
-        run: cargo bench -p nextjson --features serde --bench serde_comparison --no-run
+      - name: Verify derive crate package
+        run: cargo package -p nextjson-derive --locked --offline
+      - name: Verify core crate package with the unpublished local derive crate
+        run: cargo package -p nextjson --locked --offline --config "patch.crates-io.nextjson-derive.path='nextjson-derive'"
+
+  benchmark:
+    name: benchmark compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current revision without external actions
+        shell: bash
+        env:
+          REPOSITORY_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
+          git init .
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: Compile benchmark
+        run: cargo bench -p nextjson --bench format_comparison --no-run --locked

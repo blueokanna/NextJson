@@ -1,8 +1,8 @@
 //! Compile-time schema: one of the core innovations of `nextjson`.
 //!
 //! Every [`NsonSerialize`](crate::NsonSerialize) type carries a
-//! `const SCHEMA: TypeSchema` — a metadata tree constructed at compile time
-//! and introspectable at runtime. serde's derives leave no such shape behind.
+//! `const SCHEMA: TypeSchema` - a metadata tree constructed at compile time
+//! and introspectable at runtime.
 
 /// Compile-time description of a type's structure.
 ///

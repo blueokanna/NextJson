@@ -170,7 +170,7 @@ impl Value {
 
 impl Index<&str> for Value {
     type Output = Value;
-    /// Index access; panics on a missing key (matching serde_json).
+    /// Index access; panics on a missing key.
     fn index(&self, key: &str) -> &Value {
         self.get(key).expect("key not found in Value")
     }

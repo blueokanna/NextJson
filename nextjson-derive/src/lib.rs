@@ -5,6 +5,10 @@
 //! hand-written recursive-descent parser into a small AST, and the output is
 //! generated as text and re-parsed.
 
+#![deny(unsafe_code)]
+#![deny(missing_docs)]
+#![doc(html_root_url = "https://docs.rs/nextjson-derive")]
+
 extern crate proc_macro;
 
 use proc_macro::{Delimiter, Ident, Spacing, TokenStream, TokenTree};
@@ -18,7 +22,6 @@ mod ser;
 
 pub(crate) use attr::{ContainerAttrs, FieldAttrs, VariantAttrs};
 
-/// Parse a string into a TokenStream.
 /// Parse a string into a TokenStream.
 pub(crate) fn ts(s: &str) -> TokenStream {
     TokenStream::from_str(s)
@@ -638,6 +641,11 @@ pub(crate) fn ident(name: &str) -> Ident {
 // ---------------------------------------------------------------------------
 
 #[proc_macro_derive(NsonSerialize, attributes(njson, nextjson))]
+/// Derive NextJson's native serialization contract and compile-time schema.
+///
+/// Configuration is accepted through `#[njson(...)]`. The generated
+/// implementation writes directly through `NsonSerialize::nextencode` and
+/// exposes `NsonSchema::SCHEMA` without depending on another macro framework.
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
     match parse_input(input) {
         Ok(ast) => generate_impls(&ast),
@@ -646,6 +654,11 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_derive(NsonDeserialize, attributes(njson, nextjson))]
+/// Derive NextJson's native decoding contract.
+///
+/// Configuration is accepted through `#[njson(...)]`. The generated
+/// implementation decodes through checked `DecodeSlot` state and uses normal
+/// Rust drop semantics for partially initialized fields.
 pub fn derive_deserialize(input: TokenStream) -> TokenStream {
     match parse_input(input) {
         Ok(ast) => generate_de_impl(&ast),

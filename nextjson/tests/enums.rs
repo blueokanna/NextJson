@@ -1,10 +1,4 @@
-//! 派生宏：枚举的四种标签模式集成测试。
-
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, Number, Value};
-
-// ---------------------------------------------------------------------------
-// 外部标签（默认）
-// ---------------------------------------------------------------------------
 
 #[test]
 fn external_unit_variants() {
@@ -81,10 +75,6 @@ fn variant_rename() {
     assert_eq!(back, E::First);
 }
 
-// ---------------------------------------------------------------------------
-// 内部标签
-// ---------------------------------------------------------------------------
-
 #[test]
 fn internally_tagged() {
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -123,10 +113,6 @@ fn internally_tagged_newtype_map() {
     assert_eq!(back, Cmd::Set(BTreeMap::from([("k".to_string(), 2)])));
 }
 
-// ---------------------------------------------------------------------------
-// 邻接标签
-// ---------------------------------------------------------------------------
-
 #[test]
 fn adjacently_tagged() {
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -154,10 +140,6 @@ fn adjacently_tagged() {
     // 未知字段报错。
     assert!(from_str::<Op>(r#"{"t":"Add","c":[1,2],"extra":1}"#).is_err());
 }
-
-// ---------------------------------------------------------------------------
-// 无标签
-// ---------------------------------------------------------------------------
 
 #[test]
 fn untagged() {
@@ -193,7 +175,6 @@ fn untagged() {
         Value::Obj { x: 9 }
     );
 
-    // 全都不匹配报错。
     assert!(from_str::<Value>("null").is_err());
 }
 
@@ -205,15 +186,9 @@ fn untagged_fallback_order() {
         Int(i64),
         Float(f64),
     }
-    // "42" 匹配第一个变体。
     assert_eq!(from_str::<Either>("42").unwrap(), Either::Int(42));
-    // "4.5" 在第一个变体失败后回退到第二个。
     assert_eq!(from_str::<Either>("4.5").unwrap(), Either::Float(4.5));
 }
-
-// ---------------------------------------------------------------------------
-// 综合：泛型枚举 + 属性组合
-// ---------------------------------------------------------------------------
 
 #[test]
 fn generic_enum() {

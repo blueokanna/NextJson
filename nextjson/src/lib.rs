@@ -1,39 +1,98 @@
 //! # NextJson
 //!
-//! A high-performance, `no_std`-ready JSON serialization /
-//! deserialization library for Rust with an **original architecture**.
+//! A dependency-free, `no_std + alloc` JSON and CBOR library for Rust.
 //!
-//! ## Design philosophy
+//! The public native contracts are [`NsonSerialize::nextencode`],
+//! [`NsonDeserialize::nextdecode_into`], [`nextencode`], and [`nextdecode`].
+//! JSON and the JSON-compatible CBOR profile can also be relayed through the
+//! format-neutral [`cross_format::EventSink`] protocol without constructing an
+//! intermediate [`Value`] tree.
 //!
-//! NextJson deliberately does **not** follow serde's `Visitor` pattern. It is
-//! built on an original **schema-driven** design:
+//! ## Quick start
 //!
-//! | Aspect | `serde` | `nextjson` |
-//! |---|---|---|
-//! | Core abstraction | `Serializer` / `Deserializer` + `Visitor` | `Encoder` / `Decoder` + `nextdecode_into` |
-//! | Metadata | derive is fully expanded, no runtime shape | `const SCHEMA: TypeSchema` runtime-introspectable tree |
-//! | Deserialization | per-field `Visitor::visit_*` callbacks | direct nextdecode into a checked `DecodeSlot` |
-//! | Zero-copy | needs `#[serde(borrow)]` + care | parser returns `Cow::Borrowed` for unescaped strings |
+//! ```rust
+//! let expected = (7_u64, "NextJson", vec![1_i32, 2, 3]);
+//! let json = nextjson::nextencode(&expected)?;
+//! let actual: (u64, &str, Vec<i32>) = nextjson::nextdecode(&json)?;
+//! assert_eq!(actual, expected);
+//! # Ok::<(), nextjson::Error>(())
+//! ```
 //!
-//! ### Innovations
+//! ## Cross-format relay
 //!
-//! 1. **Visitor-free dual contract** — `NsonSerialize::nextencode` writes bytes
+//! ```rust
+//! use nextjson::cross_format;
+//!
+//! let source = br#"{"name":"NextJson","values":[1,2,3]}"#;
+//! let cbor = cross_format::json_to_cbor(source)?;
+//! let json = cross_format::cbor_to_json(&cbor)?;
+//! let value: nextjson::Value = nextjson::nextdecode(&json)?;
+//! assert_eq!(value["name"], nextjson::Value::from("NextJson"));
+//! # Ok::<(), nextjson::Error>(())
+//! ```
+//!
+//! ## Zero-copy boundary
+//!
+//! Unescaped JSON strings and definite-length CBOR text strings borrow their
+//! input ranges. Escaped JSON and indefinite-length CBOR text must materialize
+//! decoded UTF-8. Encoding always writes new output bytes. The library does not
+//! describe those required copies as zero-copy.
+//!
+//! ## Features
+//!
+//! - `std` (default): standard I/O adapters and standard-library integrations.
+//! - `derive` (default): repository-owned `NsonSerialize` and
+//!   `NsonDeserialize` procedural macros.
+//!
+//! Disabling default features leaves a `core + alloc` implementation. The
+//! complete workspace dependency graph contains only `nextjson` and the local,
+//! optional `nextjson-derive` crate.
+//!
+//! ## Architecture
+//!
+//! NextJson uses schema-driven derives, a unified token stream, checked decode
+//! slots, and a format-neutral [`cross_format::EventSink`] protocol. The whole
+//! workspace build graph contains only its two local crates.
+//!
+//! The following properties are implemented directly in this repository and
+//! are enforced by its tests and build configuration:
+//!
+//! 1. **Direct dual contract** - `NsonSerialize::nextencode` writes bytes
 //!    directly; `NsonDeserialize::nextdecode_into` decodes into a caller-provided
 //!    checked nextdecode slot, supporting memory reuse without a placeholder value.
-//! 2. **Compile-time schema** — every type carries `const SCHEMA: TypeSchema`,
+//! 2. **Compile-time schema** - every type carries `const SCHEMA: TypeSchema`,
 //!    a runtime-introspectable metadata tree (usable for JSON Schema generation,
-//!    validation, tooling), unlike serde's compiled-away derives.
-//! 3. **Unified token stream** — the byte-stream lexer and the content-replay
+//!    validation, and tooling).
+//! 3. **Unified token stream** - the byte-stream lexer and the content-replay
 //!    reader share identical nextdecode primitives, so internally-tagged,
 //!    adjacently-tagged, and untagged enums plus `Value` round-trips reuse one
 //!    engine.
-//! 4. **Lazy single-token lookahead** — the parser lexes one token at a time;
+//! 4. **Lazy single-token lookahead** - the parser lexes one token at a time;
 //!    unescaped strings borrow the input with zero allocation; integer parsing
 //!    is hand-rolled with overflow detection.
 //! 5. **Safety boundary** - the library is `#![deny(unsafe_code)]`, including
 //!    nextdecode slots and partial-initialization cleanup. `no_std` is fully
 //!    supported: the core uses only `core` + `alloc`, with `std`-only types
 //!    behind the `std` feature.
+//! 6. **Streaming cross-format relay** - JSON and the JSON-compatible CBOR
+//!    profile exchange borrowed structural events without an intermediate
+//!    [`Value`].
+//!
+//! ## Safety and resource limits
+//!
+//! This crate denies unsafe Rust. Decode slots use checked state, numeric
+//! conversions use checked arithmetic, and the default nesting limit is 128.
+//! Applications must still enforce total input bytes, collection sizes, CPU
+//! time, and output quotas. Reader APIs buffer their complete input.
+//!
+//! See the repository's [English README], [Chinese README], [safety model], and
+//! [benchmark protocol] for the complete supported surface and reproducibility
+//! requirements.
+//!
+//! [English README]: https://github.com/blueokanna/NextJson/blob/main/README.md
+//! [Chinese README]: https://github.com/blueokanna/NextJson/blob/main/README_CN.md
+//! [safety model]: https://github.com/blueokanna/NextJson/blob/main/docs/SAFETY.md
+//! [benchmark protocol]: https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -60,6 +119,7 @@ pub use crate::ser::NsonSerialize;
 pub use crate::value::Value;
 pub use crate::write::Write;
 
+pub mod cross_format;
 pub mod de;
 pub mod encoding;
 pub mod error;
@@ -70,8 +130,6 @@ mod number;
 pub mod private;
 mod schema;
 mod ser;
-#[cfg(feature = "serde")]
-pub mod serde_compat;
 mod value;
 mod write;
 
