@@ -19,20 +19,40 @@ env:
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
 
+x-checkout: &checkout
+  name: Checkout current revision
+  shell: bash
+  env:
+    REPOSITORY_TOKEN: ${{ github.token }}
+  run: |
+    set -euo pipefail
+    git init --initial-branch=main . 2>/dev/null || git init .
+    auth="$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)"
+    url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+    for attempt in 1 2 3 4 5; do
+      echo "::group::fetch attempt ${attempt}/5"
+      if git -c http.extraheader="AUTHORIZATION: basic ${auth}" \
+             -c http.version=HTTP/1.1 \
+             -c http.lowSpeedLimit=1000 \
+             -c http.lowSpeedTime=60 \
+             fetch --depth=1 "${url}" "${GITHUB_SHA}"; then
+        git checkout --detach FETCH_HEAD
+        echo "::endgroup::"
+        exit 0
+      fi
+      echo "::endgroup::"
+      echo "fetch failed (attempt ${attempt}/5); retrying in $((attempt * 5))s"
+      sleep "$((attempt * 5))"
+    done
+    echo "checkout failed after 5 attempts" >&2
+    exit 1
+
 jobs:
   dependency-audit:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Reject external lockfile sources
@@ -48,15 +68,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Check formatting
@@ -76,15 +88,7 @@ jobs:
           - name: no-std-derive
             args: -p nextjson --no-default-features --features derive
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component clippy
       - name: Run clippy
@@ -99,15 +103,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, 1.71.0]
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust ${{ matrix.rust }}
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
       - name: Run all tests
@@ -121,15 +117,7 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Build documentation
@@ -145,15 +133,7 @@ jobs:
     name: crates.io package verification
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Verify derive crate package
@@ -165,15 +145,7 @@ jobs:
     name: benchmark compile
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout current revision without external actions
-        shell: bash
-        env:
-          REPOSITORY_TOKEN: ${{ github.token }}
-        run: |
-          auth=$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64)
-          git init .
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          git checkout --detach FETCH_HEAD
+      - <<: *checkout
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Compile benchmark
