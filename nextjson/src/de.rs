@@ -276,9 +276,16 @@ impl<'de> BytesReader<'de> {
 
     /// Handle a string containing escapes; `start` is after the opening quote,
     /// `i` points at the first `\`.
-    fn unescape(&mut self, input: &[u8], start: usize, mut i: usize, scratch: &mut String) -> Result<String> {
+    fn unescape(
+        &mut self,
+        input: &[u8],
+        start: usize,
+        mut i: usize,
+        scratch: &mut String,
+    ) -> Result<String> {
         scratch.clear();
-        let seg = core::str::from_utf8(&input[start..i]).map_err(|_| self.err_at(ErrorKind::InvalidUtf8, i))?;
+        let seg = core::str::from_utf8(&input[start..i])
+            .map_err(|_| self.err_at(ErrorKind::InvalidUtf8, i))?;
         scratch.push_str(seg);
         while i < input.len() {
             let b = input[i];
@@ -308,7 +315,9 @@ impl<'de> BytesReader<'de> {
                                 let lo = parse_hex4(input, i + 7)
                                     .ok_or_else(|| self.err_at(ErrorKind::InvalidSurrogate, i))?;
                                 if (0xDC00..=0xDFFF).contains(&lo) {
-                                    let cp = 0x10000 + ((hi as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00);
+                                    let cp = 0x10000
+                                        + ((hi as u32 - 0xD800) << 10)
+                                        + (lo as u32 - 0xDC00);
                                     let c = char::from_u32(cp).expect("valid scalar value");
                                     let mut buf = [0u8; 4];
                                     scratch.push_str(c.encode_utf8(&mut buf));
@@ -399,7 +408,8 @@ impl<'de> BytesReader<'de> {
         }
         let raw = &input[start..i];
         self.pos = i;
-        let n = Number::parse(raw, is_float).map_err(|_| self.err_at(ErrorKind::InvalidNumber, start))?;
+        let n = Number::parse(raw, is_float)
+            .map_err(|_| self.err_at(ErrorKind::InvalidNumber, start))?;
         Ok(Token::Number(n))
     }
 
@@ -641,7 +651,10 @@ impl<'de> Decoder<'de> {
             Inner::Bytes(r) => r.pos,
             Inner::Tree(r) => r.pos,
         };
-        Mark { pos, depth: self.depth }
+        Mark {
+            pos,
+            depth: self.depth,
+        }
     }
 
     /// Restore a position saved with [`save`](Decoder::save).
@@ -1594,7 +1607,7 @@ mod tests {
     #[test]
     fn map_keys() {
         let mut d = Decoder::new(br#"{"1":"a","2":"b"}"#);
-        let m: std::collections::HashMap<i32, String> = NsonDeserialize::decode(&mut d).unwrap();
+        let m: alloc::collections::BTreeMap<i32, String> = NsonDeserialize::decode(&mut d).unwrap();
         assert_eq!(m.get(&1).unwrap(), "a");
         assert_eq!(m.get(&2).unwrap(), "b");
     }

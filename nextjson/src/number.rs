@@ -240,22 +240,38 @@ impl fmt::Debug for Number {
 
 impl From<i8> for Number {
     fn from(v: i8) -> Self {
-        if v < 0 { Number::I64(v as i64) } else { Number::U64(v as u64) }
+        if v < 0 {
+            Number::I64(v as i64)
+        } else {
+            Number::U64(v as u64)
+        }
     }
 }
 impl From<i16> for Number {
     fn from(v: i16) -> Self {
-        if v < 0 { Number::I64(v as i64) } else { Number::U64(v as u64) }
+        if v < 0 {
+            Number::I64(v as i64)
+        } else {
+            Number::U64(v as u64)
+        }
     }
 }
 impl From<i32> for Number {
     fn from(v: i32) -> Self {
-        if v < 0 { Number::I64(v as i64) } else { Number::U64(v as u64) }
+        if v < 0 {
+            Number::I64(v as i64)
+        } else {
+            Number::U64(v as u64)
+        }
     }
 }
 impl From<i64> for Number {
     fn from(v: i64) -> Self {
-        if v < 0 { Number::I64(v) } else { Number::U64(v as u64) }
+        if v < 0 {
+            Number::I64(v)
+        } else {
+            Number::U64(v as u64)
+        }
     }
 }
 impl From<i128> for Number {
@@ -273,13 +289,33 @@ impl From<i128> for Number {
 }
 impl From<isize> for Number {
     fn from(v: isize) -> Self {
-        if v < 0 { Number::I64(v as i64) } else { Number::U64(v as u64) }
+        if v < 0 {
+            Number::I64(v as i64)
+        } else {
+            Number::U64(v as u64)
+        }
     }
 }
-impl From<u8> for Number { fn from(v: u8) -> Self { Number::U64(v as u64) } }
-impl From<u16> for Number { fn from(v: u16) -> Self { Number::U64(v as u64) } }
-impl From<u32> for Number { fn from(v: u32) -> Self { Number::U64(v as u64) } }
-impl From<u64> for Number { fn from(v: u64) -> Self { Number::U64(v) } }
+impl From<u8> for Number {
+    fn from(v: u8) -> Self {
+        Number::U64(v as u64)
+    }
+}
+impl From<u16> for Number {
+    fn from(v: u16) -> Self {
+        Number::U64(v as u64)
+    }
+}
+impl From<u32> for Number {
+    fn from(v: u32) -> Self {
+        Number::U64(v as u64)
+    }
+}
+impl From<u64> for Number {
+    fn from(v: u64) -> Self {
+        Number::U64(v)
+    }
+}
 impl From<u128> for Number {
     fn from(v: u128) -> Self {
         if v <= u64::MAX as u128 {
@@ -289,9 +325,21 @@ impl From<u128> for Number {
         }
     }
 }
-impl From<usize> for Number { fn from(v: usize) -> Self { Number::U64(v as u64) } }
-impl From<f32> for Number { fn from(v: f32) -> Self { Number::F64(v as f64) } }
-impl From<f64> for Number { fn from(v: f64) -> Self { Number::F64(v) } }
+impl From<usize> for Number {
+    fn from(v: usize) -> Self {
+        Number::U64(v as u64)
+    }
+}
+impl From<f32> for Number {
+    fn from(v: f32) -> Self {
+        Number::F64(v as f64)
+    }
+}
+impl From<f64> for Number {
+    fn from(v: f64) -> Self {
+        Number::F64(v)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -302,15 +350,30 @@ mod tests {
         assert_eq!(Number::parse(b"0", false).unwrap(), Number::U64(0));
         assert_eq!(Number::parse(b"42", false).unwrap(), Number::U64(42));
         assert_eq!(Number::parse(b"-1", false).unwrap(), Number::I64(-1));
-        assert_eq!(Number::parse(b"9223372036854775807", false).unwrap(), Number::U64(9223372036854775807));
-        assert_eq!(Number::parse(b"-9223372036854775808", false).unwrap(), Number::I64(i64::MIN));
-        assert_eq!(Number::parse(b"18446744073709551615", false).unwrap(), Number::U64(u64::MAX));
+        assert_eq!(
+            Number::parse(b"9223372036854775807", false).unwrap(),
+            Number::U64(9223372036854775807)
+        );
+        assert_eq!(
+            Number::parse(b"-9223372036854775808", false).unwrap(),
+            Number::I64(i64::MIN)
+        );
+        assert_eq!(
+            Number::parse(b"18446744073709551615", false).unwrap(),
+            Number::U64(u64::MAX)
+        );
         assert_eq!(
             Number::parse(b"18446744073709551616", false).unwrap(),
             Number::U128(18_446_744_073_709_551_616)
         );
-        assert_eq!(Number::parse(b"-170141183460469231731687303715884105728", false).unwrap(), Number::I128(i128::MIN));
-        assert_eq!(Number::parse(b"340282366920938463463374607431768211455", false).unwrap(), Number::U128(u128::MAX));
+        assert_eq!(
+            Number::parse(b"-170141183460469231731687303715884105728", false).unwrap(),
+            Number::I128(i128::MIN)
+        );
+        assert_eq!(
+            Number::parse(b"340282366920938463463374607431768211455", false).unwrap(),
+            Number::U128(u128::MAX)
+        );
         assert!(Number::parse(b"340282366920938463463374607431768211456", false).is_err());
     }
 

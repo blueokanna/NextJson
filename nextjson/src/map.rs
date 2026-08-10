@@ -199,7 +199,10 @@ mod tests {
         let mut a = Map::new();
         a.insert("x".into(), 1.into());
         a.insert("y".into(), 2.into());
-        let b = Map::from_iter(vec![("x".to_string(), Value::Number(1.into())), ("y".to_string(), Value::Number(2.into()))]);
+        let b = Map::from_iter(vec![
+            ("x".to_string(), Value::Number(1.into())),
+            ("y".to_string(), Value::Number(2.into())),
+        ]);
         assert_eq!(a, b);
     }
 }

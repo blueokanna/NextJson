@@ -96,7 +96,10 @@ fn all_rust_integer_extremes_round_trip_losslessly() {
     for value in [0, u64::MAX as u128, u128::MAX] {
         let json = nextjson::to_string(&value).unwrap();
         assert_eq!(nextjson::from_str::<u128>(&json).unwrap(), value);
-        assert_eq!(nextjson::from_str::<Value>(&json).unwrap().as_u128(), Some(value));
+        assert_eq!(
+            nextjson::from_str::<Value>(&json).unwrap().as_u128(),
+            Some(value)
+        );
     }
 }
 
@@ -157,8 +160,7 @@ fn map_key_replay_handles_escapes_and_rejects_prefix_parses() {
     let map: std::collections::BTreeMap<String, u32> = nextjson::from_str(input).unwrap();
     assert_eq!(map.get("quote\"slash\\"), Some(&7));
 
-    let malformed_numeric_key = nextjson::from_str::<std::collections::BTreeMap<u32, u32>>(
-        r#"{"1x":7}"#,
-    );
+    let malformed_numeric_key =
+        nextjson::from_str::<std::collections::BTreeMap<u32, u32>>(r#"{"1x":7}"#);
     assert!(malformed_numeric_key.is_err());
 }

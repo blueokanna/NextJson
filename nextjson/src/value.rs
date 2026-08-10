@@ -330,9 +330,10 @@ mod tests {
 
     #[test]
     fn pointer_access() {
-        let mut v = Value::Object(Map::from_iter(vec![
-            ("a".to_string(), Value::Array(vec![Value::Number(10.into()), Value::Number(20.into())])),
-        ]));
+        let mut v = Value::Object(Map::from_iter(vec![(
+            "a".to_string(),
+            Value::Array(vec![Value::Number(10.into()), Value::Number(20.into())]),
+        )]));
         assert_eq!(v.pointer("/a/1"), Some(&Value::Number(20.into())));
         assert!(v.get_mut("a").is_some());
         assert!(v.pointer("/x").is_none());

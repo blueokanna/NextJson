@@ -83,8 +83,14 @@ fn fill_schema(schema: TypeSchema, obj: &mut Map) {
                 })
                 .collect();
             obj.insert("items".into(), Value::Array(arr));
-            obj.insert("minItems".into(), Value::Number(Number::U64(items.len() as u64)));
-            obj.insert("maxItems".into(), Value::Number(Number::U64(items.len() as u64)));
+            obj.insert(
+                "minItems".into(),
+                Value::Number(Number::U64(items.len() as u64)),
+            );
+            obj.insert(
+                "maxItems".into(),
+                Value::Number(Number::U64(items.len() as u64)),
+            );
         }
         TypeSchema::Struct(s) => {
             obj.insert("type".into(), Value::String("object".into()));
@@ -118,7 +124,10 @@ fn fill_schema(schema: TypeSchema, obj: &mut Map) {
                     })
                     .collect();
                 obj.insert("oneOf".into(), Value::Array(one_of));
-            } else if e.tag.is_none() && e.content.is_none() && e.variants.iter().all(|v| v.ty == TypeSchema::Unit) {
+            } else if e.tag.is_none()
+                && e.content.is_none()
+                && e.variants.iter().all(|v| v.ty == TypeSchema::Unit)
+            {
                 obj.insert("type".into(), Value::String("string".into()));
                 let enums: Vec<Value> = e
                     .variants

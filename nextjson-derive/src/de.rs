@@ -43,7 +43,10 @@ fn field_decode_expr(field: &crate::Field, fa: &FieldAttrs, cp: &str, decoder: &
     } else if let Some(m) = &fa.with {
         format!("{m}::deserialize({decoder})?")
     } else {
-        format!("<{} as {cp}::NsonDeserialize<'de>>::decode({decoder})?", field.ty)
+        format!(
+            "<{} as {cp}::NsonDeserialize<'de>>::decode({decoder})?",
+            field.ty
+        )
     }
 }
 
@@ -65,7 +68,9 @@ fn seen_decl(n: usize, cp: &str) -> (String, String, String) {
         )
     } else {
         (
-            format!("let mut __seen: {cp}::__private::Vec<bool> = {cp}::__private::vec![false; {n}];"),
+            format!(
+                "let mut __seen: {cp}::__private::Vec<bool> = {cp}::__private::vec![false; {n}];"
+            ),
             "__seen[{i}] = true;".to_string(),
             "__seen[{i}]".to_string(),
         )
@@ -99,7 +104,9 @@ pub(crate) fn deserialize_struct(
                 let field = &f[0];
                 let fa = attr::field_attrs(&field.attrs);
                 if fa.flatten {
-                    return crate::err_str("nextjson: `transparent` cannot be combined with `flatten`");
+                    return crate::err_str(
+                        "nextjson: `transparent` cannot be combined with `flatten`",
+                    );
                 }
                 let ident = field.ident.clone().unwrap_or_default();
                 let expr = field_decode_expr(field, &fa, cp, "__d");
@@ -185,7 +192,12 @@ pub(crate) fn deserialize_struct(
 }
 
 /// Key-match based object decoding.
-fn gen_match_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, decoder: &str) -> String {
+fn gen_match_decode(
+    fields: &[crate::Field],
+    ca: &ContainerAttrs,
+    cp: &str,
+    decoder: &str,
+) -> String {
     let deny = ca.deny_unknown_fields;
     let tracked: Vec<(usize, &crate::Field, FieldAttrs)> = fields
         .iter()
@@ -237,9 +249,12 @@ fn gen_match_decode(fields: &[crate::Field], ca: &ContainerAttrs, cp: &str, deco
     }
     c.l("_ => {");
     if deny {
-        c.l(&format!("return Err({cp}::Error::unknown_field(__key.into_owned()));"));
+        c.l(&format!(
+            "return Err({cp}::Error::unknown_field(__key.into_owned()));"
+        ));
+    } else {
+        c.l(&format!("{decoder}.skip_value()?;"));
     }
-    c.l(&format!("{decoder}.skip_value()?;"));
     c.l("}");
     c.l("}");
     c.l(&format!("if !{decoder}.object_entry_sep()? {{ break; }}"));
@@ -463,7 +478,8 @@ fn deserialize_external(
                 sub.out()
             }
             Fields::Named(f) => {
-                let constructed = gen_variant_struct_decode(&v.ident, f, ca, cp, "__d", has_flatten);
+                let constructed =
+                    gen_variant_struct_decode(&v.ident, f, ca, cp, "__d", has_flatten);
                 format!("__out.write({constructed});")
             }
         };
@@ -471,7 +487,9 @@ fn deserialize_external(
         c.l(&body);
         c.l("}");
     }
-    c.l(&format!("_ => return Err({cp}::Error::unknown_variant(__key.into_owned())),"));
+    c.l(&format!(
+        "_ => return Err({cp}::Error::unknown_variant(__key.into_owned())),"
+    ));
     c.l("}");
     c.l(&format!(
         "if __d.object_entry_sep()? {{ return Err({cp}::Error::custom(\"expected a single-variant enum object\")); }}"
@@ -489,7 +507,9 @@ fn deserialize_internal(
     has_flatten: bool,
 ) -> String {
     let mut c = Code::new();
-    c.l(&format!("let __entries = {cp}::private::read_object_map(__d)?;"));
+    c.l(&format!(
+        "let __entries = {cp}::private::read_object_map(__d)?;"
+    ));
     c.l(&format!(
         "let mut __tag: ::core::option::Option<{cp}::__private::String> = ::core::option::Option::None;"
     ));
@@ -535,7 +555,10 @@ fn deserialize_internal(
                     let fa = attr::field_attrs(&field.attrs);
                     if fa.skip_deserializing {
                         pats.push("_".to_string());
-                        names.push(format!("<{} as ::core::default::Default>::default()", field.ty));
+                        names.push(format!(
+                            "<{} as ::core::default::Default>::default()",
+                            field.ty
+                        ));
                     } else {
                         let id = format!("__v{i}");
                         pats.push(id.clone());
@@ -555,7 +578,8 @@ fn deserialize_internal(
                 )
             }
             Fields::Named(f) => {
-                let constructed = gen_variant_struct_decode(&v.ident, f, ca, cp, "__sub", has_flatten);
+                let constructed =
+                    gen_variant_struct_decode(&v.ident, f, ca, cp, "__sub", has_flatten);
                 format!(
                     "let __tokens = {cp}::private::tokens_to_object(__rest); \
                      let mut __sub = {cp}::private::from_tokens(__tokens); \
@@ -569,7 +593,9 @@ fn deserialize_internal(
         c.l(&body);
         c.l("}");
     }
-    c.l(&format!("_ => return Err({cp}::Error::unknown_variant(__tag)),"));
+    c.l(&format!(
+        "_ => return Err({cp}::Error::unknown_variant(__tag)),"
+    ));
     c.l("}");
     c.l("::core::result::Result::Ok(())");
     c.out()
@@ -584,7 +610,9 @@ fn deserialize_adjacent(
     has_flatten: bool,
 ) -> String {
     let mut c = Code::new();
-    c.l(&format!("let __entries = {cp}::private::read_object_map(__d)?;"));
+    c.l(&format!(
+        "let __entries = {cp}::private::read_object_map(__d)?;"
+    ));
     c.l(&format!(
         "let mut __tag: ::core::option::Option<{cp}::__private::String> = ::core::option::Option::None;"
     ));
@@ -670,7 +698,9 @@ fn deserialize_adjacent(
         c.l(&body);
         c.l("}");
     }
-    c.l(&format!("_ => return Err({cp}::Error::unknown_variant(__tag)),"));
+    c.l(&format!(
+        "_ => return Err({cp}::Error::unknown_variant(__tag)),"
+    ));
     c.l("}");
     c.l("::core::result::Result::Ok(())");
     c.out()
@@ -695,7 +725,10 @@ fn deserialize_untagged(
                 let field = &f[0];
                 let fa = attr::field_attrs(&field.attrs);
                 let expr = field_decode_expr(field, &fa, cp, "__d");
-                format!("let __v = {expr}; ::core::result::Result::Ok(Self::{}(__v))", v.ident)
+                format!(
+                    "let __v = {expr}; ::core::result::Result::Ok(Self::{}(__v))",
+                    v.ident
+                )
             }
             Fields::Unnamed(f) => {
                 let tys: Vec<String> = f.iter().map(|x| x.ty.clone()).collect();
@@ -705,7 +738,10 @@ fn deserialize_untagged(
                     let fa = attr::field_attrs(&field.attrs);
                     if fa.skip_deserializing {
                         pats.push("_".to_string());
-                        names.push(format!("<{} as ::core::default::Default>::default()", field.ty));
+                        names.push(format!(
+                            "<{} as ::core::default::Default>::default()",
+                            field.ty
+                        ));
                     } else {
                         let id = format!("__v{i}");
                         pats.push(id.clone());
@@ -722,7 +758,8 @@ fn deserialize_untagged(
                 )
             }
             Fields::Named(f) => {
-                let constructed = gen_variant_struct_decode(&v.ident, f, ca, cp, "__d", has_flatten);
+                let constructed =
+                    gen_variant_struct_decode(&v.ident, f, ca, cp, "__d", has_flatten);
                 format!("let __v = {constructed}; ::core::result::Result::Ok(__v)")
             }
         };

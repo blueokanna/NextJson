@@ -62,10 +62,8 @@ fn rename_and_rename_all() {
         to_string(&u).unwrap(),
         r#"{"firstName":"Ada","lastName":"Lovelace","emailAddr":"ada@x.com"}"#
     );
-    let back: User = from_str(
-        r#"{"firstName":"Ada","lastName":"Lovelace","emailAddr":"ada@x.com"}"#,
-    )
-    .unwrap();
+    let back: User =
+        from_str(r#"{"firstName":"Ada","lastName":"Lovelace","emailAddr":"ada@x.com"}"#).unwrap();
     assert_eq!(back, u);
 }
 
@@ -146,7 +144,13 @@ fn container_default() {
         b: String,
     }
     let back: S = from_str(r#"{"a":5}"#).unwrap();
-    assert_eq!(back, S { a: 5, b: String::new() });
+    assert_eq!(
+        back,
+        S {
+            a: 5,
+            b: String::new()
+        }
+    );
 }
 
 #[test]
@@ -161,7 +165,13 @@ fn option_field_is_optional() {
     let back: S = from_str(r#"{"a":1,"b":null}"#).unwrap();
     assert_eq!(back, S { a: 1, b: None });
     let back: S = from_str(r#"{"a":1,"b":"x"}"#).unwrap();
-    assert_eq!(back, S { a: 1, b: Some("x".into()) });
+    assert_eq!(
+        back,
+        S {
+            a: 1,
+            b: Some("x".into())
+        }
+    );
 }
 
 #[test]
@@ -248,7 +258,10 @@ fn with_module() {
 
 #[test]
 fn serialize_with_and_deserialize_with() {
-    fn ser_double(v: &i32, e: &mut nextjson::Encoder<impl nextjson::Write>) -> nextjson::Result<()> {
+    fn ser_double(
+        v: &i32,
+        e: &mut nextjson::Encoder<impl nextjson::Write>,
+    ) -> nextjson::Result<()> {
         e.write_i64(*v as i64 * 2)
     }
     fn de_half(d: &mut nextjson::Decoder) -> nextjson::Result<i32> {
@@ -282,10 +295,7 @@ fn flatten_struct() {
         name: "n".into(),
         inner: Inner { x: 1, y: 2 },
     };
-    assert_eq!(
-        to_string(&o).unwrap(),
-        r#"{"name":"n","x":1,"y":2}"#
-    );
+    assert_eq!(to_string(&o).unwrap(), r#"{"name":"n","x":1,"y":2}"#);
     let back: Outer = from_str(r#"{"y":2,"name":"n","x":1}"#).unwrap();
     assert_eq!(back, o);
 }
@@ -390,9 +400,7 @@ fn nested_containers() {
     }
     let r = Root {
         items: vec![Some(vec![1, 2]), None, Some(vec![])],
-        table: std::collections::BTreeMap::from([
-            ("k".to_string(), vec![(1, true), (2, false)]),
-        ]),
+        table: std::collections::BTreeMap::from([("k".to_string(), vec![(1, true), (2, false)])]),
     };
     let text = to_string(&r).unwrap();
     let back: Root = from_str(&text).unwrap();

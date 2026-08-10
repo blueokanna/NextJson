@@ -21,9 +21,8 @@ pub(crate) use attr::{ContainerAttrs, FieldAttrs, VariantAttrs};
 /// Parse a string into a TokenStream.
 /// Parse a string into a TokenStream.
 pub(crate) fn ts(s: &str) -> TokenStream {
-    TokenStream::from_str(s).unwrap_or_else(|e| {
-        panic!("nextjson-derive: invalid generated tokens: {e:?}")
-    })
+    TokenStream::from_str(s)
+        .unwrap_or_else(|e| panic!("nextjson-derive: invalid generated tokens: {e:?}"))
 }
 
 /// Build a `compile_error!` expansion from a message.
@@ -524,7 +523,10 @@ pub(crate) fn build_generics(
                 continue;
             }
             if de && has_flatten {
-                v.push(format!("{0}: for<'__n> {1}::NsonDeserialize<'__n>", p.name, cp));
+                v.push(format!(
+                    "{0}: for<'__n> {1}::NsonDeserialize<'__n>",
+                    p.name, cp
+                ));
             } else if de {
                 v.push(format!("{}: {}::NsonDeserialize<'de>", p.name, cp));
             } else {
@@ -606,15 +608,23 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
 
 fn type_has_flag<F: Fn(&FieldAttrs) -> bool>(input: &Input, f: F) -> bool {
     match &input.data {
-        Data::Struct(fields) => fields.iter().iter().any(|fld| f(&attr::field_attrs(&fld.attrs))),
-        Data::Enum(variants) => variants
+        Data::Struct(fields) => fields
             .iter()
-            .any(|v| v.fields.iter().iter().any(|fld| f(&attr::field_attrs(&fld.attrs)))),
+            .iter()
+            .any(|fld| f(&attr::field_attrs(&fld.attrs))),
+        Data::Enum(variants) => variants.iter().any(|v| {
+            v.fields
+                .iter()
+                .iter()
+                .any(|fld| f(&attr::field_attrs(&fld.attrs)))
+        }),
     }
 }
 
 fn type_has_with(input: &Input) -> bool {
-    type_has_flag(input, |fa| fa.with.is_some() || fa.deserialize_with.is_some())
+    type_has_flag(input, |fa| {
+        fa.with.is_some() || fa.deserialize_with.is_some()
+    })
 }
 
 /// Build a `proc_macro::Ident` (kept for API symmetry).

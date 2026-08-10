@@ -246,7 +246,8 @@ impl<W: Write> Encoder<W> {
 
     /// Write a boolean.
     pub fn write_bool(&mut self, v: bool) -> Result<()> {
-        self.buf.extend_from_slice(if v { b"true" } else { b"false" });
+        self.buf
+            .extend_from_slice(if v { b"true" } else { b"false" });
         self.maybe_flush()
     }
 
@@ -399,7 +400,10 @@ struct StackBuf {
 
 impl StackBuf {
     fn new() -> Self {
-        StackBuf { data: [0u8; 64], len: 0 }
+        StackBuf {
+            data: [0u8; 64],
+            len: 0,
+        }
     }
     fn as_str(&self) -> &str {
         core::str::from_utf8(&self.data[..self.len]).expect("valid utf-8")
@@ -604,8 +608,16 @@ impl<T: NsonSerialize, E: NsonSerialize> NsonSchema for core::result::Result<T, 
         untagged: false,
         default_tag: "type",
         variants: &[
-            crate::schema::VariantSchema { name: "Ok", orig: "Ok", ty: T::SCHEMA },
-            crate::schema::VariantSchema { name: "Err", orig: "Err", ty: E::SCHEMA },
+            crate::schema::VariantSchema {
+                name: "Ok",
+                orig: "Ok",
+                ty: T::SCHEMA,
+            },
+            crate::schema::VariantSchema {
+                name: "Err",
+                orig: "Err",
+                ty: E::SCHEMA,
+            },
         ],
     });
 }
@@ -1090,7 +1102,8 @@ mod tests {
 
     #[test]
     fn escape_non_ascii() {
-        let mut e = Encoder::with_config(Vec::new(), EncodeConfig::default().escape_non_ascii(true));
+        let mut e =
+            Encoder::with_config(Vec::new(), EncodeConfig::default().escape_non_ascii(true));
         e.write_str("\u{e9}\u{1f4a9}").unwrap();
         let out = e.finish().unwrap();
         assert_eq!(out, b"\"\\u00e9\\ud83d\\udca9\"");

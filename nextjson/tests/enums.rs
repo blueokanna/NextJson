@@ -1,6 +1,6 @@
 //! 派生宏：枚举的四种标签模式集成测试。
 
-use nextjson::{from_str, to_string, Number, NsonDeserialize, NsonSerialize, Value};
+use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, Number, Value};
 
 // ---------------------------------------------------------------------------
 // 外部标签（默认）
@@ -43,7 +43,10 @@ fn external_tuple_variant() {
     enum Event {
         Point(i32, i32),
     }
-    assert_eq!(to_string(&Event::Point(1, 2)).unwrap(), r#"{"Point":[1,2]}"#);
+    assert_eq!(
+        to_string(&Event::Point(1, 2)).unwrap(),
+        r#"{"Point":[1,2]}"#
+    );
     let back: Event = from_str(r#"{"Point":[1,2]}"#).unwrap();
     assert_eq!(back, Event::Point(1, 2));
     // 元素数量不符报错。
@@ -90,11 +93,10 @@ fn internally_tagged() {
         Hello { name: String },
         Bye,
     }
-    let m = Msg::Hello { name: "alice".into() };
-    assert_eq!(
-        to_string(&m).unwrap(),
-        r#"{"kind":"Hello","name":"alice"}"#
-    );
+    let m = Msg::Hello {
+        name: "alice".into(),
+    };
+    assert_eq!(to_string(&m).unwrap(), r#"{"kind":"Hello","name":"alice"}"#);
     let back: Msg = from_str(r#"{"name":"bob","kind":"Hello"}"#).unwrap();
     assert_eq!(back, Msg::Hello { name: "bob".into() });
 
@@ -140,10 +142,7 @@ fn adjacently_tagged() {
     assert_eq!(back, Op::Add(3, 4));
 
     let n = Op::Named { id: "x".into() };
-    assert_eq!(
-        to_string(&n).unwrap(),
-        r#"{"t":"Named","c":{"id":"x"}}"#
-    );
+    assert_eq!(to_string(&n).unwrap(), r#"{"t":"Named","c":{"id":"x"}}"#);
     let back: Op = from_str(r#"{"t":"Named","c":{"id":"y"}}"#).unwrap();
     assert_eq!(back, Op::Named { id: "y".into() });
 
@@ -176,7 +175,10 @@ fn untagged() {
     assert_eq!(from_str::<Value>("2.5").unwrap(), Value::Num(2.5));
 
     assert_eq!(to_string(&Value::Text("hi".into())).unwrap(), r#""hi""#);
-    assert_eq!(from_str::<Value>(r#""yo""#).unwrap(), Value::Text("yo".into()));
+    assert_eq!(
+        from_str::<Value>(r#""yo""#).unwrap(),
+        Value::Text("yo".into())
+    );
 
     assert_eq!(to_string(&Value::Flag(true)).unwrap(), "true");
     assert_eq!(from_str::<Value>("false").unwrap(), Value::Flag(false));
@@ -186,7 +188,10 @@ fn untagged() {
 
     let o = Value::Obj { x: 7 };
     assert_eq!(to_string(&o).unwrap(), r#"{"x":7}"#);
-    assert_eq!(from_str::<Value>(r#"{"x":9}"#).unwrap(), Value::Obj { x: 9 });
+    assert_eq!(
+        from_str::<Value>(r#"{"x":9}"#).unwrap(),
+        Value::Obj { x: 9 }
+    );
 
     // 全都不匹配报错。
     assert!(from_str::<Value>("null").is_err());
@@ -225,10 +230,7 @@ fn generic_enum() {
         right: Box::new(Tree::Leaf(2)),
     };
     let text = to_string(&t).unwrap();
-    assert_eq!(
-        text,
-        r#"{"Node":{"left":{"Leaf":1},"right":{"Leaf":2}}}"#
-    );
+    assert_eq!(text, r#"{"Node":{"left":{"Leaf":1},"right":{"Leaf":2}}}"#);
     let back: Tree<i32> = from_str(&text).unwrap();
     assert_eq!(back, t);
 }
@@ -276,10 +278,16 @@ fn schema_of_works() {
     assert_eq!(s.name(), "Person");
     let json_schema = nextjson::to_json_schema::<Person>();
     assert_eq!(json_schema["type"], "object".into());
-    assert_eq!(json_schema["properties"]["firstName"]["type"], "string".into());
+    assert_eq!(
+        json_schema["properties"]["firstName"]["type"],
+        "string".into()
+    );
     assert_eq!(json_schema["properties"]["age"]["type"], "integer".into());
     assert_eq!(json_schema["properties"]["tags"]["type"], "array".into());
-    assert_eq!(json_schema["properties"]["active"]["type"], "boolean".into());
+    assert_eq!(
+        json_schema["properties"]["active"]["type"],
+        "boolean".into()
+    );
 }
 
 #[test]

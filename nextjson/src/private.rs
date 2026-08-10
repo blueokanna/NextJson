@@ -15,7 +15,10 @@ use crate::ser::NsonSerialize;
 use crate::value::Value;
 use crate::write::Write;
 
-pub use crate::de::{Decoder as DecoderReexport, NsonDeserialize as NsonDeserializeReexport, Token, Token as TokenReexport};
+pub use crate::de::{
+    Decoder as DecoderReexport, NsonDeserialize as NsonDeserializeReexport, Token,
+    Token as TokenReexport,
+};
 pub use crate::encode::Encoder as EncoderReexport;
 pub use crate::ser::NsonSerialize as NsonSerializeReexport;
 
@@ -62,7 +65,10 @@ impl<T> InitSlot<T> {
     /// # Panics
     /// Panics if the generated decoder did not initialize this field.
     pub fn take(&mut self) -> T {
-        assert!(self.initialized, "nextjson derive: uninitialized field slot");
+        assert!(
+            self.initialized,
+            "nextjson derive: uninitialized field slot"
+        );
         self.initialized = false;
         // SAFETY: the flag is set only after `write` or a successful
         // `decode_into`, both of which fully initialize `value`.
@@ -119,7 +125,9 @@ pub fn read_object_map<'de>(
 }
 
 /// Spliced an entry list into an object token stream.
-pub fn tokens_to_object<'de>(mut entries: Vec<(Cow<'de, str>, Vec<Token<'de>>)>) -> Vec<Token<'de>> {
+pub fn tokens_to_object<'de>(
+    mut entries: Vec<(Cow<'de, str>, Vec<Token<'de>>)>,
+) -> Vec<Token<'de>> {
     let mut out = Vec::with_capacity(entries.len() * 2 + 2);
     out.push(Token::BeginObject);
     for (k, v) in entries.drain(..) {
@@ -134,7 +142,10 @@ pub fn tokens_to_object<'de>(mut entries: Vec<(Cow<'de, str>, Vec<Token<'de>>)>)
 pub fn token_to_string<'de>(tokens: &[Token<'de>]) -> Result<String> {
     match tokens {
         [Token::Str(s)] => Ok(s.to_string()),
-        _ => Err(crate::error::Error::invalid_type("a string", "a non-string value")),
+        _ => Err(crate::error::Error::invalid_type(
+            "a string",
+            "a non-string value",
+        )),
     }
 }
 
@@ -201,21 +212,24 @@ pub fn write_tagged_object<W: Write>(
     }
 }
 
-pub use crate::map::Map as MapReexport;
-pub use crate::value::Value as ValueReexport;
 pub use crate::error::Error as ErrorReexport;
 pub use crate::error::Result as ResultReexport;
+pub use crate::map::Map as MapReexport;
+pub use crate::value::Value as ValueReexport;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
     use crate::map::Map;
+    use alloc::vec;
 
     #[test]
     fn value_tokens_roundtrip() {
         let v = Value::Object(Map::from_iter(vec![
-            ("a".to_string(), Value::Array(vec![Value::Number(1.into()), Value::Null])),
+            (
+                "a".to_string(),
+                Value::Array(vec![Value::Number(1.into()), Value::Null]),
+            ),
             ("b".to_string(), Value::Bool(true)),
         ]));
         let tokens = value_to_tokens(&v);

@@ -12,7 +12,10 @@ fn to_string_and_from_str() {
         ("a".to_string(), Value::Number(1.into())),
         ("b".to_string(), Value::Bool(true)),
         ("c".to_string(), Value::Null),
-        ("d".to_string(), Value::Array(vec![Value::String("x".into())])),
+        (
+            "d".to_string(),
+            Value::Array(vec![Value::String("x".into())]),
+        ),
     ]));
     let text = nextjson::to_string(&v).unwrap();
     assert_eq!(text, r#"{"a":1,"b":true,"c":null,"d":["x"]}"#);
@@ -241,7 +244,10 @@ fn misc_types_roundtrip() {
 
     let r: std::ops::Range<i32> = 1..5;
     assert_eq!(nextjson::to_string(&r).unwrap(), "[1,5]");
-    assert_eq!(nextjson::from_str::<std::ops::Range<i32>>("[1,5]").unwrap(), r);
+    assert_eq!(
+        nextjson::from_str::<std::ops::Range<i32>>("[1,5]").unwrap(),
+        r
+    );
 
     let res: Result<i32, String> = Ok(7);
     assert_eq!(nextjson::to_string(&res).unwrap(), r#"{"Ok":7}"#);

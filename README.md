@@ -7,6 +7,10 @@
   <em>Not a serde clone — a fresh design: visitor-free, compile-time Schema, unified token stream</em>
 </p>
 
+<p align="center">
+  <a href="https://github.com/blueokanna/NextJson/actions/workflows/ci.yml"><img src="https://github.com/blueokanna/NextJson/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
+</p>
+
 ---
 
 ## 📋 目录 / Table of Contents
@@ -15,6 +19,7 @@
 - [核心创新 / Core Innovations](#-核心创新--core-innovations)
 - [快速开始 / Quick Start](#-快速开始--quick-start)
 - [架构 / Architecture](#-架构--architecture)
+- [持续集成 / Continuous Integration](#-持续集成--continuous-integration)
 - [派生宏属性参考 / Derive Attribute Reference](#-派生宏属性参考--derive-attribute-reference)
 - [性能与安全 / Performance & Safety](#-性能与安全--performance--safety)
 - [与 serde_json 对比 / Comparison with serde_json](#-与-serde_json-对比--comparison-with-serde_json)
@@ -218,6 +223,33 @@ nextjson/
 │   └── private.rs      # 派生宏运行时助手（doc(hidden)）
 └── tests/              # 集成、故障注入与零拷贝测试 / Integration, fault-injection, and zero-copy tests
 ```
+
+---
+
+## 🤖 持续集成 / Continuous Integration
+
+每次 `push` / `pull_request` 由 `.github/workflows/ci.yml` 自动执行四道质量门，全部失败即阻断合并。工作流只用**官方 actions**（`actions/checkout`、`actions/cache`），与库本身一样不引入任何第三方依赖。
+
+| 作业 / Job | 检查内容 / What it checks |
+|---|---|
+| `fmt` | `rustfmt --check`：任何格式漂移立即失败 / fails on any formatting drift |
+| `clippy` | 全特性（`--all-features`）与纯 no_std（`--no-default-features`）两种配置下 `clippy -D warnings` |
+| `test` | **stable + MSRV 1.70** × **Ubuntu / Windows / macOS** 矩阵：全特性测试、no_std 单元测试、release 构建 |
+| `docs` | `RUSTDOCFLAGS="-D warnings"` 下 `cargo doc`（含 `missing_docs` 强制） |
+
+本地复现任一作业 / Reproduce any job locally:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy -p nextjson --no-default-features -- -D warnings
+cargo test --workspace --all-features
+cargo test -p nextjson --no-default-features --lib
+cargo build --release --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+```
+
+MSRV 说明：`rust-version = "1.70"` 由 CI 矩阵中的 `1.70.0` 工具链实际编译验证；`Cargo.lock` 固定为 v3 格式，以便 1.70 的 Cargo 读取。
 
 ---
 

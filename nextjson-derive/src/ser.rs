@@ -47,7 +47,9 @@ pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &
                 let field = &f[0];
                 let fa = attr::field_attrs(&field.attrs);
                 if fa.flatten {
-                    return crate::err_str("nextjson: `transparent` cannot be combined with `flatten`");
+                    return crate::err_str(
+                        "nextjson: `transparent` cannot be combined with `flatten`",
+                    );
                 }
                 c.l(&field_ser_call(field, &fa, cp));
                 c.l("::core::result::Result::Ok(())");
@@ -124,7 +126,10 @@ fn field_ser_call(field: &crate::Field, fa: &FieldAttrs, cp: &str) -> String {
     } else if let Some(m) = &fa.with {
         format!("{m}::serialize(&self.{ident}, __e)?;")
     } else {
-        format!("<{} as {cp}::NsonSerialize>::encode(&self.{ident}, __e)?;", field.ty)
+        format!(
+            "<{} as {cp}::NsonSerialize>::encode(&self.{ident}, __e)?;",
+            field.ty
+        )
     }
 }
 
@@ -134,7 +139,10 @@ fn field_ser_call_indexed(field: &crate::Field, i: usize, fa: &FieldAttrs, cp: &
     } else if let Some(m) = &fa.with {
         format!("{m}::serialize(&self.{i}, __e)?;")
     } else {
-        format!("<{} as {cp}::NsonSerialize>::encode(&self.{i}, __e)?;", field.ty)
+        format!(
+            "<{} as {cp}::NsonSerialize>::encode(&self.{i}, __e)?;",
+            field.ty
+        )
     }
 }
 
@@ -142,7 +150,12 @@ fn field_ser_call_indexed(field: &crate::Field, i: usize, fa: &FieldAttrs, cp: &
 // Enums
 // ---------------------------------------------------------------------------
 
-pub(crate) fn serialize_enum(name: &str, variants: &[crate::Variant], input: &Input, cp: &str) -> String {
+pub(crate) fn serialize_enum(
+    name: &str,
+    variants: &[crate::Variant],
+    input: &Input,
+    cp: &str,
+) -> String {
     let ca = &input.cattr;
     let _ = name;
     if ca.transparent {
@@ -179,7 +192,13 @@ enum Mode<'a> {
     Untagged,
 }
 
-fn enum_arms(c: &mut Code, variants: &[crate::Variant], mode: &Mode, ca: &ContainerAttrs, cp: &str) {
+fn enum_arms(
+    c: &mut Code,
+    variants: &[crate::Variant],
+    mode: &Mode,
+    ca: &ContainerAttrs,
+    cp: &str,
+) {
     c.l("match self {");
     for v in variants {
         let va = attr::variant_attrs(&v.attrs);
@@ -216,7 +235,13 @@ fn variant_pat(fields: &Fields, ident: &str) -> String {
     }
 }
 
-fn variant_body(fields: &Fields, vname: &str, mode: &Mode, ca: &ContainerAttrs, cp: &str) -> String {
+fn variant_body(
+    fields: &Fields,
+    vname: &str,
+    mode: &Mode,
+    ca: &ContainerAttrs,
+    cp: &str,
+) -> String {
     match mode {
         Mode::External => external_body(fields, vname, ca, cp),
         Mode::Internal { tag } => internal_body(fields, vname, tag, ca, cp),
@@ -262,7 +287,9 @@ fn content_write(c: &mut Code, fields: &Fields, ca: &ContainerAttrs, cp: &str) {
                 let key = crate::schema::renamed_field(field, &fa, ca);
                 let call = variant_field_call(field, &fa, &ident, cp);
                 if let Some(pred) = &fa.skip_serializing_if {
-                    c.l(&format!("if !({pred})({ident}) {{ __e.key({key:?})?; {call} }}"));
+                    c.l(&format!(
+                        "if !({pred})({ident}) {{ __e.key({key:?})?; {call} }}"
+                    ));
                 } else {
                     c.l(&format!("__e.key({key:?})?;"));
                     c.l(&call);

@@ -21,7 +21,10 @@ pub struct Error {
 #[derive(Debug, Clone)]
 pub(crate) enum ErrorKind {
     Eof,
-    Expected { what: &'static str, found: Option<u8> },
+    Expected {
+        what: &'static str,
+        found: Option<u8>,
+    },
     InvalidNumber,
     NumberOutOfRange,
     ControlCharInString,
@@ -32,15 +35,31 @@ pub(crate) enum ErrorKind {
     UnknownField(String),
     MissingField(&'static str),
     UnknownVariant(String),
-    InvalidType { expected: &'static str, found: &'static str },
-    InvalidLength { len: usize, expected: &'static str },
+    InvalidType {
+        expected: &'static str,
+        found: &'static str,
+    },
+    InvalidLength {
+        len: usize,
+        expected: &'static str,
+    },
     NonFiniteFloat,
     Custom(String),
 }
 
 impl Error {
-    pub(crate) fn new(kind: ErrorKind, line: Option<u32>, column: Option<u32>, offset: usize) -> Self {
-        Error { kind, line, column, offset }
+    pub(crate) fn new(
+        kind: ErrorKind,
+        line: Option<u32>,
+        column: Option<u32>,
+        offset: usize,
+    ) -> Self {
+        Error {
+            kind,
+            line,
+            column,
+            offset,
+        }
     }
 
     /// Build a custom error for user code.
@@ -127,16 +146,25 @@ impl fmt::Display for Error {
         match &self.kind {
             ErrorKind::Eof => write!(f, "unexpected end of input"),
             ErrorKind::Expected { what, found } => match found {
-                Some(b) => write!(f, "expected {what}, found byte 0x{b:02x} ('{}')", *b as char),
+                Some(b) => write!(
+                    f,
+                    "expected {what}, found byte 0x{b:02x} ('{}')",
+                    *b as char
+                ),
                 None => write!(f, "expected {what}, found end of input"),
             },
             ErrorKind::InvalidNumber => write!(f, "invalid number"),
             ErrorKind::NumberOutOfRange => write!(f, "number out of range"),
             ErrorKind::ControlCharInString => {
-                write!(f, "control character (\\u0000-\\u001F) must be escaped in JSON string")
+                write!(
+                    f,
+                    "control character (\\u0000-\\u001F) must be escaped in JSON string"
+                )
             }
             ErrorKind::InvalidEscape(c) => write!(f, "invalid escape sequence '\\{c}'"),
-            ErrorKind::InvalidSurrogate => write!(f, "lone or invalid surrogate pair in \\u escape"),
+            ErrorKind::InvalidSurrogate => {
+                write!(f, "lone or invalid surrogate pair in \\u escape")
+            }
             ErrorKind::InvalidUtf8 => write!(f, "invalid utf-8 sequence in string"),
             ErrorKind::RecursionLimitExceeded => write!(f, "recursion limit exceeded"),
             ErrorKind::UnknownField(field) => write!(f, "unknown field `{field}`"),
@@ -149,7 +177,10 @@ impl fmt::Display for Error {
                 write!(f, "invalid length {len}, expected {expected}")
             }
             ErrorKind::NonFiniteFloat => {
-                write!(f, "floating point value cannot be represented as JSON (NaN or infinity)")
+                write!(
+                    f,
+                    "floating point value cannot be represented as JSON (NaN or infinity)"
+                )
             }
             ErrorKind::Custom(msg) => write!(f, "{msg}"),
         }?;

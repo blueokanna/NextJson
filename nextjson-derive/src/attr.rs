@@ -1,6 +1,6 @@
 //! Attribute (`#[njson(...)]`) parsing.
 
-use crate::{P, join, split_top};
+use crate::{join, split_top, P};
 use proc_macro::{Delimiter, TokenTree};
 
 /// A single `name = value` or bare `name` item inside `#[njson(...)]`.
@@ -178,7 +178,8 @@ pub(crate) fn field_attrs(metas: &[Meta]) -> FieldAttrs {
 }
 
 fn path_of(m: &Meta) -> Option<String> {
-    m.value().map(|v| unquote(v).unwrap_or_else(|| v.to_string()))
+    m.value()
+        .map(|v| unquote(v).unwrap_or_else(|| v.to_string()))
 }
 
 /// Variant-level attributes.

@@ -1,7 +1,7 @@
 //! Codegen for the `const SCHEMA: TypeSchema` expression.
 
-use crate::{Data, Fields, Input};
 use crate::attr::{self, ContainerAttrs, FieldAttrs};
+use crate::{Data, Fields, Input};
 
 /// Generate the schema constant expression for a type.
 pub(crate) fn schema_expr(input: &Input, cp: &str) -> String {
@@ -44,12 +44,7 @@ fn struct_schema(fields: &Fields, ca: &ContainerAttrs, cp: &str, name: &str) -> 
     }
 }
 
-fn enum_schema(
-    variants: &[crate::Variant],
-    ca: &ContainerAttrs,
-    cp: &str,
-    name: &str,
-) -> String {
+fn enum_schema(variants: &[crate::Variant], ca: &ContainerAttrs, cp: &str, name: &str) -> String {
     let items: Vec<String> = variants
         .iter()
         .map(|v| {
@@ -90,9 +85,7 @@ fn variant_type_schema(
 ) -> String {
     match &v.fields {
         Fields::Unit => format!("{cp}::TypeSchema::Unit"),
-        Fields::Unnamed(f) if f.len() == 1 => {
-            field_type_schema(&f[0].ty, va.skip_serializing, cp)
-        }
+        Fields::Unnamed(f) if f.len() == 1 => field_type_schema(&f[0].ty, va.skip_serializing, cp),
         Fields::Unnamed(f) => {
             let items: Vec<String> = f
                 .iter()
@@ -117,13 +110,16 @@ fn variant_type_schema(
     }
 }
 
-fn field_schema_tokens(field: &crate::Field, fa: &FieldAttrs, ca: &ContainerAttrs, cp: &str) -> String {
+fn field_schema_tokens(
+    field: &crate::Field,
+    fa: &FieldAttrs,
+    ca: &ContainerAttrs,
+    cp: &str,
+) -> String {
     let orig = field.ident.clone().unwrap_or_default();
     let serialized = renamed_field(field, fa, ca);
-    let required = !ca.default
-        && !fa.has_default()
-        && !fa.skip_deserializing
-        && !is_option_type(&field.ty);
+    let required =
+        !ca.default && !fa.has_default() && !fa.skip_deserializing && !is_option_type(&field.ty);
     let flattened = fa.flatten;
     let ty = field_type_schema(&field.ty, fa.skip_serializing, cp);
     format!(
@@ -145,7 +141,11 @@ pub(crate) fn renamed_field(field: &crate::Field, fa: &FieldAttrs, ca: &Containe
 }
 
 /// The serialized name of a variant.
-pub(crate) fn renamed_variant(v: &crate::Variant, va: &crate::VariantAttrs, ca: &ContainerAttrs) -> String {
+pub(crate) fn renamed_variant(
+    v: &crate::Variant,
+    va: &crate::VariantAttrs,
+    ca: &ContainerAttrs,
+) -> String {
     if let Some(r) = &va.rename {
         return r.clone();
     }
@@ -160,7 +160,9 @@ pub(crate) fn renamed_variant(v: &crate::Variant, va: &crate::VariantAttrs, ca: 
 /// Whether a type is `Option<...>`.
 pub(crate) fn is_option_type(ty: &str) -> bool {
     let t = ty.trim();
-    t.starts_with("Option") || t.starts_with("::core::option::Option") || t.starts_with("core::option::Option")
+    t.starts_with("Option")
+        || t.starts_with("::core::option::Option")
+        || t.starts_with("core::option::Option")
 }
 
 /// Schema expression for a field type.
@@ -168,8 +170,7 @@ pub(crate) fn field_type_schema(ty: &str, skipped: bool, cp: &str) -> String {
     if skipped {
         return format!("{cp}::TypeSchema::Opaque");
     }
-    known_type_schema(ty, cp)
-        .unwrap_or_else(|| format!("<{ty} as {cp}::NsonSchema>::SCHEMA"))
+    known_type_schema(ty, cp).unwrap_or_else(|| format!("<{ty} as {cp}::NsonSchema>::SCHEMA"))
 }
 
 fn known_type_schema(ty: &str, cp: &str) -> Option<String> {
@@ -208,7 +209,14 @@ fn known_type_schema(ty: &str, cp: &str) -> Option<String> {
     if let Some(arg) = generic_arg(t, "Option") {
         return Some(format!("{cp}::TypeSchema::Optional(&{})", inner(&arg)));
     }
-    for name in ["Vec", "VecDeque", "LinkedList", "BinaryHeap", "HashSet", "BTreeSet"] {
+    for name in [
+        "Vec",
+        "VecDeque",
+        "LinkedList",
+        "BinaryHeap",
+        "HashSet",
+        "BTreeSet",
+    ] {
         if let Some(arg) = generic_arg(t, name) {
             return Some(format!("{cp}::TypeSchema::Seq(&{})", inner(&arg)));
         }
