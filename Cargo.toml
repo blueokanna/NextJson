@@ -1,10 +1,24 @@
-[package]
-name = "nextjson"
+[workspace]
+members = ["nextjson", "nextjson-derive"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 authors = ["blueokanna"]
-description = "A JSON parser and serializer for Rust."
+license = "Apache-2.0"
+repository = "https://github.com/blueokanna/NextJson"
+description = "A high-performance, zero-dependency, no_std JSON library for Rust with an original schema-driven, visitor-free design."
 
-[features]
+[workspace.dependencies]
+nextjson = { path = "nextjson", version = "0.1.0" }
+nextjson-derive = { path = "nextjson-derive", version = "0.1.0" }
 
-[dependencies]
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

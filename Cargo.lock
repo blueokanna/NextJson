@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "nextjson"
 version = "0.1.0"
+dependencies = [
+ "nextjson-derive",
+]
+
+[[package]]
+name = "nextjson-derive"
+version = "0.1.0"

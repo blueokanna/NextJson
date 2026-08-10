@@ -1,0 +1,17 @@
+[package]
+name = "nextjson-derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+keywords = ["json", "serialization", "deserialization", "derive", "macro"]
+categories = ["encoding"]
+readme = "../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]

@@ -1,0 +1,22 @@
+[package]
+name = "nextjson"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+keywords = ["json", "serialization", "deserialization", "serde", "parser"]
+categories = ["encoding", "parser-implementations", "no-std"]
+readme = "../README.md"
+
+[features]
+default = ["std", "derive"]
+std = []
+derive = ["dep:nextjson-derive"]
+
+[dependencies]
+nextjson-derive = { workspace = true, optional = true }
+
+[dev-dependencies]
