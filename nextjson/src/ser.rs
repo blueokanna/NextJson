@@ -71,13 +71,309 @@ impl EncodeConfig {
     }
 }
 
-/// Serialization trait: nextencode `Self` into an [`Encoder`].
+/// Format-neutral emission contract implemented by every destination codec.
 ///
-/// The writer is a generic parameter, so method bodies are monomorphized at
-/// compile time with no dynamic dispatch.
+/// `NsonSerialize::nextencode` is generic over this trait, so one type
+/// implementation can target every codec whose data model represents the
+/// emitted values. Binary codecs can use [`separator`] and [`key`] as counting
+/// signals and patch length prefixes when a container closes. Some
+/// document-oriented codecs collect the event stream before emission.
+///
+/// [`separator`]: FormatEncoder::separator
+/// [`key`]: FormatEncoder::key
+pub trait FormatEncoder {
+    /// Begin an array container.
+    fn begin_array(&mut self) -> Result<()>;
+    /// Emit the separator preceding a subsequent array element.
+    ///
+    /// Called once per element, including the first, so binary codecs can use
+    /// it as an element counter.
+    fn separator(&mut self) -> Result<()>;
+    /// End the current array container.
+    fn end_array(&mut self) -> Result<()>;
+    /// Begin an object container.
+    fn begin_object(&mut self) -> Result<()>;
+    /// Emit an object key.
+    ///
+    /// Called once per entry, including the first, so binary codecs can use it
+    /// as an entry counter.
+    fn key(&mut self, key: &str) -> Result<()>;
+    /// End the current object container.
+    fn end_object(&mut self) -> Result<()>;
+    /// Emit `null`.
+    fn write_null(&mut self) -> Result<()>;
+    /// Emit a boolean.
+    fn write_bool(&mut self, value: bool) -> Result<()>;
+    /// Emit a UTF-8 string.
+    fn write_str(&mut self, value: &str) -> Result<()>;
+    /// Emit a single character (a one-scalar string).
+    fn write_char(&mut self, value: char) -> Result<()>;
+    /// Emit a number preserving its exact internal kind.
+    fn write_number(&mut self, value: &Number) -> Result<()>;
+    /// Emit an `i64`.
+    fn write_i64(&mut self, value: i64) -> Result<()>;
+    /// Emit a `u64`.
+    fn write_u64(&mut self, value: u64) -> Result<()>;
+    /// Emit an `i128`.
+    fn write_i128(&mut self, value: i128) -> Result<()>;
+    /// Emit a `u128`.
+    fn write_u128(&mut self, value: u128) -> Result<()>;
+    /// Emit an `f64` (shortest round-trip).
+    fn write_f64(&mut self, value: f64) -> Result<()>;
+    /// Emit an `f32` (shortest round-trip).
+    fn write_f32(&mut self, value: f32) -> Result<()>;
+}
+
+enum EventFrame {
+    Array { ready: bool },
+    Object { pending_value: bool },
+}
+
+/// Validates the format-neutral serialization event protocol before events
+/// reach a concrete codec.
+pub(crate) struct CheckedEncoder<'a, E: FormatEncoder + ?Sized> {
+    inner: &'a mut E,
+    frames: Vec<EventFrame>,
+    root_written: bool,
+}
+
+impl<'a, E: FormatEncoder + ?Sized> CheckedEncoder<'a, E> {
+    pub(crate) fn new(inner: &'a mut E) -> Self {
+        CheckedEncoder {
+            inner,
+            frames: Vec::new(),
+            root_written: false,
+        }
+    }
+
+    fn value(&mut self) -> Result<()> {
+        match self.frames.last_mut() {
+            Some(EventFrame::Array { ready }) if *ready => {
+                *ready = false;
+                Ok(())
+            }
+            Some(EventFrame::Array { .. }) => {
+                Err(Error::custom("array separator required before value"))
+            }
+            Some(EventFrame::Object { pending_value }) if *pending_value => {
+                *pending_value = false;
+                Ok(())
+            }
+            Some(EventFrame::Object { .. }) => {
+                Err(Error::custom("object key required before value"))
+            }
+            None if self.root_written => Err(Error::custom("multiple root values")),
+            None => {
+                self.root_written = true;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn finish(self) -> Result<()> {
+        if !self.root_written {
+            return Err(Error::custom("encoder did not receive a root value"));
+        }
+        if !self.frames.is_empty() {
+            return Err(Error::custom("encoder finished inside a container"));
+        }
+        Ok(())
+    }
+}
+
+impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
+    fn begin_array(&mut self) -> Result<()> {
+        self.value()?;
+        self.inner.begin_array()?;
+        self.frames.push(EventFrame::Array { ready: false });
+        Ok(())
+    }
+
+    fn separator(&mut self) -> Result<()> {
+        match self.frames.last_mut() {
+            Some(EventFrame::Array { ready }) if !*ready => *ready = true,
+            Some(EventFrame::Array { .. }) => {
+                return Err(Error::custom("array value required after separator"));
+            }
+            _ => return Err(Error::custom("array separator outside array")),
+        }
+        self.inner.separator()
+    }
+
+    fn end_array(&mut self) -> Result<()> {
+        match self.frames.last() {
+            Some(EventFrame::Array { ready: false }) => {}
+            Some(EventFrame::Array { ready: true }) => {
+                return Err(Error::custom("array ended after separator without value"));
+            }
+            Some(EventFrame::Object { .. }) => {
+                return Err(Error::custom("mismatched array end inside object"));
+            }
+            None => return Err(Error::custom("array end without matching start")),
+        }
+        self.inner.end_array()?;
+        self.frames.pop();
+        Ok(())
+    }
+
+    fn begin_object(&mut self) -> Result<()> {
+        self.value()?;
+        self.inner.begin_object()?;
+        self.frames.push(EventFrame::Object {
+            pending_value: false,
+        });
+        Ok(())
+    }
+
+    fn key(&mut self, key: &str) -> Result<()> {
+        match self.frames.last_mut() {
+            Some(EventFrame::Object { pending_value }) if !*pending_value => {
+                *pending_value = true;
+            }
+            Some(EventFrame::Object { .. }) => {
+                return Err(Error::custom("object value required after key"));
+            }
+            _ => return Err(Error::custom("object key outside object")),
+        }
+        self.inner.key(key)
+    }
+
+    fn end_object(&mut self) -> Result<()> {
+        match self.frames.last() {
+            Some(EventFrame::Object {
+                pending_value: false,
+            }) => {}
+            Some(EventFrame::Object {
+                pending_value: true,
+            }) => return Err(Error::custom("object ended before keyed value")),
+            Some(EventFrame::Array { .. }) => {
+                return Err(Error::custom("mismatched object end inside array"));
+            }
+            None => return Err(Error::custom("object end without matching start")),
+        }
+        self.inner.end_object()?;
+        self.frames.pop();
+        Ok(())
+    }
+
+    fn write_null(&mut self) -> Result<()> {
+        self.value()?;
+        self.inner.write_null()
+    }
+
+    fn write_bool(&mut self, value: bool) -> Result<()> {
+        self.value()?;
+        self.inner.write_bool(value)
+    }
+
+    fn write_str(&mut self, value: &str) -> Result<()> {
+        self.value()?;
+        self.inner.write_str(value)
+    }
+
+    fn write_char(&mut self, value: char) -> Result<()> {
+        self.value()?;
+        self.inner.write_char(value)
+    }
+
+    fn write_number(&mut self, value: &Number) -> Result<()> {
+        self.value()?;
+        self.inner.write_number(value)
+    }
+
+    fn write_i64(&mut self, value: i64) -> Result<()> {
+        self.value()?;
+        self.inner.write_i64(value)
+    }
+
+    fn write_u64(&mut self, value: u64) -> Result<()> {
+        self.value()?;
+        self.inner.write_u64(value)
+    }
+
+    fn write_i128(&mut self, value: i128) -> Result<()> {
+        self.value()?;
+        self.inner.write_i128(value)
+    }
+
+    fn write_u128(&mut self, value: u128) -> Result<()> {
+        self.value()?;
+        self.inner.write_u128(value)
+    }
+
+    fn write_f64(&mut self, value: f64) -> Result<()> {
+        self.value()?;
+        self.inner.write_f64(value)
+    }
+
+    fn write_f32(&mut self, value: f32) -> Result<()> {
+        self.value()?;
+        self.inner.write_f32(value)
+    }
+}
+
+impl<W: Write> FormatEncoder for Encoder<W> {
+    fn begin_array(&mut self) -> Result<()> {
+        Encoder::begin_array(self)
+    }
+    fn separator(&mut self) -> Result<()> {
+        Encoder::separator(self)
+    }
+    fn end_array(&mut self) -> Result<()> {
+        Encoder::end_array(self)
+    }
+    fn begin_object(&mut self) -> Result<()> {
+        Encoder::begin_object(self)
+    }
+    fn key(&mut self, key: &str) -> Result<()> {
+        Encoder::key(self, key)
+    }
+    fn end_object(&mut self) -> Result<()> {
+        Encoder::end_object(self)
+    }
+    fn write_null(&mut self) -> Result<()> {
+        Encoder::write_null(self)
+    }
+    fn write_bool(&mut self, value: bool) -> Result<()> {
+        Encoder::write_bool(self, value)
+    }
+    fn write_str(&mut self, value: &str) -> Result<()> {
+        Encoder::write_str(self, value)
+    }
+    fn write_char(&mut self, value: char) -> Result<()> {
+        Encoder::write_char(self, value)
+    }
+    fn write_number(&mut self, value: &Number) -> Result<()> {
+        Encoder::write_number(self, value)
+    }
+    fn write_i64(&mut self, value: i64) -> Result<()> {
+        Encoder::write_i64(self, value)
+    }
+    fn write_u64(&mut self, value: u64) -> Result<()> {
+        Encoder::write_u64(self, value)
+    }
+    fn write_i128(&mut self, value: i128) -> Result<()> {
+        Encoder::write_i128(self, value)
+    }
+    fn write_u128(&mut self, value: u128) -> Result<()> {
+        Encoder::write_u128(self, value)
+    }
+    fn write_f64(&mut self, value: f64) -> Result<()> {
+        Encoder::write_f64(self, value)
+    }
+    fn write_f32(&mut self, value: f32) -> Result<()> {
+        Encoder::write_f32(self, value)
+    }
+}
+
+/// Serialization trait: nextencode `Self` into any [`FormatEncoder`].
+///
+/// The format is a generic parameter, so method bodies are monomorphized at
+/// compile time with no dynamic dispatch. JSON, CBOR, and every codec in
+/// [`crate::formats`] implement [`FormatEncoder`].
 pub trait NsonSerialize: NsonSchema {
     /// Next-encode `self` into `encoder`.
-    fn nextencode<W: Write>(&self, encoder: &mut Encoder<W>) -> Result<()>;
+    fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<()>;
 }
 
 /// JSON encoder with internal buffering and indentation state.
@@ -88,11 +384,17 @@ pub struct Encoder<W: Write> {
     writer: W,
     buf: Vec<u8>,
     depth: usize,
-    first: Vec<bool>,
+    frames: Vec<EncodeFrame>,
+    root_written: bool,
     pretty: bool,
     indent: &'static str,
     escape_non_ascii: bool,
     flush_threshold: usize,
+}
+
+enum EncodeFrame {
+    Array { first: bool, ready: bool },
+    Object { first: bool, pending_value: bool },
 }
 
 const FLUSH_THRESHOLD: usize = 8192;
@@ -109,7 +411,8 @@ impl<W: Write> Encoder<W> {
             writer,
             buf: Vec::with_capacity(1024),
             depth: 0,
-            first: Vec::new(),
+            frames: Vec::new(),
+            root_written: false,
             pretty: config.pretty,
             indent: config.indent,
             escape_non_ascii: config.escape_non_ascii,
@@ -119,6 +422,7 @@ impl<W: Write> Encoder<W> {
 
     /// Flush the internal buffer and return the underlying writer.
     pub fn finish(mut self) -> Result<W> {
+        self.validate_finished()?;
         self.writer.write_all(&self.buf)?;
         self.buf.clear();
         self.writer.flush()?;
@@ -147,8 +451,12 @@ impl<W: Write> Encoder<W> {
 
     /// Open an object: write `{`.
     pub fn begin_object(&mut self) -> Result<()> {
+        self.start_value()?;
         self.buf.push(b'{');
-        self.first.push(true);
+        self.frames.push(EncodeFrame::Object {
+            first: true,
+            pending_value: false,
+        });
         self.depth += 1;
         if self.pretty {
             self.buf.push(b'\n');
@@ -159,7 +467,21 @@ impl<W: Write> Encoder<W> {
 
     /// Close an object: write `}`.
     pub fn end_object(&mut self) -> Result<()> {
-        self.first.pop();
+        match self.frames.last() {
+            Some(EncodeFrame::Object {
+                pending_value: false,
+                ..
+            }) => {}
+            Some(EncodeFrame::Object {
+                pending_value: true,
+                ..
+            }) => return Err(Error::custom("object ended before keyed value")),
+            Some(EncodeFrame::Array { .. }) => {
+                return Err(Error::custom("mismatched object end inside array"));
+            }
+            None => return Err(Error::custom("object end without matching start")),
+        }
+        self.frames.pop();
         self.depth -= 1;
         if self.pretty {
             self.buf.push(b'\n');
@@ -171,8 +493,12 @@ impl<W: Write> Encoder<W> {
 
     /// Open an array: write `[`.
     pub fn begin_array(&mut self) -> Result<()> {
+        self.start_value()?;
         self.buf.push(b'[');
-        self.first.push(true);
+        self.frames.push(EncodeFrame::Array {
+            first: true,
+            ready: false,
+        });
         self.depth += 1;
         if self.pretty {
             self.buf.push(b'\n');
@@ -183,7 +509,17 @@ impl<W: Write> Encoder<W> {
 
     /// Close an array: write `]`.
     pub fn end_array(&mut self) -> Result<()> {
-        self.first.pop();
+        match self.frames.last() {
+            Some(EncodeFrame::Array { ready: false, .. }) => {}
+            Some(EncodeFrame::Array { ready: true, .. }) => {
+                return Err(Error::custom("array ended after separator without value"));
+            }
+            Some(EncodeFrame::Object { .. }) => {
+                return Err(Error::custom("mismatched array end inside object"));
+            }
+            None => return Err(Error::custom("array end without matching start")),
+        }
+        self.frames.pop();
         self.depth -= 1;
         if self.pretty {
             self.buf.push(b'\n');
@@ -195,7 +531,20 @@ impl<W: Write> Encoder<W> {
 
     /// Write an object key: separator + `"key":`.
     pub fn key(&mut self, key: &str) -> Result<()> {
-        self.separator()?;
+        let first = match self.frames.last_mut() {
+            Some(EncodeFrame::Object {
+                first,
+                pending_value,
+            }) if !*pending_value => {
+                *pending_value = true;
+                core::mem::replace(first, false)
+            }
+            Some(EncodeFrame::Object { .. }) => {
+                return Err(Error::custom("object value required after key"));
+            }
+            _ => return Err(Error::custom("object key outside object")),
+        };
+        self.write_separator(first);
         self.write_str_inner(key)?;
         self.buf.push(b':');
         if self.pretty {
@@ -209,24 +558,62 @@ impl<W: Write> Encoder<W> {
     /// The first entry of a container produces nothing; subsequent entries
     /// produce `,` (plus newline and indent in pretty mode).
     pub fn separator(&mut self) -> Result<()> {
-        if let Some(top) = self.first.last_mut() {
-            if *top {
-                *top = false;
-            } else {
-                self.buf.push(b',');
-                if self.pretty {
-                    self.buf.push(b'\n');
-                    self.write_indent();
-                }
+        let first = match self.frames.last_mut() {
+            Some(EncodeFrame::Array { first, ready }) if !*ready => {
+                *ready = true;
+                core::mem::replace(first, false)
             }
-        }
+            Some(EncodeFrame::Array { .. }) => {
+                return Err(Error::custom("array value required after separator"));
+            }
+            _ => return Err(Error::custom("array separator outside array")),
+        };
+        self.write_separator(first);
         Ok(())
     }
 
-    /// Write raw bytes (used by `flatten` splicing).
-    pub fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
-        self.buf.extend_from_slice(bytes);
-        self.maybe_flush()
+    fn write_separator(&mut self, first: bool) {
+        if !first {
+            self.buf.push(b',');
+            if self.pretty {
+                self.buf.push(b'\n');
+                self.write_indent();
+            }
+        }
+    }
+
+    fn start_value(&mut self) -> Result<()> {
+        match self.frames.last_mut() {
+            Some(EncodeFrame::Array { ready, .. }) if *ready => {
+                *ready = false;
+                Ok(())
+            }
+            Some(EncodeFrame::Array { .. }) => {
+                Err(Error::custom("array separator required before value"))
+            }
+            Some(EncodeFrame::Object { pending_value, .. }) if *pending_value => {
+                *pending_value = false;
+                Ok(())
+            }
+            Some(EncodeFrame::Object { .. }) => {
+                Err(Error::custom("object key required before value"))
+            }
+            None if self.root_written => Err(Error::custom("multiple root values")),
+            None => {
+                self.root_written = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn validate_finished(&self) -> Result<()> {
+        if !self.root_written {
+            return Err(Error::custom("encoder did not receive a root value"));
+        }
+        if !self.frames.is_empty() {
+            return Err(Error::custom("encoder finished inside a container"));
+        }
+        Ok(())
     }
 
     #[inline]
@@ -242,12 +629,14 @@ impl<W: Write> Encoder<W> {
 
     /// Write `null`.
     pub fn write_null(&mut self) -> Result<()> {
+        self.start_value()?;
         self.buf.extend_from_slice(b"null");
         self.maybe_flush()
     }
 
     /// Write a boolean.
     pub fn write_bool(&mut self, v: bool) -> Result<()> {
+        self.start_value()?;
         self.buf
             .extend_from_slice(if v { b"true" } else { b"false" });
         self.maybe_flush()
@@ -255,6 +644,7 @@ impl<W: Write> Encoder<W> {
 
     /// Write a string (auto-escaped).
     pub fn write_str(&mut self, s: &str) -> Result<()> {
+        self.start_value()?;
         self.write_str_inner(s)?;
         self.maybe_flush()
     }
@@ -278,24 +668,28 @@ impl<W: Write> Encoder<W> {
 
     /// Write an `i64`.
     pub fn write_i64(&mut self, v: i64) -> Result<()> {
+        self.start_value()?;
         write_signed_integer_into(&mut self.buf, v as i128);
         self.maybe_flush()
     }
 
     /// Write a `u64`.
     pub fn write_u64(&mut self, v: u64) -> Result<()> {
+        self.start_value()?;
         write_unsigned_integer_into(&mut self.buf, v as u128);
         self.maybe_flush()
     }
 
     /// Write an `i128`.
     pub fn write_i128(&mut self, v: i128) -> Result<()> {
+        self.start_value()?;
         write_signed_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u128`.
     pub fn write_u128(&mut self, v: u128) -> Result<()> {
+        self.start_value()?;
         write_unsigned_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
@@ -308,6 +702,7 @@ impl<W: Write> Encoder<W> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
+        self.start_value()?;
         write_float_into(&mut self.buf, v)?;
         self.maybe_flush()
     }
@@ -317,6 +712,7 @@ impl<W: Write> Encoder<W> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
+        self.start_value()?;
         write_float_into(&mut self.buf, v)?;
         self.maybe_flush()
     }
@@ -370,9 +766,10 @@ impl Encoder<Vec<u8>> {
         encoder
     }
 
-    pub(crate) fn finish_vec(mut self) -> Vec<u8> {
+    pub(crate) fn finish_vec(mut self) -> Result<Vec<u8>> {
+        self.validate_finished()?;
         debug_assert!(self.writer.is_empty());
-        core::mem::take(&mut self.buf)
+        Ok(core::mem::take(&mut self.buf))
     }
 }
 
@@ -470,7 +867,7 @@ macro_rules! impl_scalar {
             const SCHEMA: TypeSchema = $schema;
         }
         impl NsonSerialize for $t {
-            fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+            fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
                 e.$write(*self as $cast_to)
             }
         }
@@ -499,7 +896,7 @@ impl NsonSchema for char {
     const SCHEMA: TypeSchema = TypeSchema::Char;
 }
 impl NsonSerialize for char {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_char(*self)
     }
 }
@@ -508,7 +905,7 @@ impl NsonSchema for str {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
 impl NsonSerialize for str {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(self)
     }
 }
@@ -517,7 +914,7 @@ impl NsonSchema for String {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
 impl NsonSerialize for String {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(self)
     }
 }
@@ -526,7 +923,7 @@ impl<'a> NsonSchema for Cow<'a, str> {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
 impl<'a> NsonSerialize for Cow<'a, str> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(self)
     }
 }
@@ -535,7 +932,7 @@ impl<T: NsonSerialize + ?Sized> NsonSchema for Box<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + ?Sized> NsonSerialize for Box<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(self, e)
     }
 }
@@ -544,7 +941,7 @@ impl<T: NsonSerialize + ?Sized> NsonSchema for &T {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + ?Sized> NsonSerialize for &T {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(*self, e)
     }
 }
@@ -553,7 +950,7 @@ impl<T: NsonSerialize + ?Sized> NsonSchema for &mut T {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + ?Sized> NsonSerialize for &mut T {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(&**self, e)
     }
 }
@@ -562,7 +959,7 @@ impl<T: NsonSerialize> NsonSchema for Rc<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize> NsonSerialize for Rc<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(self, e)
     }
 }
@@ -571,7 +968,7 @@ impl<T: NsonSerialize> NsonSchema for Arc<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize> NsonSerialize for Arc<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(self, e)
     }
 }
@@ -580,7 +977,7 @@ impl<T: NsonSerialize + Copy> NsonSchema for Cell<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize + Copy> NsonSerialize for Cell<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(&self.get(), e)
     }
 }
@@ -589,7 +986,7 @@ impl<T: NsonSerialize> NsonSchema for RefCell<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
 impl<T: NsonSerialize> NsonSerialize for RefCell<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         T::nextencode(&self.borrow(), e)
     }
 }
@@ -598,7 +995,7 @@ impl<T: NsonSerialize> NsonSchema for Option<T> {
     const SCHEMA: TypeSchema = TypeSchema::Optional(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for Option<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         match self {
             Some(v) => T::nextencode(v, e),
             None => e.write_null(),
@@ -628,7 +1025,7 @@ impl<T: NsonSerialize, E: NsonSerialize> NsonSchema for core::result::Result<T, 
     });
 }
 impl<T: NsonSerialize, E: NsonSerialize> NsonSerialize for core::result::Result<T, E> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<__E: FormatEncoder>(&self, e: &mut __E) -> Result<()> {
         e.begin_object()?;
         match self {
             Ok(v) => {
@@ -648,7 +1045,7 @@ impl<T: NsonSerialize> NsonSchema for Vec<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for Vec<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -662,7 +1059,7 @@ impl<T: NsonSerialize> NsonSchema for [T] {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for [T] {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -676,7 +1073,7 @@ impl<T: NsonSerialize, const N: usize> NsonSchema for [T; N] {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize, const N: usize> NsonSerialize for [T; N] {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -690,7 +1087,7 @@ impl<T: NsonSerialize> NsonSchema for VecDeque<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for VecDeque<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -704,7 +1101,7 @@ impl<T: NsonSerialize> NsonSchema for LinkedList<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for LinkedList<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -718,7 +1115,7 @@ impl<T: NsonSerialize> NsonSchema for BTreeSet<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize> NsonSerialize for BTreeSet<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -732,7 +1129,7 @@ impl<T: NsonSerialize + Ord> NsonSchema for BinaryHeap<T> {
     const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
 }
 impl<T: NsonSerialize + Ord> NsonSerialize for BinaryHeap<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -746,7 +1143,7 @@ impl<K: NsonSerialize, V: NsonSerialize> NsonSchema for BTreeMap<K, V> {
     const SCHEMA: TypeSchema = TypeSchema::Map(&V::SCHEMA);
 }
 impl<K: NsonSerialize, V: NsonSerialize> NsonSerialize for BTreeMap<K, V> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_object()?;
         for (k, v) in self {
             let key = key_to_str(k)?;
@@ -767,7 +1164,7 @@ impl<K: NsonSerialize + core::hash::Hash + Eq, V: NsonSerialize> NsonSchema
 impl<K: NsonSerialize + core::hash::Hash + Eq, V: NsonSerialize> NsonSerialize
     for std::collections::HashMap<K, V>
 {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_object()?;
         for (k, v) in self {
             let key = key_to_str(k)?;
@@ -784,7 +1181,7 @@ impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSchema for std::collections::
 }
 #[cfg(feature = "std")]
 impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSerialize for std::collections::HashSet<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         for item in self {
             e.separator()?;
@@ -818,7 +1215,7 @@ impl NsonSchema for () {
     const SCHEMA: TypeSchema = TypeSchema::Unit;
 }
 impl NsonSerialize for () {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_null()
     }
 }
@@ -827,17 +1224,17 @@ impl<T: ?Sized> NsonSchema for PhantomData<T> {
     const SCHEMA: TypeSchema = TypeSchema::Unit;
 }
 impl<T: ?Sized> NsonSerialize for PhantomData<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_null()
     }
 }
 
 impl NsonSchema for Duration {
-    const SCHEMA: TypeSchema = TypeSchema::U64;
+    const SCHEMA: TypeSchema = TypeSchema::U128;
 }
 impl NsonSerialize for Duration {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-        e.write_u64(self.as_nanos() as u64)
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
+        e.write_u128(self.as_nanos())
     }
 }
 
@@ -847,7 +1244,7 @@ impl NsonSchema for std::path::Path {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::path::Path {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(&self.to_string_lossy())
     }
 }
@@ -857,7 +1254,7 @@ impl NsonSchema for std::path::PathBuf {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::path::PathBuf {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         self.as_path().nextencode(e)
     }
 }
@@ -868,7 +1265,7 @@ impl NsonSchema for std::net::IpAddr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::IpAddr {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -878,7 +1275,7 @@ impl NsonSchema for std::net::Ipv4Addr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::Ipv4Addr {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -888,7 +1285,7 @@ impl NsonSchema for std::net::Ipv6Addr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::Ipv6Addr {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -898,7 +1295,7 @@ impl NsonSchema for std::net::SocketAddr {
 }
 #[cfg(feature = "std")]
 impl NsonSerialize for std::net::SocketAddr {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_str(&self.to_string())
     }
 }
@@ -907,7 +1304,7 @@ impl<T: NsonSerialize> NsonSchema for Range<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA, T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for Range<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
         T::nextencode(&self.start, e)?;
@@ -921,7 +1318,7 @@ impl<T: NsonSerialize> NsonSchema for RangeInclusive<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA, T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeInclusive<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
         T::nextencode(self.start(), e)?;
@@ -935,7 +1332,7 @@ impl<T: NsonSerialize> NsonSchema for RangeFrom<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeFrom<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
         T::nextencode(&self.start, e)?;
@@ -947,7 +1344,7 @@ impl<T: NsonSerialize> NsonSchema for RangeTo<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeTo<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
         T::nextencode(&self.end, e)?;
@@ -959,7 +1356,7 @@ impl<T: NsonSerialize> NsonSchema for RangeToInclusive<T> {
     const SCHEMA: TypeSchema = TypeSchema::Tuple(&[T::SCHEMA]);
 }
 impl<T: NsonSerialize> NsonSerialize for RangeToInclusive<T> {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_array()?;
         e.separator()?;
         T::nextencode(&self.end, e)?;
@@ -973,8 +1370,8 @@ macro_rules! impl_atomic {
             const SCHEMA: TypeSchema = <$inner as NsonSchema>::SCHEMA;
         }
         impl NsonSerialize for $t {
-            fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
-                let v = self.load(core::sync::atomic::Ordering::SeqCst);
+            fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
+                let v = self.load(core::sync::atomic::Ordering::Relaxed);
                 <$inner as NsonSerialize>::nextencode(&v, e)
             }
         }
@@ -1001,7 +1398,7 @@ macro_rules! impl_tuple_ser {
         }
         impl<$First: NsonSerialize $(, $T: NsonSerialize)*> NsonSerialize for ($First, $( $T, )*) {
             #[allow(non_snake_case)]
-            fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+            fn nextencode<__E: FormatEncoder>(&self, e: &mut __E) -> Result<()> {
                 let ($first, $( $i, )*) = self;
                 e.begin_array()?;
                 e.separator()?;
@@ -1039,7 +1436,7 @@ impl NsonSchema for Number {
     const SCHEMA: TypeSchema = TypeSchema::Opaque;
 }
 impl NsonSerialize for Number {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.write_number(self)
     }
 }
@@ -1048,7 +1445,7 @@ impl NsonSchema for Map {
     const SCHEMA: TypeSchema = TypeSchema::Map(&TypeSchema::Opaque);
 }
 impl NsonSerialize for Map {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         e.begin_object()?;
         for (k, v) in self.iter() {
             e.key(k)?;
@@ -1062,7 +1459,7 @@ impl NsonSchema for Value {
     const SCHEMA: TypeSchema = TypeSchema::Opaque;
 }
 impl NsonSerialize for Value {
-    fn nextencode<W: Write>(&self, e: &mut Encoder<W>) -> Result<()> {
+    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<()> {
         match self {
             Value::Null => e.write_null(),
             Value::Bool(b) => e.write_bool(*b),
@@ -1147,5 +1544,28 @@ mod tests {
         e.end_object().unwrap();
         let out = String::from_utf8(e.finish().unwrap()).unwrap();
         assert_eq!(out, "{\n  \"a\": 1,\n  \"b\": [\n    null\n  ]\n}");
+    }
+
+    #[test]
+    fn rejects_invalid_encoding_event_order() {
+        let mut encoder = Encoder::new(Vec::new());
+        assert!(encoder.end_array().is_err());
+
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.begin_array().unwrap();
+        assert!(encoder.write_null().is_err());
+        assert!(encoder.end_object().is_err());
+
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.begin_object().unwrap();
+        encoder.key("pending").unwrap();
+        assert!(encoder.end_object().is_err());
+
+        let mut encoder = Encoder::new(Vec::new());
+        encoder.write_null().unwrap();
+        assert!(encoder.write_bool(true).is_err());
+
+        let encoder = Encoder::new(Vec::new());
+        assert!(encoder.finish().is_err());
     }
 }

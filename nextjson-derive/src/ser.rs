@@ -67,7 +67,7 @@ pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &
                     c.l(&format!(
                         "{{ let __flat = {cp}::to_vec(&self.{ident})?; \
                          if __flat.first() == ::core::option::Option::Some(&b'{{') {{ \
-                         if __flat.len() > 2 {{ __e.separator()?; __e.write_raw(&__flat[1..__flat.len() - 1])?; }} \
+                         {cp}::private::flatten_into(&__flat, __e)?; \
                          }} else {{ return Err({cp}::Error::custom(\"flatten: expected an object or map\")); }} }}"
                     ));
                     continue;

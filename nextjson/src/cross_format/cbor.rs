@@ -221,7 +221,7 @@ impl<'de> CborReader<'de> {
             5 => self.map(additional, sink),
             6 => self.tag(additional, sink),
             7 => self.simple(additional, sink),
-            _ => unreachable!(),
+            _ => Err(self.error("invalid CBOR major type")),
         }
     }
 

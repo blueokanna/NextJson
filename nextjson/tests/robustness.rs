@@ -26,8 +26,8 @@ fn rejects_non_standard_trailing_commas() {
 struct BrokenDecode;
 
 impl<'de> NsonDeserialize<'de> for BrokenDecode {
-    fn nextdecode_into(
-        decoder: &mut nextjson::Decoder<'de>,
+    fn nextdecode_into<D: nextjson::FormatDecoder<'de>>(
+        decoder: &mut D,
         _out: &mut DecodeSlot<Self>,
     ) -> nextjson::Result<()> {
         decoder.unit()
@@ -132,6 +132,12 @@ fn all_rust_integer_extremes_round_trip_losslessly() {
     }
 }
 
+#[test]
+fn f32_decode_rejects_finite_f64_that_overflows() {
+    assert!(nextjson::from_str::<f32>("1e100").is_err());
+    assert_eq!(nextjson::from_str::<f32>("3.5").unwrap(), 3.5);
+}
+
 static DROPS: AtomicUsize = AtomicUsize::new(0);
 
 struct DropProbe;
@@ -143,8 +149,8 @@ impl Drop for DropProbe {
 }
 
 impl<'de> NsonDeserialize<'de> for DropProbe {
-    fn nextdecode_into(
-        decoder: &mut nextjson::Decoder<'de>,
+    fn nextdecode_into<D: nextjson::FormatDecoder<'de>>(
+        decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> nextjson::Result<()> {
         let _: &str = NsonDeserialize::nextdecode(decoder)?;

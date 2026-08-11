@@ -289,11 +289,7 @@ impl From<i128> for Number {
 }
 impl From<isize> for Number {
     fn from(v: isize) -> Self {
-        if v < 0 {
-            Number::I64(v as i64)
-        } else {
-            Number::U64(v as u64)
-        }
+        Number::from(v as i128)
     }
 }
 impl From<u8> for Number {
@@ -327,7 +323,7 @@ impl From<u128> for Number {
 }
 impl From<usize> for Number {
     fn from(v: usize) -> Self {
-        Number::U64(v as u64)
+        Number::from(v as u128)
     }
 }
 impl From<f32> for Number {
@@ -390,5 +386,7 @@ mod tests {
     fn non_negative_unified_as_u64() {
         assert!(Number::from(1i64).is_u64());
         assert!(Number::from(-1i64).is_i64());
+        assert_eq!(Number::from(usize::MAX), Number::from(usize::MAX as u128));
+        assert_eq!(Number::from(isize::MIN), Number::from(isize::MIN as i128));
     }
 }

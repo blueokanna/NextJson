@@ -159,10 +159,7 @@ pub(crate) fn renamed_variant(
 
 /// Whether a type is `Option<...>`.
 pub(crate) fn is_option_type(ty: &str) -> bool {
-    let t = ty.trim();
-    t.starts_with("Option")
-        || t.starts_with("::core::option::Option")
-        || t.starts_with("core::option::Option")
+    generic_arg(ty.trim(), "Option").is_some()
 }
 
 /// Schema expression for a field type.
@@ -267,7 +264,7 @@ fn known_type_schema(ty: &str, cp: &str) -> Option<String> {
     }
     for name in ["Duration"] {
         if t == name {
-            return Some(format!("{cp}::TypeSchema::U64"));
+            return Some(format!("{cp}::TypeSchema::U128"));
         }
     }
     for name in ["PathBuf", "IpAddr", "Ipv4Addr", "Ipv6Addr", "SocketAddr"] {

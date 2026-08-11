@@ -59,8 +59,42 @@ impl DecodeConfig {
 /// Save point for untagged-enum backtracking.
 #[derive(Clone, Copy, Debug)]
 pub struct Mark {
-    pos: usize,
-    depth: u32,
+    pub(crate) pos: usize,
+    pub(crate) depth: u32,
+    pub(crate) frame_len: usize,
+}
+
+impl Mark {
+    /// Create a save point from a source offset and a nesting depth.
+    pub fn new(pos: usize, depth: u32) -> Self {
+        Mark {
+            pos,
+            depth,
+            frame_len: 0,
+        }
+    }
+    /// The source offset captured by this mark.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+    /// The nesting depth captured by this mark.
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+}
+
+/// Human-readable name of a token for type-mismatch diagnostics.
+pub(crate) fn token_name(token: &Token<'_>) -> &'static str {
+    match token {
+        Token::Null => "null",
+        Token::Bool(_) => "bool",
+        Token::Number(_) => "number",
+        Token::Str(_) => "string",
+        Token::BeginObject => "object",
+        Token::EndObject => "end of object",
+        Token::BeginArray => "array",
+        Token::EndArray => "end of array",
+    }
 }
 
 /// Internal token shared by the streaming lexer and content replay.
@@ -128,15 +162,122 @@ impl<T> Default for DecodeSlot<T> {
 /// [`nextdecode_into`](NsonDeserialize::nextdecode_into) decodes a value
 /// directly into caller-provided storage, supporting memory
 /// reuse without requiring `T: Default` or constructing a placeholder `T`.
+/// Format-neutral input contract implemented by every source codec.
+///
+/// `NsonDeserialize::nextdecode_into` is generic over this trait, so one type
+/// implementation can consume every codec whose data model represents that
+/// type. A codec may stream from its input or replay a validated value tree.
+/// The method surface mirrors the unified token stream: containers, scalars,
+/// backtracking, and [`skip_value`](FormatDecoder::skip_value).
+pub trait FormatDecoder<'de> {
+    /// Consume `{` (with depth check).
+    fn begin_object(&mut self) -> Result<()>;
+    /// Consume `}`.
+    fn end_object(&mut self) -> Result<()>;
+    /// Read the next object key; returns `None` on `}` (not consumed).
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>>;
+    /// Object entry separator: `true` if more entries follow, `false` at end.
+    fn object_entry_sep(&mut self) -> Result<bool>;
+    /// Consume `[` (with depth check).
+    fn begin_array(&mut self) -> Result<()>;
+    /// Consume `]`.
+    fn end_array(&mut self) -> Result<()>;
+    /// Whether the array has more elements (`]` not consumed).
+    fn array_has_more(&mut self) -> Result<bool>;
+    /// Array entry separator: `true` if more elements follow, `false` at end.
+    fn array_entry_sep(&mut self) -> Result<bool>;
+    /// Consume `null`.
+    fn unit(&mut self) -> Result<()>;
+    /// Read a boolean.
+    fn bool(&mut self) -> Result<bool>;
+    /// Read a number.
+    fn number(&mut self) -> Result<Number>;
+    /// Read a string (may borrow the source).
+    fn string(&mut self) -> Result<Cow<'de, str>>;
+    /// Read a single character (a one-scalar string).
+    fn char(&mut self) -> Result<char>;
+    /// Skip any one value.
+    fn skip_value(&mut self) -> Result<()>;
+    /// Peek the next token without consuming it (container-flatten support).
+    fn peek_token(&mut self) -> Result<Token<'de>>;
+    /// Consume and return the next token.
+    fn next_token(&mut self) -> Result<Token<'de>>;
+    /// Save the current position (for untagged-enum backtracking).
+    fn save(&self) -> Mark;
+    /// Restore a position saved with [`save`](FormatDecoder::save).
+    fn restore(&mut self, mark: Mark);
+}
+
+impl<'de> FormatDecoder<'de> for Decoder<'de> {
+    fn begin_object(&mut self) -> Result<()> {
+        Decoder::begin_object(self)
+    }
+    fn end_object(&mut self) -> Result<()> {
+        Decoder::end_object(self)
+    }
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+        Decoder::object_key(self)
+    }
+    fn object_entry_sep(&mut self) -> Result<bool> {
+        Decoder::object_entry_sep(self)
+    }
+    fn begin_array(&mut self) -> Result<()> {
+        Decoder::begin_array(self)
+    }
+    fn end_array(&mut self) -> Result<()> {
+        Decoder::end_array(self)
+    }
+    fn array_has_more(&mut self) -> Result<bool> {
+        Decoder::array_has_more(self)
+    }
+    fn array_entry_sep(&mut self) -> Result<bool> {
+        Decoder::array_entry_sep(self)
+    }
+    fn unit(&mut self) -> Result<()> {
+        Decoder::unit(self)
+    }
+    fn bool(&mut self) -> Result<bool> {
+        Decoder::bool(self)
+    }
+    fn number(&mut self) -> Result<Number> {
+        Decoder::number(self)
+    }
+    fn string(&mut self) -> Result<Cow<'de, str>> {
+        Decoder::string(self)
+    }
+    fn char(&mut self) -> Result<char> {
+        Decoder::char(self)
+    }
+    fn skip_value(&mut self) -> Result<()> {
+        Decoder::skip_value(self)
+    }
+    fn peek_token(&mut self) -> Result<Token<'de>> {
+        Decoder::peek_token(self)
+    }
+    fn next_token(&mut self) -> Result<Token<'de>> {
+        Decoder::next_token(self)
+    }
+    fn save(&self) -> Mark {
+        Decoder::save(self)
+    }
+    fn restore(&mut self, mark: Mark) {
+        Decoder::restore(self, mark)
+    }
+}
+
+/// Deserialization trait: decode `Self` from any [`FormatDecoder`].
 pub trait NsonDeserialize<'de>: Sized {
     /// Decode into `out`.
     ///
     /// Implementations must call [`DecodeSlot::write`] before returning `Ok`.
     /// [`nextdecode`](NsonDeserialize::nextdecode) validates this invariant.
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()>;
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()>;
 
     /// Decode and return a value.
-    fn nextdecode(decoder: &mut Decoder<'de>) -> Result<Self> {
+    fn nextdecode<D: FormatDecoder<'de>>(decoder: &mut D) -> Result<Self> {
         let mut out = DecodeSlot::new();
         Self::nextdecode_into(decoder, &mut out)?;
         out.take().ok_or_else(|| {
@@ -491,7 +632,7 @@ impl<'de> BytesReader<'de> {
         self.pos = p2 + 1;
         match key {
             Token::Str(s) => Ok(Some(s)),
-            _ => unreachable!("lex_string always yields Str"),
+            _ => Err(self.err_at(ErrorKind::Custom("invalid object key token".into()), pos)),
         }
     }
 
@@ -715,6 +856,7 @@ impl<'de> Decoder<'de> {
         Mark {
             pos,
             depth: self.depth,
+            frame_len: 0,
         }
     }
 
@@ -963,7 +1105,7 @@ fn parse_hex4(input: &[u8], start: usize) -> Option<u16> {
 macro_rules! impl_signed_de {
     ($($t:ty),* $(,)?) => {$(
         impl<'de> NsonDeserialize<'de> for $t {
-            fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+            fn nextdecode_into<D: FormatDecoder<'de>>(decoder: &mut D, out: &mut DecodeSlot<Self>) -> Result<()> {
                 let n = decoder.number()?;
                 let exact = n
                     .as_i128()
@@ -981,7 +1123,7 @@ impl_signed_de!(i8, i16, i32, i64, i128, isize);
 macro_rules! impl_unsigned_de {
     ($($t:ty),* $(,)?) => {$(
         impl<'de> NsonDeserialize<'de> for $t {
-            fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+            fn nextdecode_into<D: FormatDecoder<'de>>(decoder: &mut D, out: &mut DecodeSlot<Self>) -> Result<()> {
                 let n = decoder.number()?;
                 let exact = n
                     .as_u128()
@@ -997,7 +1139,10 @@ macro_rules! impl_unsigned_de {
 impl_unsigned_de!(u8, u16, u32, u64, u128, usize);
 
 impl<'de> NsonDeserialize<'de> for f64 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let n = decoder.number()?;
         out.write(n.as_f64());
         Ok(())
@@ -1005,15 +1150,25 @@ impl<'de> NsonDeserialize<'de> for f64 {
 }
 
 impl<'de> NsonDeserialize<'de> for f32 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let n = decoder.number()?;
-        out.write(n.as_f64() as f32);
+        let value = n.as_f64() as f32;
+        if !value.is_finite() {
+            return Err(Error::new(ErrorKind::NumberOutOfRange, None, None, 0));
+        }
+        out.write(value);
         Ok(())
     }
 }
 
 impl<'de> NsonDeserialize<'de> for bool {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let b = decoder.bool()?;
         out.write(b);
         Ok(())
@@ -1021,7 +1176,10 @@ impl<'de> NsonDeserialize<'de> for bool {
 }
 
 impl<'de> NsonDeserialize<'de> for char {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let c = decoder.char()?;
         out.write(c);
         Ok(())
@@ -1029,7 +1187,10 @@ impl<'de> NsonDeserialize<'de> for char {
 }
 
 impl<'de> NsonDeserialize<'de> for String {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let s = decoder.string()?;
         out.write(s.into_owned());
         Ok(())
@@ -1040,7 +1201,10 @@ impl<'de, 'a> NsonDeserialize<'de> for &'a str
 where
     'de: 'a,
 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         match decoder.string()? {
             Cow::Borrowed(b) => {
                 out.write(b);
@@ -1055,7 +1219,10 @@ where
 }
 
 impl<'de> NsonDeserialize<'de> for Cow<'de, str> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let s = decoder.string()?;
         out.write(s);
         Ok(())
@@ -1063,7 +1230,10 @@ impl<'de> NsonDeserialize<'de> for Cow<'de, str> {
 }
 
 impl<'de> NsonDeserialize<'de> for &'de [u8] {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         match decoder.string()? {
             Cow::Borrowed(b) => {
                 out.write(b.as_bytes());
@@ -1078,7 +1248,10 @@ impl<'de> NsonDeserialize<'de> for &'de [u8] {
 }
 
 impl<'de> NsonDeserialize<'de> for Cow<'de, [u8]> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         match decoder.string()? {
             Cow::Borrowed(b) => out.write(Cow::Borrowed(b.as_bytes())),
             Cow::Owned(o) => out.write(Cow::Owned(o.into_bytes())),
@@ -1088,7 +1261,10 @@ impl<'de> NsonDeserialize<'de> for Cow<'de, [u8]> {
 }
 
 impl<'de> NsonDeserialize<'de> for () {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         decoder.unit()?;
         out.write(());
         Ok(())
@@ -1096,7 +1272,10 @@ impl<'de> NsonDeserialize<'de> for () {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Option<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         if matches!(decoder.peek_token()?, Token::Null) {
             decoder.next_token()?;
             out.write(None);
@@ -1109,7 +1288,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Option<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Vec<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let mut v = Vec::new();
         decoder.begin_array()?;
         while decoder.array_has_more()? {
@@ -1125,7 +1307,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Vec<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Box<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = T::nextdecode(decoder)?;
         out.write(Box::new(v));
         Ok(())
@@ -1133,7 +1318,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Box<T> {
 }
 
 impl<'de> NsonDeserialize<'de> for Box<str> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let s = decoder.string()?;
         out.write(s.into_owned().into_boxed_str());
         Ok(())
@@ -1141,7 +1329,10 @@ impl<'de> NsonDeserialize<'de> for Box<str> {
 }
 
 impl<'de> NsonDeserialize<'de> for Box<[u8]> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let s = decoder.string()?;
         out.write(s.into_owned().into_bytes().into_boxed_slice());
         Ok(())
@@ -1149,7 +1340,10 @@ impl<'de> NsonDeserialize<'de> for Box<[u8]> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Rc<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = T::nextdecode(decoder)?;
         out.write(Rc::new(v));
         Ok(())
@@ -1157,7 +1351,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Rc<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Arc<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = T::nextdecode(decoder)?;
         out.write(Arc::new(v));
         Ok(())
@@ -1165,7 +1362,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Arc<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de> + Copy> NsonDeserialize<'de> for Cell<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = T::nextdecode(decoder)?;
         out.write(Cell::new(v));
         Ok(())
@@ -1173,7 +1373,10 @@ impl<'de, T: NsonDeserialize<'de> + Copy> NsonDeserialize<'de> for Cell<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RefCell<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = T::nextdecode(decoder)?;
         out.write(RefCell::new(v));
         Ok(())
@@ -1181,7 +1384,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RefCell<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for VecDeque<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = Vec::<T>::nextdecode(decoder)?;
         out.write(v.into());
         Ok(())
@@ -1189,7 +1395,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for VecDeque<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for LinkedList<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = Vec::<T>::nextdecode(decoder)?;
         out.write(v.into_iter().collect());
         Ok(())
@@ -1197,7 +1406,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for LinkedList<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de> + Ord> NsonDeserialize<'de> for BinaryHeap<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = Vec::<T>::nextdecode(decoder)?;
         out.write(v.into_iter().collect());
         Ok(())
@@ -1205,7 +1417,10 @@ impl<'de, T: NsonDeserialize<'de> + Ord> NsonDeserialize<'de> for BinaryHeap<T> 
 }
 
 impl<'de, T: NsonDeserialize<'de> + Ord> NsonDeserialize<'de> for BTreeSet<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = Vec::<T>::nextdecode(decoder)?;
         out.write(v.into_iter().collect());
         Ok(())
@@ -1215,7 +1430,10 @@ impl<'de, T: NsonDeserialize<'de> + Ord> NsonDeserialize<'de> for BTreeSet<T> {
 impl<'de, K: for<'a> NsonDeserialize<'a> + Ord, V: NsonDeserialize<'de>> NsonDeserialize<'de>
     for BTreeMap<K, V>
 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let mut map = BTreeMap::new();
         decoder.begin_object()?;
         while let Some(key) = decoder.object_key()? {
@@ -1254,7 +1472,10 @@ fn nextdecode_map_key<K: for<'a> NsonDeserialize<'a>>(key: &str) -> Result<K> {
 impl<'de, K: for<'a> NsonDeserialize<'a> + Eq + core::hash::Hash, V: NsonDeserialize<'de>>
     NsonDeserialize<'de> for std::collections::HashMap<K, V>
 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let mut map = std::collections::HashMap::new();
         decoder.begin_object()?;
         while let Some(key) = decoder.object_key()? {
@@ -1275,7 +1496,10 @@ impl<'de, K: for<'a> NsonDeserialize<'a> + Eq + core::hash::Hash, V: NsonDeseria
 impl<'de, T: NsonDeserialize<'de> + Eq + core::hash::Hash> NsonDeserialize<'de>
     for std::collections::HashSet<T>
 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = Vec::<T>::nextdecode(decoder)?;
         out.write(v.into_iter().collect());
         Ok(())
@@ -1286,7 +1510,7 @@ macro_rules! impl_tuple_de {
     ($(($first:ident : $First:ident $(, $i:ident : $T:ident)*)),* $(,)?) => {$(
         impl<'de, $First: NsonDeserialize<'de> $(, $T: NsonDeserialize<'de>)*> NsonDeserialize<'de> for ($First, $( $T, )*) {
             #[allow(non_snake_case)]
-            fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+            fn nextdecode_into<__D: FormatDecoder<'de>>(decoder: &mut __D, out: &mut DecodeSlot<Self>) -> Result<()> {
                 decoder.begin_array()?;
                 let $first = $First::nextdecode(decoder)?;
                 $(
@@ -1322,7 +1546,10 @@ impl_tuple_de! {
 }
 
 impl<'de, T: NsonDeserialize<'de>, const N: usize> NsonDeserialize<'de> for [T; N] {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = Vec::<T>::nextdecode(decoder)?;
         let arr: [T; N] = v
             .try_into()
@@ -1335,7 +1562,10 @@ impl<'de, T: NsonDeserialize<'de>, const N: usize> NsonDeserialize<'de> for [T; 
 impl<'de, T: NsonDeserialize<'de>, E: NsonDeserialize<'de>> NsonDeserialize<'de>
     for core::result::Result<T, E>
 {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         decoder.begin_object()?;
         let key = decoder
             .object_key()?
@@ -1360,12 +1590,18 @@ impl<'de, T: NsonDeserialize<'de>, E: NsonDeserialize<'de>> NsonDeserialize<'de>
 }
 
 impl<'de> NsonDeserialize<'de> for Duration {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let n = decoder.number()?;
         let nanos = n
-            .as_u64()
-            .ok_or_else(|| Error::invalid_type("u64", "a number"))?;
-        out.write(Duration::from_nanos(nanos));
+            .as_u128()
+            .ok_or_else(|| Error::invalid_type("u128", "a number"))?;
+        let seconds = u64::try_from(nanos / 1_000_000_000)
+            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, None, None, 0))?;
+        let subsec_nanos = (nanos % 1_000_000_000) as u32;
+        out.write(Duration::new(seconds, subsec_nanos));
         Ok(())
     }
 }
@@ -1374,7 +1610,7 @@ impl<'de> NsonDeserialize<'de> for Duration {
 macro_rules! impl_parse_str_de {
     ($($t:ty => $what:literal),* $(,)?) => {$(
         impl<'de> NsonDeserialize<'de> for $t {
-            fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+            fn nextdecode_into<D: FormatDecoder<'de>>(decoder: &mut D, out: &mut DecodeSlot<Self>) -> Result<()> {
                 let s = decoder.string()?;
                 let v: $t = s.parse().map_err(|_| Error::invalid_type($what, "a string"))?;
                 out.write(v);
@@ -1396,7 +1632,10 @@ impl_parse_str_de! {
 
 #[cfg(feature = "std")]
 impl<'de> NsonDeserialize<'de> for std::path::PathBuf {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let s = decoder.string()?;
         out.write(std::path::PathBuf::from(s.into_owned()));
         Ok(())
@@ -1404,7 +1643,10 @@ impl<'de> NsonDeserialize<'de> for std::path::PathBuf {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Range<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let (start, end) = <(T, T) as NsonDeserialize>::nextdecode(decoder)?;
         out.write(start..end);
         Ok(())
@@ -1412,7 +1654,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Range<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeInclusive<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let (start, end) = <(T, T) as NsonDeserialize>::nextdecode(decoder)?;
         out.write(start..=end);
         Ok(())
@@ -1420,7 +1665,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeInclusive<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeFrom<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let start = T::nextdecode(decoder)?;
         out.write(start..);
         Ok(())
@@ -1428,7 +1676,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeFrom<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeTo<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let end = T::nextdecode(decoder)?;
         out.write(..end);
         Ok(())
@@ -1436,7 +1687,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeTo<T> {
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeToInclusive<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let end = T::nextdecode(decoder)?;
         out.write(..=end);
         Ok(())
@@ -1444,7 +1698,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeToInclusive<T> 
 }
 
 impl<'de, T: ?Sized> NsonDeserialize<'de> for PhantomData<T> {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         decoder.unit()?;
         out.write(PhantomData);
         Ok(())
@@ -1454,7 +1711,7 @@ impl<'de, T: ?Sized> NsonDeserialize<'de> for PhantomData<T> {
 macro_rules! impl_atomic_de {
     ($($t:ty => $inner:ident),* $(,)?) => {$(
         impl<'de> NsonDeserialize<'de> for $t {
-            fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+            fn nextdecode_into<D: FormatDecoder<'de>>(decoder: &mut D, out: &mut DecodeSlot<Self>) -> Result<()> {
                 let v = <$inner as NsonDeserialize>::nextdecode(decoder)?;
                 out.write(<$t>::new(v));
                 Ok(())
@@ -1481,7 +1738,10 @@ impl_atomic_de! {
 // ---------------------------------------------------------------------------
 
 impl<'de> NsonDeserialize<'de> for Number {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let n = decoder.number()?;
         out.write(n);
         Ok(())
@@ -1489,7 +1749,10 @@ impl<'de> NsonDeserialize<'de> for Number {
 }
 
 impl<'de> NsonDeserialize<'de> for Map {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let mut map = Map::new();
         decoder.begin_object()?;
         while let Some(key) = decoder.object_key()? {
@@ -1506,7 +1769,10 @@ impl<'de> NsonDeserialize<'de> for Map {
 }
 
 impl<'de> NsonDeserialize<'de> for Value {
-    fn nextdecode_into(decoder: &mut Decoder<'de>, out: &mut DecodeSlot<Self>) -> Result<()> {
+    fn nextdecode_into<D: FormatDecoder<'de>>(
+        decoder: &mut D,
+        out: &mut DecodeSlot<Self>,
+    ) -> Result<()> {
         let v = match decoder.peek_token()? {
             Token::Null => {
                 decoder.next_token()?;
@@ -1540,7 +1806,7 @@ impl<'de> NsonDeserialize<'de> for Value {
                 decoder.end_array()?;
                 Value::Array(arr)
             }
-            _ => return Err(decoder.err(ErrorKind::Eof)),
+            _ => return Err(Error::custom("unexpected token while decoding a value")),
         };
         out.write(v);
         Ok(())
@@ -1554,8 +1820,10 @@ impl<'de> NsonDeserialize<'de> for Value {
 /// Read one full value from the current position as a token sequence.
 ///
 /// Uses container primitives so separators are handled correctly; depth is
-/// bounded by `max_depth`.
-pub(crate) fn read_token_tree<'de>(decoder: &mut Decoder<'de>) -> Result<Vec<Token<'de>>> {
+/// bounded by `max_depth`. Works over any [`FormatDecoder`].
+pub(crate) fn read_token_tree<'de, D: FormatDecoder<'de>>(
+    decoder: &mut D,
+) -> Result<Vec<Token<'de>>> {
     match decoder.peek_token()? {
         Token::BeginObject => {
             decoder.begin_object()?;

@@ -81,7 +81,8 @@
 //! ## Safety and resource limits
 //!
 //! This crate denies unsafe Rust. Decode slots use checked state, numeric
-//! conversions use checked arithmetic, and the default nesting limit is 128.
+//! conversions use checked arithmetic, and decoders cap nesting at 128 by
+//! default.
 //! Applications must still enforce total input bytes, collection sizes, CPU
 //! time, and output quotas. Reader APIs buffer their complete input.
 //!
@@ -107,7 +108,7 @@ extern crate std;
 #[cfg(feature = "derive")]
 pub use nextjson_derive::{NsonDeserialize, NsonSerialize};
 
-pub use crate::de::{DecodeConfig, DecodeSlot, Decoder, NsonDeserialize, Token};
+pub use crate::de::{DecodeConfig, DecodeSlot, Decoder, FormatDecoder, NsonDeserialize, Token};
 pub use crate::encoding::{EncodeConfig, Encoder};
 pub use crate::error::{Error, Result};
 pub use crate::map::Map;
@@ -115,7 +116,7 @@ pub use crate::number::Number;
 pub use crate::schema::{
     EnumSchema, FieldSchema, NsonSchema, StructSchema, TypeSchema, VariantSchema,
 };
-pub use crate::ser::NsonSerialize;
+pub use crate::ser::{FormatEncoder, NsonSerialize};
 pub use crate::value::Value;
 pub use crate::write::Write;
 
@@ -123,6 +124,7 @@ pub mod cross_format;
 pub mod de;
 pub mod encoding;
 pub mod error;
+pub mod formats;
 mod json_schema;
 pub mod map;
 mod number;
@@ -161,7 +163,7 @@ use alloc::vec::Vec;
 pub fn nextencode<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     let mut encoder = Encoder::for_vec(EncodeConfig::compact());
     NsonSerialize::nextencode(value, &mut encoder)?;
-    Ok(encoder.finish_vec())
+    encoder.finish_vec()
 }
 
 /// Serialize a value into a compact JSON string.
@@ -185,7 +187,7 @@ pub fn to_string_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<String> 
 pub fn to_vec_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     let mut encoder = Encoder::for_vec(EncodeConfig::pretty());
     NsonSerialize::nextencode(value, &mut encoder)?;
-    Ok(encoder.finish_vec())
+    encoder.finish_vec()
 }
 
 /// Serialize a value to any `Write` sink.

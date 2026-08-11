@@ -2,6 +2,55 @@
 
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize};
 
+#[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+pub struct PublicDerived<T = u32> {
+    value: T,
+}
+
+#[derive(NsonSerialize, NsonDeserialize)]
+struct CallableBound<F>
+where
+    F: Fn() -> i32,
+{
+    marker: core::marker::PhantomData<F>,
+}
+
+#[test]
+fn public_type_generic_default_and_callable_where_clause() {
+    let value = PublicDerived { value: 7_u32 };
+    let json = to_string(&value).unwrap();
+    assert_eq!(json, r#"{"value":7}"#);
+    assert_eq!(from_str::<PublicDerived>(&json).unwrap(), value);
+
+    fn answer() -> i32 {
+        42
+    }
+    let _ = CallableBound::<fn() -> i32> {
+        marker: core::marker::PhantomData,
+    };
+    assert_eq!(answer(), 42);
+}
+
+trait ConstBound<const N: usize> {}
+
+impl<T, const N: usize> ConstBound<N> for T {}
+
+#[test]
+fn const_block_in_where_clause() {
+    #[derive(Debug, PartialEq, NsonSerialize, NsonDeserialize)]
+    struct Packet<T, const N: usize>
+    where
+        T: ConstBound<{ N }>,
+    {
+        value: T,
+    }
+
+    let packet = Packet::<u32, 4> { value: 17 };
+    let bytes = nextjson::nextencode(&packet).unwrap();
+    let decoded: Packet<u32, 4> = nextjson::nextdecode(&bytes).unwrap();
+    assert_eq!(decoded, packet);
+}
+
 #[test]
 fn basic_struct_roundtrip() {
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -235,12 +284,12 @@ fn transparent_newtype() {
 #[test]
 fn with_module() {
     mod custom {
-        use nextjson::{Decoder, Encoder, Result, Write};
+        use nextjson::{FormatDecoder, FormatEncoder, Result};
 
-        pub fn serialize(s: &str, e: &mut Encoder<impl Write>) -> Result<()> {
+        pub fn serialize<E: FormatEncoder>(s: &str, e: &mut E) -> Result<()> {
             e.write_str(&s.to_uppercase())
         }
-        pub fn deserialize<'de>(d: &mut Decoder<'de>) -> Result<String> {
+        pub fn deserialize<'de, D: FormatDecoder<'de>>(d: &mut D) -> Result<String> {
             Ok(d.string()?.to_lowercase())
         }
     }
@@ -258,13 +307,10 @@ fn with_module() {
 
 #[test]
 fn serialize_with_and_deserialize_with() {
-    fn ser_double(
-        v: &i32,
-        e: &mut nextjson::Encoder<impl nextjson::Write>,
-    ) -> nextjson::Result<()> {
+    fn ser_double<E: nextjson::FormatEncoder>(v: &i32, e: &mut E) -> nextjson::Result<()> {
         e.write_i64(*v as i64 * 2)
     }
-    fn de_half(d: &mut nextjson::Decoder) -> nextjson::Result<i32> {
+    fn de_half<'de, D: nextjson::FormatDecoder<'de>>(d: &mut D) -> nextjson::Result<i32> {
         Ok(d.number()?.as_i64().unwrap() as i32 / 2)
     }
 
@@ -318,7 +364,7 @@ fn flatten_map() {
     assert_eq!(back.a, 1);
     assert_eq!(back.extra.get("b"), Some(&2));
     assert_eq!(back.extra.get("c"), Some(&3));
-    // 反序列化时未命中的键进入 flatten map。
+
     let back: Outer = from_str(r#"{"a":9,"z":42}"#).unwrap();
     assert_eq!(back.extra.get("z"), Some(&42));
 }
@@ -409,7 +455,6 @@ fn nested_containers() {
 
 #[test]
 fn many_fields_uses_bitmask() {
-    // 8 个字段验证位掩码路径。
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
     struct Many {
         a: i32,
@@ -434,7 +479,7 @@ fn many_fields_uses_bitmask() {
     let text = to_string(&m).unwrap();
     let back: Many = from_str(&text).unwrap();
     assert_eq!(back, m);
-    // 缺失必填字段报错。
+
     assert!(from_str::<Many>(r#"{"a":1}"#).is_err());
 }
 

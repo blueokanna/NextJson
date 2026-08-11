@@ -232,6 +232,16 @@ fn misc_types_roundtrip() {
         dur
     );
 
+    let long_duration = std::time::Duration::new(u64::MAX, 999_999_999);
+    let encoded = nextjson::to_string(&long_duration).unwrap();
+    assert_eq!(encoded, long_duration.as_nanos().to_string());
+    assert_eq!(
+        nextjson::from_str::<std::time::Duration>(&encoded).unwrap(),
+        long_duration
+    );
+    let overflow = (long_duration.as_nanos() + 1).to_string();
+    assert!(nextjson::from_str::<std::time::Duration>(&overflow).is_err());
+
     let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     assert_eq!(nextjson::to_string(&ip).unwrap(), r#""127.0.0.1""#);
     assert_eq!(

@@ -8,11 +8,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::de::{read_token_tree, Decoder, NsonDeserialize};
-use crate::encoding::Encoder;
 use crate::error::Result;
 use crate::ser::NsonSerialize;
 use crate::value::Value;
-use crate::write::Write;
 
 pub use crate::de::{
     Decoder as DecoderReexport, NsonDeserialize as NsonDeserializeReexport, Token,
@@ -38,7 +36,10 @@ impl<T> InitSlot<T> {
     }
 
     /// Next-decode a field directly into this slot.
-    pub fn nextdecode<'de>(&mut self, decoder: &mut Decoder<'de>) -> Result<()>
+    pub fn nextdecode<'de, D: crate::de::FormatDecoder<'de>>(
+        &mut self,
+        decoder: &mut D,
+    ) -> Result<()>
     where
         T: NsonDeserialize<'de>,
     {
@@ -74,8 +75,8 @@ pub fn from_tokens<'de>(tokens: Vec<Token<'de>>) -> Decoder<'de> {
 }
 
 /// Read a whole object as `(key, value token subtree)` pairs.
-pub fn read_object_map<'de>(
-    decoder: &mut Decoder<'de>,
+pub fn read_object_map<'de, D: crate::de::FormatDecoder<'de>>(
+    decoder: &mut D,
 ) -> Result<Vec<(Cow<'de, str>, Vec<Token<'de>>)>> {
     let mut entries = Vec::new();
     decoder.begin_object()?;
@@ -155,8 +156,8 @@ fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
 }
 
 /// Internal-tag serialize: write `{ "<tag>": "<variant>", ...content }`.
-pub fn write_tagged_object<W: Write>(
-    encoder: &mut Encoder<W>,
+pub fn write_tagged_object<E: crate::ser::FormatEncoder>(
+    encoder: &mut E,
     tag: &str,
     variant_name: &str,
     value: Value,
@@ -174,6 +175,58 @@ pub fn write_tagged_object<W: Write>(
         }
         _ => Err(crate::error::Error::custom(
             "internally tagged newtype variant must serialize to an object",
+        )),
+    }
+}
+
+/// Re-emit one `Value` through any format encoder.
+///
+/// Used by `flatten` so the flattened sub-object's fields merge into the
+/// enclosing container regardless of the destination format.
+fn emit_value<E: crate::ser::FormatEncoder>(value: &Value, encoder: &mut E) -> Result<()> {
+    match value {
+        Value::Null => encoder.write_null(),
+        Value::Bool(b) => encoder.write_bool(*b),
+        Value::Number(n) => encoder.write_number(n),
+        Value::String(s) => encoder.write_str(s),
+        Value::Array(a) => {
+            encoder.begin_array()?;
+            for item in a {
+                encoder.separator()?;
+                emit_value(item, encoder)?;
+            }
+            encoder.end_array()
+        }
+        Value::Object(m) => {
+            encoder.begin_object()?;
+            for (k, v) in m.iter() {
+                encoder.key(k)?;
+                emit_value(v, encoder)?;
+            }
+            encoder.end_object()
+        }
+    }
+}
+
+/// Splice the fields of a JSON object value into any format encoder.
+///
+/// `json` must be the compact JSON text of an object (`{...}`). Its entries
+/// are re-emitted as key/value events so flattened structs work in every
+/// supported format, not just JSON.
+pub fn flatten_into<E: crate::ser::FormatEncoder>(json: &[u8], encoder: &mut E) -> Result<()> {
+    let mut decoder = Decoder::new(json);
+    let value = Value::nextdecode(&mut decoder)?;
+    decoder.end()?;
+    match value {
+        Value::Object(m) => {
+            for (k, v) in m.iter() {
+                encoder.key(k)?;
+                emit_value(v, encoder)?;
+            }
+            Ok(())
+        }
+        _ => Err(crate::error::Error::custom(
+            "flatten: expected an object or map",
         )),
     }
 }

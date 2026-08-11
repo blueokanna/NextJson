@@ -213,10 +213,10 @@ pub(crate) enum Fields {
 }
 
 impl Fields {
-    pub fn iter(&self) -> Vec<&Field> {
+    pub fn iter(&self) -> core::slice::Iter<'_, Field> {
         match self {
-            Fields::Unit => Vec::new(),
-            Fields::Named(f) | Fields::Unnamed(f) => f.iter().collect(),
+            Fields::Unit => [].iter(),
+            Fields::Named(fields) | Fields::Unnamed(fields) => fields.iter(),
         }
     }
 }
@@ -279,6 +279,7 @@ pub(crate) fn parse_input(input: TokenStream) -> Result<Input, String> {
 
     let attrs = parse_attrs(&mut p);
     let cattr = ContainerAttrs::from_metas(&collect_metas(&attrs));
+    eat_visibility(&mut p);
 
     let is_enum = if p.eat_ident("struct") {
         false
@@ -297,47 +298,38 @@ pub(crate) fn parse_input(input: TokenStream) -> Result<Input, String> {
         generics = parse_generics(&inner);
     }
 
-    if p.eat_ident("where") {
-        let mut cur = Vec::new();
-        loop {
-            match p.peek() {
-                Some(TokenTree::Group(g))
-                    if matches!(g.delimiter(), Delimiter::Brace | Delimiter::Parenthesis) =>
-                {
-                    break
-                }
-                Some(_) => cur.push(p.next().unwrap()),
-                None => break,
-            }
+    let data = if !is_enum
+        && matches!(p.peek(), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis)
+    {
+        let Some(TokenTree::Group(body)) = p.next() else {
+            return Err("nextjson: expected a tuple struct body".into());
+        };
+        if p.eat_ident("where") {
+            parse_where_clause(&mut p, &mut generics, false);
         }
-        for piece in split_top(&cur, ',') {
-            let s = join(&piece).trim().to_string();
-            if !s.is_empty() && s != ";" {
-                generics.where_preds.push(s);
-            }
-        }
-    }
-
-    let data = if !is_enum {
-        match p.next() {
-            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
-                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-                Data::Struct(Fields::Named(parse_named_fields(&inner)))
-            }
-            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
-                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-                Data::Struct(Fields::Unnamed(parse_unnamed_fields(&inner)))
-            }
-            Some(TokenTree::Punct(pc)) if pc.as_char() == ';' => Data::Struct(Fields::Unit),
-            _ => return Err("nextjson: expected a struct body".into()),
-        }
+        let inner: Vec<TokenTree> = body.stream().into_iter().collect();
+        Data::Struct(Fields::Unnamed(parse_unnamed_fields(&inner)))
     } else {
-        match p.next() {
-            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
-                let inner: Vec<TokenTree> = g.stream().into_iter().collect();
-                Data::Enum(parse_variants(&inner))
+        if p.eat_ident("where") {
+            parse_where_clause(&mut p, &mut generics, true);
+        }
+        if !is_enum {
+            match p.next() {
+                Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                    let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                    Data::Struct(Fields::Named(parse_named_fields(&inner)))
+                }
+                Some(TokenTree::Punct(pc)) if pc.as_char() == ';' => Data::Struct(Fields::Unit),
+                _ => return Err("nextjson: expected a struct body".into()),
             }
-            _ => return Err("nextjson: expected an enum body".into()),
+        } else {
+            match p.next() {
+                Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                    let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+                    Data::Enum(parse_variants(&inner))
+                }
+                _ => return Err("nextjson: expected an enum body".into()),
+            }
         }
     };
 
@@ -349,38 +341,80 @@ pub(crate) fn parse_input(input: TokenStream) -> Result<Input, String> {
     })
 }
 
+fn parse_where_clause(p: &mut P<'_>, generics: &mut Generics, has_braced_body: bool) {
+    let mut tokens = Vec::new();
+    while let Some(token) = p.peek() {
+        let is_body = has_braced_body
+            && p.i + 1 == p.toks.len()
+            && matches!(token, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace);
+        if is_body || matches!(token, TokenTree::Punct(punct) if punct.as_char() == ';') {
+            break;
+        }
+        if let Some(token) = p.next() {
+            tokens.push(token);
+        }
+    }
+    for piece in split_top(&tokens, ',') {
+        let predicate = join(&piece).trim().to_string();
+        if !predicate.is_empty() {
+            generics.where_preds.push(predicate);
+        }
+    }
+}
+
 fn parse_generics(inner: &[TokenTree]) -> Generics {
     let mut g = Generics::default();
     for item in split_top(inner, ',') {
         if item.is_empty() {
             continue;
         }
-        let mut p = P { toks: &item, i: 0 };
+        let declaration = strip_generic_default(&item);
+        let mut p = P {
+            toks: &declaration,
+            i: 0,
+        };
         if p.is_punct('\'') {
             p.next();
             let name = p.expect_ident().unwrap_or_default();
             g.params.push(GenericParam {
                 kind: ParamKind::Lifetime,
-                full: join(&item),
+                full: join(&declaration),
                 name: format!("'{name}"),
             });
         } else if p.eat_ident("const") {
             let name = p.expect_ident().unwrap_or_default();
             g.params.push(GenericParam {
                 kind: ParamKind::Const,
-                full: join(&item),
+                full: join(&declaration),
                 name,
             });
         } else {
             let name = p.expect_ident().unwrap_or_default();
             g.params.push(GenericParam {
                 kind: ParamKind::Type,
-                full: join(&item),
+                full: join(&declaration),
                 name,
             });
         }
     }
     g
+}
+
+fn strip_generic_default(tokens: &[TokenTree]) -> Vec<TokenTree> {
+    let mut angle_depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            TokenTree::Punct(punct) if punct.as_char() == '<' => angle_depth += 1,
+            TokenTree::Punct(punct) if punct.as_char() == '>' => {
+                angle_depth = angle_depth.saturating_sub(1);
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '=' && angle_depth == 0 => {
+                return tokens[..index].to_vec();
+            }
+            _ => {}
+        }
+    }
+    tokens.to_vec()
 }
 
 fn parse_named_fields(inner: &[TokenTree]) -> Vec<Field> {
@@ -391,13 +425,23 @@ fn parse_named_fields(inner: &[TokenTree]) -> Vec<Field> {
         .collect()
 }
 
+/// Consume an optional `pub` visibility specifier (`pub`, `pub(crate)`,
+/// `pub(super)`, `pub(in path)`). In the proc-macro token stream the
+/// parenthesized part arrives as a `Group` with `Parenthesis` delimiter, not
+/// as a `Punct('(')`, so it must be matched as a group.
+pub(crate) fn eat_visibility(p: &mut P<'_>) {
+    if !p.eat_ident("pub") {
+        return;
+    }
+    if matches!(p.peek(), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) {
+        p.next();
+    }
+}
+
 fn parse_named_field(piece: &[TokenTree]) -> Field {
     let mut p = P { toks: piece, i: 0 };
     let attrs = parse_attrs(&mut p);
-    if p.eat_ident("pub") && p.is_punct('(') {
-        p.next();
-        p.next();
-    }
+    eat_visibility(&mut p);
     // Find the field separator ':' at top level, excluding '::'.
     let mut colon = None;
     let mut j = p.i;
@@ -435,10 +479,7 @@ fn parse_unnamed_fields(inner: &[TokenTree]) -> Vec<Field> {
         .map(|piece| {
             let mut p = P { toks: piece, i: 0 };
             let attrs = parse_attrs(&mut p);
-            if p.eat_ident("pub") && p.is_punct('(') {
-                p.next();
-                p.next();
-            }
+            eat_visibility(&mut p);
             Field {
                 ident: None,
                 ty: join(&piece[p.i..]).trim().to_string(),
@@ -573,7 +614,7 @@ pub(crate) fn generate_impls(input: &Input) -> TokenStream {
          }}\n\
          #[automatically_derived]\n\
          impl {ig} {cp}::NsonSerialize for {name}{tg}{wc} {{\n\
-         \x20   fn nextencode<__W: {cp}::Write>(&self, __e: &mut {cp}::Encoder<__W>) -> {cp}::Result<()> {{\n\
+         \x20   fn nextencode<__E: {cp}::FormatEncoder>(&self, __e: &mut __E) -> {cp}::Result<()> {{\n\
          {body}\n\
          \x20   }}\n\
          }}"
@@ -598,8 +639,8 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
     let out = format!(
         "#[automatically_derived]\n\
          impl {ig} {cp}::NsonDeserialize<'de> for {name}{tg}{wc} {{\n\
-         \x20   fn nextdecode_into(\n\
-         \x20       __d: &mut {cp}::Decoder<'de>,\n\
+         \x20   fn nextdecode_into<__D: {cp}::FormatDecoder<'de>>(\n\
+         \x20       __d: &mut __D,\n\
          \x20       __out: &mut {cp}::DecodeSlot<Self>,\n\
          \x20   ) -> {cp}::Result<()> {{\n\
          {body}\n\
@@ -611,16 +652,10 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
 
 fn type_has_flag<F: Fn(&FieldAttrs) -> bool>(input: &Input, f: F) -> bool {
     match &input.data {
-        Data::Struct(fields) => fields
+        Data::Struct(fields) => fields.iter().any(|fld| f(&attr::field_attrs(&fld.attrs))),
+        Data::Enum(variants) => variants
             .iter()
-            .iter()
-            .any(|fld| f(&attr::field_attrs(&fld.attrs))),
-        Data::Enum(variants) => variants.iter().any(|v| {
-            v.fields
-                .iter()
-                .iter()
-                .any(|fld| f(&attr::field_attrs(&fld.attrs)))
-        }),
+            .any(|v| v.fields.iter().any(|fld| f(&attr::field_attrs(&fld.attrs)))),
     }
 }
 

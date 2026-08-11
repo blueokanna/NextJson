@@ -20,7 +20,32 @@ fields, and duplicate-field replacement.
 - Checked integer parsing covers the complete Rust `i128`/`u128` domain.
 - CBOR tag 2/tag 3 values wider than 128 bits are errors.
 - Non-finite JSON and CBOR floats are errors.
-- The default nesting limit is 128.
+- Decoders reject nesting deeper than 128 levels by default.
+
+## Multi-format guarantees
+
+Every format in `nextjson::formats` serves the same checked event contract.
+Format-specific guarantees:
+
+- Length-prefixed binary formats (MessagePack, BSON, bencode, pickle) reject
+  truncated headers and buffers that do not consume the declared length.
+- BSON documents validate element type bytes and null-terminated field names,
+  and reject a document whose declared length differs from the consumed input.
+- Pickle executes a bounded stack-machine subset: `MARK` framing, stack depth,
+  and long-integer (`LONG1`/`LONG4`) sizes are bounds-checked; unknown opcodes
+  are errors.
+- Postcard is non-self-describing; schema-less peeking is rejected because the
+  wire cannot classify the next token without a target type.
+- Bencode, TOML, and BSON reject values their wire models cannot represent
+  (a bare scalar root for TOML/BSON; `null`/float for bencode). Bencode maps
+  booleans explicitly to canonical integers `1` and `0`.
+- The YAML, TOML, JSON5, and Hjson text parsers validate UTF-8 and reject
+  unterminated strings, quotes, and block constructs.
+- URL-form decoding validates percent-encoding (`%XX`) pairs; malformed
+  escapes are errors.
+
+No format performs a silent lossy fallback: a value that a wire format cannot
+preserve is an explicit error on the `encode` or `decode` side.
 
 ## Cross-format guarantees
 
@@ -28,6 +53,8 @@ JSON and CBOR relay events through `EventSink` without building a document
 tree. Structural state rejects multiple roots, mismatched containers, missing
 object values, and keys outside objects. CBOR byte strings, non-text keys,
 non-finite floats, and unknown tags fail instead of being converted lossily.
+`formats::transcode` decodes to a `Value` and re-emits; the same no-lossy-
+fallback rule applies to every source/destination pair.
 
 ## Zero-copy boundary
 
@@ -55,6 +82,8 @@ cargo tree --workspace --all-features --edges normal,build,dev
 
 The regression suite covers malformed input, depth limits, integer boundaries,
 partial-drop behavior, invalid custom decoders, writer failures, RFC 8949
-fixtures, 128-bit bignums, structural event errors, and pointer-level borrowing.
-These checks are evidence for the covered contracts, not a replacement for
-deployment-specific quotas or future continuous fuzzing.
+fixtures, 128-bit bignums, structural event errors, pointer-level borrowing,
+all registered format entry points, and explicit foreign-wire fixtures for the
+formats named in the README. These checks are evidence for the covered
+contracts, not a replacement for deployment-specific quotas or continuous
+fuzzing.

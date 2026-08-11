@@ -230,14 +230,17 @@ fn gen_match_nextdecode(
         "while let ::core::option::Option::Some(__key) = {decoder}.object_key()? {{"
     ));
     c.l("match __key.as_ref() {");
-    for (i, f, fa) in &tracked {
+    for (idx, (i, f, fa)) in tracked.iter().enumerate() {
+        // `idx` is the position within `tracked` (0..n) and therefore the
+        // bit/`Vec<bool>` index used by `seen_decl`; `i` stays the original
+        // field index used for the `__slot{i}` storage.
         let main = crate::schema::renamed_field(f, fa, ca);
         let mut pats = vec![format!("{main:?}")];
         for a in &fa.alias {
             pats.push(format!("{a:?}"));
         }
         c.l(&format!("{} => {{", pats.join(" | ")));
-        c.l(&set_tpl.replace("{i}", &i.to_string()));
+        c.l(&set_tpl.replace("{i}", &idx.to_string()));
         if fa.deserialize_with.is_some() || fa.with.is_some() {
             let expr = field_decode_expr(f, fa, cp, decoder);
             c.l(&format!("let __v = {expr};"));
@@ -261,8 +264,8 @@ fn gen_match_nextdecode(
     c.l("}");
     c.l(&format!("{decoder}.end_object()?;"));
 
-    for (i, f, fa) in &tracked {
-        let check = check_tpl.replace("{i}", &i.to_string());
+    for (idx, (i, f, fa)) in tracked.iter().enumerate() {
+        let check = check_tpl.replace("{i}", &idx.to_string());
         let ident = f.ident.clone().unwrap_or_default();
         if field_required(f, fa, ca) {
             let orig = ident.clone();
@@ -312,19 +315,12 @@ fn gen_map_nextdecode(
         "let mut __map = <{cp}::Map as {cp}::NsonDeserialize<'de>>::nextdecode({decoder})?;"
     ));
 
+    // First pass: explicit fields, which remove their own keys from the map.
     for (i, f, fa) in &tracked {
-        let ident = f.ident.clone().unwrap_or_default();
         if fa.flatten {
-            let wv = write_value(*i, "__decoded");
-            c.l("{");
-            c.l(&format!(
-                "let __decoded = {cp}::private::nextdecode_value::<{}>({cp}::Value::Object(__map.clone()))?;",
-                f.ty
-            ));
-            c.l(&wv);
-            c.l("}");
             continue;
         }
+        let ident = f.ident.clone().unwrap_or_default();
         let main = crate::schema::renamed_field(f, fa, ca);
         let mut keys = vec![format!("__map.remove({main:?})")];
         for a in &fa.alias {
@@ -352,6 +348,21 @@ fn gen_map_nextdecode(
             c.l(&format!("::core::option::Option::None => {{ {dw} }}"));
         }
         c.l("}");
+        c.l("}");
+    }
+    // Second pass: flatten fields consume the remaining keys, regardless of
+    // their declaration position (serde semantics: flatten captures the rest).
+    for (i, f, fa) in &tracked {
+        if !fa.flatten {
+            continue;
+        }
+        let wv = write_value(*i, "__decoded");
+        c.l("{");
+        c.l(&format!(
+            "let __decoded = {cp}::private::nextdecode_value::<{}>({cp}::Value::Object(__map.clone()))?;",
+            f.ty
+        ));
+        c.l(&wv);
         c.l("}");
     }
     c.out()

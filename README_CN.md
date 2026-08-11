@@ -150,13 +150,101 @@ assert_eq!(left, right);
 
 这些限制防止 CBOR 到 JSON 时发生静默语义损失。
 
+### 多格式引擎
+
+`nextjson::formats` 是零依赖、格式中立的多格式编解码引擎。自有的
+`NsonSerialize` / `NsonDeserialize` 契约泛型化于 `FormatEncoder` /
+`FormatDecoder` 之上；同一份实现可服务所有能够表示该值的线格式。多数编码器直接
+发射；TOML 和 YAML 因表顺序要求先收集为 `Value`。不兼容的类型/格式组合按下表
+返回错误。
+
+```rust
+use nextjson::formats;
+
+let value = ("NextJson", vec![1_u64, 2, 3], true);
+
+let json = formats::encode_with(&value, formats::Json)?;
+let msgpack = formats::encode_with(&value, formats::MsgPack)?;
+let yaml = formats::encode_with(&value, formats::Yaml)?;
+
+let back: (String, Vec<u64>, bool) = formats::decode_with(&json, formats::Json)?;
+assert_eq!(back, formats::decode_with(&msgpack, formats::MsgPack)?);
+assert_eq!(back, formats::decode_with(&yaml, formats::Yaml)?);
+# Ok::<(), nextjson::Error>(())
+```
+
+共注册 16 种格式。格式是一等 `Format` 值，携带规范名、MIME 类型、文件扩展名和
+二进制/文本分类，可以按值传递、存储或动态选择：
+
+```rust
+use nextjson::formats::{FormatKind, self};
+
+let kind: Option<FormatKind> = formats::by_extension("toml");
+let detected: Option<FormatKind> = formats::detect(br#"{"a":1}"#);
+let json = formats::encode_with(&42_i64, formats::Json)?; // 按值选择格式
+# let _ = (kind, detected, json);
+```
+
+| 分组                 | 格式                                                             |
+| -------------------- | ---------------------------------------------------------------- |
+| 文本、自描述         | `json`、`json5`、`hjson`、`yaml`、`toml`、`ron`、`sexpr`、`csv`、`urlform` |
+| 二进制、自描述       | `cbor`、`msgpack`、`bson`、`bencode`、`pickle`                   |
+| 二进制、轻模式       | `postcard`                                                       |
+| 环境                 | `envy`（仅反序列化，需要 `std`）                                  |
+
+数据模型兼容的格式之间无需类型化值即可互转：
+
+```rust
+use nextjson::formats;
+let json = br#"{"name":"NextJson","values":[1,2,3]}"#;
+let msgpack = formats::transcode(json, formats::Json, formats::MsgPack)?;
+let json2 = formats::transcode(&msgpack, formats::MsgPack, formats::Json)?;
+assert_eq!(json2, json);
+# Ok::<(), nextjson::Error>(())
+```
+
+#### 能力矩阵（诚实标注的局限）
+
+每种格式都实现统一契约；线格式模型限制和编解码器明确限定的子集都会以错误报告，
+不会静默做有损回退：
+
+| 格式       | 标量                                   | 容器             | 说明 |
+| ---------- | -------------------------------------- | ---------------- | ---- |
+| `json`     | null/bool/int/float/str                | array/object     | RFC 8259，完整模型 |
+| `json5`    | 同 JSON + `Infinity`/`NaN`             | + 注释、未加引号键、单引号、尾随逗号 | 编码器输出严格 JSON |
+| `hjson`    | 同 JSON                                | + 未加引号键/字符串、注释 | 编码器输出严格 JSON |
+| `yaml`     | null/bool/int/float/str                | 块式 + 流式子集   | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]` |
+| `toml`     | bool/int/float/str（无 null）          | 表、数组、内联表 | 文档形态：裸标量根被拒绝 |
+| `ron`      | bool/int/float/str/char                | map/seq/元组/结构体/枚举 | `Some(...)` 包装可往返 |
+| `sexpr`    | 原子、带引号字符串、数字、`#t`/`#f`、`nil` | 列表；map 编为 alist | 无模式 `Value` 解码嵌套 map 有歧义，请用类型化目标 |
+| `csv`      | int/float/bool/str                     | 行；带表头的对象行 | RFC 4180 |
+| `urlform`  | int/float/bool/str                     | 仅扁平 key/value map | RFC 3986 百分号编码 |
+| `cbor`     | null/bool/int/float/str                | array/map         | RFC 8949 JSON 兼容 profile，经事件流中继 |
+| `msgpack`  | nil/bool/int/float/str                 | array/map         | JSON 兼容标量/容器族；不支持 bin/ext；128 位整数放不进 64 位时拒绝 |
+| `bson`     | null/bool/int32/int64/double/str       | document/array    | 文档形态：裸标量根被拒绝 |
+| `bencode`  | 整数、UTF-8 字符串                     | list/dict         | key 规范排序；无 null/float；bool 映射为 1/0 |
+| `postcard` | null/bool/无符号整数/str               | seq/map           | **非自描述**：拒绝有符号整数、float、`Option`、`Value` 和 peek |
+| `pickle`   | `None`/bool/int/float/str              | list/dict/tuple   | CPython 协议 2 子集；128 位经 `LONG1` |
+| `envy`     | int/float/bool/str                     | 扁平 map（即环境变量） | 仅反序列化；需要 `std` |
+
+`detect()` 是启发式且刻意保守：只认定强结构签名（pickle 协议头、bencode 开头、
+BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名），有歧义输入
+返回 `None`。
+
+#### 跨语言兼容
+
+各编解码器不仅通过自往返测试，还使用明确的外部 wire fixture：与 Python
+`msgpack`/`cbor2` 匹配的字节、CPython 3 protocol-2 pickle、规范 bencode、
+MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 输入。
+精确字节见 `formats` 集成测试。
+
 ### 派生与 Schema
 
 自有派生宏支持结构体、元组结构体、泛型、常量泛型和多种枚举表示。主要属性：
 
 - 容器：`rename_all`、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`；
 - 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`；
-- 变体：`rename`、`alias`、`skip`、`other`。
+- 变体：`rename`、`rename_all`、`skip`、方向性 skip。
 
 每个派生类型同时提供 `const SCHEMA: TypeSchema`：
 

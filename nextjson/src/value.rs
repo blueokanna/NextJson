@@ -1,5 +1,6 @@
 //! Self-describing JSON [`Value`] type (AST).
 
+use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ops::Index;
@@ -142,10 +143,10 @@ impl Value {
         }
         let mut current = self;
         for raw in pointer.split('/').skip(1) {
-            let token = raw.replace("~1", "/").replace("~0", "~");
+            let token = decode_pointer_token(raw)?;
             current = match current {
-                Value::Object(m) => m.get(&token)?,
-                Value::Array(a) => a.get(token.parse::<usize>().ok()?)?,
+                Value::Object(m) => m.get(token.as_ref())?,
+                Value::Array(a) => a.get(parse_array_index(token.as_ref())?)?,
                 _ => return None,
             };
         }
@@ -166,6 +167,48 @@ impl Value {
             _ => None,
         }
     }
+}
+
+/// Decode one RFC 6901 reference token, borrowing tokens that need no escapes.
+fn decode_pointer_token(token: &str) -> Option<Cow<'_, str>> {
+    let Some(first_escape) = token.as_bytes().iter().position(|&byte| byte == b'~') else {
+        return Some(Cow::Borrowed(token));
+    };
+
+    let mut decoded = String::with_capacity(token.len());
+    decoded.push_str(&token[..first_escape]);
+    let mut remainder = &token[first_escape..];
+    while let Some(escape) = remainder.strip_prefix('~') {
+        match escape.as_bytes().first() {
+            Some(b'0') => decoded.push('~'),
+            Some(b'1') => decoded.push('/'),
+            _ => return None,
+        }
+        remainder = &escape[1..];
+        match remainder.find('~') {
+            Some(next_escape) => {
+                decoded.push_str(&remainder[..next_escape]);
+                remainder = &remainder[next_escape..];
+            }
+            None => {
+                decoded.push_str(remainder);
+                break;
+            }
+        }
+    }
+    Some(Cow::Owned(decoded))
+}
+
+/// RFC 6901 array indexes are either `0` or a non-zero decimal without a sign.
+fn parse_array_index(token: &str) -> Option<usize> {
+    let bytes = token.as_bytes();
+    if bytes.is_empty() || (bytes.len() > 1 && bytes[0] == b'0') {
+        return None;
+    }
+    if !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    token.parse().ok()
 }
 
 impl Index<&str> for Value {
@@ -337,5 +380,35 @@ mod tests {
         assert_eq!(v.pointer("/a/1"), Some(&Value::Number(20.into())));
         assert!(v.get_mut("a").is_some());
         assert!(v.pointer("/x").is_none());
+    }
+
+    #[test]
+    fn pointer_decodes_escapes_and_rejects_invalid_tokens() {
+        let v = Value::Object(Map::from_iter(vec![
+            ("a/b".to_string(), Value::Bool(true)),
+            ("m~n".to_string(), Value::Bool(false)),
+            ("~2".to_string(), Value::Null),
+        ]));
+
+        assert_eq!(v.pointer("/a~1b"), Some(&Value::Bool(true)));
+        assert_eq!(v.pointer("/m~0n"), Some(&Value::Bool(false)));
+        assert!(v.pointer("/~2").is_none());
+        assert!(v.pointer("/trailing~").is_none());
+        assert!(matches!(
+            decode_pointer_token("plain"),
+            Some(Cow::Borrowed("plain"))
+        ));
+    }
+
+    #[test]
+    fn pointer_enforces_array_index_grammar() {
+        let v = Value::Array(vec![Value::Null, Value::Bool(true)]);
+
+        assert_eq!(v.pointer("/0"), Some(&Value::Null));
+        assert_eq!(v.pointer("/1"), Some(&Value::Bool(true)));
+        assert!(v.pointer("/01").is_none());
+        assert!(v.pointer("/+1").is_none());
+        assert!(v.pointer("/-").is_none());
+        assert!(v.pointer("/184467440737095516160").is_none());
     }
 }

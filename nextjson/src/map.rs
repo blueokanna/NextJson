@@ -1,8 +1,9 @@
 //! Insertion-ordered JSON object map.
 //!
 //! Unlike `BTreeMap` (loses insertion order) and a raw `HashMap` (random
-//! iteration order), `Map` overlays a lookup index on a `Vec`, giving O(1)
-//! lookups while preserving deterministic insertion order for round-trips.
+//! iteration order), `Map` overlays a `BTreeMap` lookup index on a `Vec`,
+//! giving O(log n) lookups while preserving deterministic insertion order for
+//! round-trips and `no_std` compatibility.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
