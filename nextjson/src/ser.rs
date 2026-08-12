@@ -847,14 +847,14 @@ impl<W: Write> Encoder<W> {
     /// Write an `i64`.
     pub fn write_i64(&mut self, v: i64) -> Result<()> {
         self.start_value()?;
-        write_signed_integer_into(&mut self.buf, v as i128);
+        write_i64_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u64`.
     pub fn write_u64(&mut self, v: u64) -> Result<()> {
         self.start_value()?;
-        write_unsigned_integer_into(&mut self.buf, v as u128);
+        write_u64_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
@@ -972,6 +972,36 @@ fn write_unicode_escape(buf: &mut Vec<u8>, ch: char) {
 }
 
 /// Integer output using a stack buffer (no allocation).
+///
+/// The `u64` path is deliberately separate from the `u128` path: widening a
+/// `u64` to `u128` and dividing forces LLVM to emit a compiler-rt
+/// `__udivti3` libcall on x86-64 (u128 division has no single hardware
+/// instruction), several times slower than the native `u64` `div`. Integer
+/// values dominate JSON payloads, so the native-width path is the hot one.
+fn write_u64_into(buf: &mut Vec<u8>, mut value: u64) {
+    let mut digits = [0_u8; 20];
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    buf.extend_from_slice(&digits[cursor..]);
+}
+
+fn write_i64_into(buf: &mut Vec<u8>, value: i64) {
+    if value < 0 {
+        buf.push(b'-');
+        write_u64_into(buf, value.wrapping_neg() as u64);
+    } else {
+        write_u64_into(buf, value as u64);
+    }
+}
+
+/// Integer output for the wide (128-bit) path only.
 fn write_unsigned_integer_into(buf: &mut Vec<u8>, mut value: u128) {
     let mut digits = [0_u8; 39];
     let mut cursor = digits.len();
@@ -1690,6 +1720,36 @@ mod tests {
         let mut buf = Vec::new();
         write_signed_integer_into(&mut buf, i128::MIN);
         assert_eq!(buf, b"-170141183460469231731687303715884105728");
+    }
+
+    #[test]
+    fn native_width_integer_formatting_matches_wide_path() {
+        // The native u64/i64 path must produce byte-identical output to the
+        // u128 path for every value in range (including signs and extremes).
+        for value in [
+            0_u64,
+            1,
+            9,
+            10,
+            99,
+            100,
+            u64::MAX,
+            u64::MAX - 1,
+            123_456_789_012_345,
+        ] {
+            let mut native = Vec::new();
+            write_u64_into(&mut native, value);
+            let mut wide = Vec::new();
+            write_unsigned_integer_into(&mut wide, value as u128);
+            assert_eq!(native, wide, "u64 {value}");
+        }
+        for value in [i64::MIN, i64::MIN + 1, -1_i64, -10, i64::MAX, 0_i64] {
+            let mut native = Vec::new();
+            write_i64_into(&mut native, value);
+            let mut wide = Vec::new();
+            write_signed_integer_into(&mut wide, value as i128);
+            assert_eq!(native, wide, "i64 {value}");
+        }
     }
 
     #[test]

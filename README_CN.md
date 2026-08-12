@@ -274,12 +274,18 @@ let json_schema = nextjson::to_json_schema::<Point>();
 
 ### Benchmark
 
-自有 benchmark 比较同一份 128 记录数据的四条路径：原生 JSON nextencode、原生
-JSON nextdecode、JSON 到 CBOR、CBOR 到 JSON。它不依赖外部库，也不制造“普遍更快”
-结论。
+自有 benchmark 比较同一份 128 记录数据在全部 14 种格式上的编码/解码吞吐与编码体积。
+工作区不引入任何对比库，也不制造“普遍更快”结论。
 
 ```text
 cargo bench --locked -p nextjson --bench format_comparison
+```
+
+另有**独立于工作区之外的 crate**（`benchmarks/serde-comparison/`）在同一数据上
+对比 `serde`/`serde_json`；它持有自己的 Cargo.lock，工作区依赖审计不受影响。
+
+```text
+cd benchmarks/serde-comparison && cargo run --release
 ```
 
 复现方法和输出格式见[可复现基准测试](docs/BENCHMARKS_CN.md)。

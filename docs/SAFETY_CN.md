@@ -60,3 +60,26 @@ byte string、非文本 key、非有限浮点和未知 tag 会明确失败。`fo
 深度限制不等于总资源限制。库不统一限制输入总字节数、字符串长度、集合长度、输出
 长度或执行时间。处理不可信流量时，应用必须在传输层和业务层设置这些配额。
 `from_reader` 会缓冲完整 reader，必须由调用方提供有界 reader。
+
+### 与 serde 的安全对比
+
+本节如实比较安全相关属性，是**属性对比**，不是"谁绝对更安全"的断言——两者在
+Rust 规则下都内存安全，且都依赖应用层设置部署配额。
+
+| 属性 | serde / serde_json | nextjson |
+| --- | --- | --- |
+| `unsafe` 代码 | serde 内部使用 `unsafe`（反射、`RawValue`）；serde_json 浮点解析历史上使用过 `unsafe` | `#![deny(unsafe_code)]`；crate 内无任何 `unsafe` |
+| 编译器强制的 unsafe 门禁 | 无（允许 unsafe） | `#![deny(unsafe_code)]` 让任何未来的 `unsafe` 直接编译失败 |
+| 错误模型 | `serde_json::Error` 带 line/column；serde 的 `Error` 不透明 | `Error` 带 line/column/offset 与粗粒度 `classification()` |
+| 递归限制 | serde_json 有递归限制（128）；serde 核心依赖 serializer | 所有解码器默认上限 128 层 |
+| 数字溢出 | serde_json 返回溢出错误 | 检查式 `i128/u128` 解析，溢出报错 |
+| 非有限浮点（JSON） | serde_json 在无 feature 时把 `NaN`/`Infinity` 输出为 `null` | 显式报错（无静默有损回退） |
+| UTF-8 / surrogate 校验 | serde_json 校验 | 每条字符串路径都校验 |
+| 派生错误的部分析构安全 | serde visitor 模式把状态放在局部变量 | `InitSlot<T>` 用正常 `Option<T>` 析构语义；重复字段替换会 drop 旧值 |
+| `no_std` | serde `no_std`；serde_json 仅 `std` | 核心 `no_std + alloc`；仅流式 IO 依赖 `std` |
+| 零依赖构建图 | serde 本身是依赖；生态格式 crate 更多 | 整个工作区只有两个本地 crate |
+| 格式严格性 | 各 serde 格式 crate 行为不一（如 serde_json `RawValue`、YAML 怪癖） | 每种格式都拒绝其线格式无法保真的值——无静默有损回退 |
+
+本表**不**断言：nextjson 的长期遗留 bug 比经过十年社区 fuzz 的生态更少，也不
+替代外部 fuzzing 或部署配额。`unsafe` 零使用与 `deny(unsafe_code)` 门禁是可
+验证的具体差异。

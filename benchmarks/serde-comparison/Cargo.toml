@@ -1,0 +1,25 @@
+[package]
+name = "nextjson-serde-comparison"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Standalone, out-of-workspace benchmark comparing nextjson against serde/serde_json."
+
+# This crate is intentionally NOT a member of the root workspace. It exists so
+# the repository can benchmark against the mature serde ecosystem without
+# adding a third-party source to the workspace Cargo.lock (which the
+# dependency-audit CI gate forbids). Its own Cargo.lock is independent and is
+# committed for reproducible `--locked` builds. The empty `[workspace]` table
+# declares this directory its own workspace root, excluding it from the parent
+# workspace.
+[workspace]
+
+[dependencies]
+nextjson = { path = "../../nextjson", version = "0.1.2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

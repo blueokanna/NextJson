@@ -270,13 +270,20 @@ application responsibilities.
 
 ### Benchmark
 
-The repository-owned benchmark runs four paths over the same 128-record
-fixture: native JSON `nextencode`, native JSON `nextdecode`, JSON to CBOR, and
-CBOR to JSON. It imports no comparison library and does not claim universal
-superiority.
+The repository-owned benchmark compares encode/decode throughput and encoded
+size across all 14 formats over the same 128-record fixture. It imports no
+comparison library in the workspace and does not claim universal superiority.
 
 ```text
 cargo bench --locked -p nextjson --bench format_comparison
+```
+
+An out-of-workspace crate (`benchmarks/serde-comparison/`) additionally
+benchmarks the same fixture against `serde`/`serde_json` on shared hardware;
+it keeps its own Cargo.lock so the workspace dependency audit stays intact.
+
+```text
+cd benchmarks/serde-comparison && cargo run --release
 ```
 
 See the [Reproducible Benchmark](https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md) for the fixture, measurement method, output

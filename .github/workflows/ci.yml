@@ -53,6 +53,23 @@ jobs:
         run: cargo fmt --all -- --check
 
   # ---------------------------------------------------------------------------
+  # Coverage gate: the test suite must reach at least 80% line coverage.
+  # cargo-llvm-cov is installed as a standalone binary; it never touches the
+  # project Cargo.lock, so the zero-dependency dependency-audit stays valid.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage (lines >= 80%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable with llvm-tools
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview
+          cargo install cargo-llvm-cov --locked
+      - name: Run tests with coverage gate
+        run: cargo llvm-cov --workspace --all-features --fail-under-lines 80
+
+  # ---------------------------------------------------------------------------
   # Lint gate: clippy with warnings denied, for the full feature set, the bare
   # no_std configuration, and no_std + derive.
   # ---------------------------------------------------------------------------
@@ -137,7 +154,12 @@ jobs:
         run: cargo package -p nextjson --locked --offline --config "patch.crates-io.nextjson-derive.path='nextjson-derive'"
 
   # ---------------------------------------------------------------------------
-  # Benchmark gate: ensure the criterion benchmark target compiles.
+  # Benchmark gate: compile the in-workspace all-format benchmark AND the
+  # standalone serde-comparison benchmark. The serde comparison lives in an
+  # out-of-workspace crate (`benchmarks/serde-comparison`) with its own
+  # Cargo.lock so the workspace dependency-audit (zero third-party sources)
+  # stays intact; CI builds it but does not enforce a throughput threshold on
+  # shared hardware.
   # ---------------------------------------------------------------------------
   benchmark:
     name: benchmark compile
@@ -146,5 +168,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
-      - name: Compile benchmark
+      - name: Compile in-workspace format benchmark
         run: cargo bench -p nextjson --bench format_comparison --no-run --locked
+      - name: Compile serde comparison benchmark (out-of-workspace)
+        working-directory: benchmarks/serde-comparison
+        run: cargo build --release --locked

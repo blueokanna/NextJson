@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use nextjson::{DecodeSlot, Error, NsonDeserialize, Value, Write};
 
 #[test]
@@ -138,13 +136,15 @@ fn f32_decode_rejects_finite_f64_that_overflows() {
     assert_eq!(nextjson::from_str::<f32>("3.5").unwrap(), 3.5);
 }
 
-static DROPS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static DROPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
 
 struct DropProbe;
 
 impl Drop for DropProbe {
     fn drop(&mut self) {
-        DROPS.fetch_add(1, Ordering::SeqCst);
+        DROPS.with(|d| d.set(d.get() + 1));
     }
 }
 
@@ -165,28 +165,35 @@ struct ResourceOwner {
     count: u32,
 }
 
+fn drops() -> usize {
+    DROPS.with(|d| d.get())
+}
+fn reset_drops() {
+    DROPS.with(|d| d.set(0));
+}
+
 #[test]
 fn derived_struct_drops_initialized_fields_after_later_error() {
-    DROPS.store(0, Ordering::SeqCst);
+    reset_drops();
     let result = nextjson::from_str::<ResourceOwner>(r#"{"resource":"open","count":"bad"}"#);
 
     assert!(result.is_err());
-    assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    assert_eq!(drops(), 1);
 }
 
 #[test]
 fn duplicate_field_replacement_drops_the_previous_value() {
-    DROPS.store(0, Ordering::SeqCst);
+    reset_drops();
     let value = nextjson::from_str::<ResourceOwner>(
         r#"{"resource":"first","resource":"second","count":1}"#,
     )
     .unwrap();
 
-    assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    assert_eq!(drops(), 1);
     assert_eq!(value.count, 1);
     let _ = &value.resource;
     drop(value);
-    assert_eq!(DROPS.load(Ordering::SeqCst), 2);
+    assert_eq!(drops(), 2);
 }
 
 #[test]

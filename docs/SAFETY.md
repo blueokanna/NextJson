@@ -87,3 +87,29 @@ all registered format entry points, and explicit foreign-wire fixtures for the
 formats named in the README. These checks are evidence for the covered
 contracts, not a replacement for deployment-specific quotas or continuous
 fuzzing.
+
+## Safety comparison with serde
+
+This section compares safety-relevant properties honestly. It is a *property*
+comparison, not a claim that one library is universally safer — both are memory
+safe under Rust's rules, and both rely on applications enforcing deployment
+quotas.
+
+| Property | serde / serde_json | nextjson |
+| --- | --- | --- |
+| `unsafe` code | serde uses internal `unsafe` (reflection, `RawValue`); serde_json float parsing historically used `unsafe` | `#![deny(unsafe_code)]`; the only `unsafe`-adjacent path is `MaybeUninit`-free checked slots — no `unsafe` in the crate |
+| Compiler-enforced unsafe gate | none (unsafe is allowed) | `#![deny(unsafe_code)]` makes any future `unsafe` a compile error |
+| Error model | `serde_json::Error` carries line/column; serde `Error` is opaque | `Error` carries line/column/offset and a coarse `classification()` |
+| Recursion limits | serde_json has a recursion limit (128); serde core relies on serializer | all decoders cap nesting at 128 by default |
+| Number overflow | serde_json returns overflow errors | checked `i128`/`u128` parsing with overflow errors |
+| Non-finite floats (JSON) | serde_json emits `null` for `NaN`/`Infinity` unless feature flags | explicit error (no silent lossy fallback) |
+| UTF-8 / surrogate validation | serde_json validates | validated in every string path |
+| Partial-drop safety on derive errors | serde visitor pattern keeps state in locals | `InitSlot<T>` uses normal `Option<T>` drop semantics; duplicate-field replacement drops the previous value |
+| `no_std` | serde `no_std`; serde_json is `std`-only | core is `no_std + alloc`; only streaming IO is `std` |
+| Zero-dependency build graph | serde is one dependency; ecosystem formats add many | the whole workspace has only the two local crates |
+| Format-specific strictness | serde format crates vary (e.g., serde_json `RawValue`, YAML quirks) | every format rejects values its wire model cannot preserve — no silent lossy fallback |
+
+What this table does *not* claim: it does not assert nextjson has fewer
+long-tail bugs than a decade-old, community-fuzzed ecosystem, and it does not
+replace external fuzzing or deployment quotas. The `unsafe`-free property and
+the `deny(unsafe_code)` gate are the concrete, verifiable differences.
