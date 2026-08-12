@@ -6,7 +6,7 @@
 //! - Variant `other` (fallback variant for internal/adjacent tag enumeration)
 //! - Container `rename_all_fields` and variant-level `rename_all` (struct variant field renaming)
 //! - Schema downgrade for `serialize_with` / `deserialize_with` / `with` fields
-//! `Opaque` (field type does not need to implement `NsonSchema`, compileable)
+//! - `Opaque` (field type does not need to implement `NsonSchema`, compileable)
 
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, TypeSchema};
 
