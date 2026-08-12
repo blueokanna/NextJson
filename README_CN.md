@@ -2,6 +2,11 @@
 
 ## 中文文档 - [English Documentation](README.md)
 
+## Wiki
+
+仓库的 GitHub Wiki 由 `/wiki` 目录内容发布而来：
+[GitHub Wiki](https://github.com/blueokanna/NextJson/wiki)
+
 面向生产环境、零第三方 crate、支持 `no_std + alloc` 的 Rust JSON / CBOR 库。
 
 ### 当前保证

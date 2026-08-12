@@ -1,0 +1,52 @@
+name: Sync Wiki
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "wiki/**"
+      - ".github/workflows/wiki-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-wiki:
+    name: publish repository wiki
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync /wiki to GitHub Wiki
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          repo_dir="$GITHUB_WORKSPACE"
+          source_dir="$repo_dir/wiki"
+          wiki_dir="$(mktemp -d)"
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+
+          if ! git clone "$remote_url" "$wiki_dir"; then
+            echo "GitHub Wiki clone failed. Enable the repository Wiki first, then rerun this workflow."
+            exit 1
+          fi
+
+          find "$wiki_dir" -mindepth 1 -maxdepth 1 ! -name ".git" -exec rm -rf {} +
+          cp -a "$source_dir"/. "$wiki_dir"/
+
+          cd "$wiki_dir"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+
+          if git diff --cached --quiet; then
+            echo "GitHub Wiki is already up to date."
+            exit 0
+          fi
+
+          git commit -m "Sync wiki from repository"
+          git push origin HEAD

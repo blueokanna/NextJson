@@ -2,6 +2,11 @@
 
 ## English Documentation - [中文文档](https://github.com/blueokanna/NextJson/blob/main/README_CN.md)
 
+## Wiki
+
+The repository Wiki is published from the `/wiki` directory:
+[GitHub Wiki](https://github.com/blueokanna/NextJson/wiki)
+
 A production-oriented, zero-third-party-crate Rust JSON/CBOR library with
 `no_std + alloc` support.
 
