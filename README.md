@@ -231,12 +231,17 @@ assertions.
 
 The repository-owned derives support structs, tuple structs, generics, const
 generics, and external, internal, adjacent, or untagged enum representations.
-Container attributes include `rename_all`, `tag`, `content`, `untagged`,
-`deny_unknown_fields`, `default`, `transparent`, `crate`, and `bound`. Field
-attributes include `rename`, `alias`, `default`, `skip`, directional skips,
-`skip_serializing_if`, `flatten`, `borrow`, `with`, `serialize_with`, and
-`deserialize_with`. Variant attributes include `rename`, `rename_all`, `skip`,
-and directional skips.
+Container attributes include `rename_all` (including the directional
+`serialize`/`deserialize` form), `tag`, `content`, `untagged`,
+`deny_unknown_fields`, `default`, `transparent`, `crate`, `bound` (including
+directional `bound(serialize=…, deserialize=…)`), `into`, `from`, `try_from`,
+`remote`, and `expecting`. Field attributes include `rename`, `alias`,
+`default`, `skip`, directional skips, `skip_serializing_if`, `flatten`,
+`borrow`, `with`, `serialize_with`, `deserialize_with`, and `getter`. Variant
+attributes include `rename`, `rename_all`, `skip`, and directional skips.
+Attributes are accepted in `#[njson(...)]`, `#[nextjson(...)]`, or
+`#[serde(...)]` form, so existing serde types migrate without rewriting their
+attributes.
 
 Every derived type also exposes a `const SCHEMA: TypeSchema`:
 
@@ -258,8 +263,9 @@ numeric conversions are checked; malformed UTF-8, syntax, trailing input, and
 unrepresentable cross-format values are errors. Applications must still impose
 deployment-specific byte, collection, time, and output limits.
 
-Reader APIs buffer the complete input, so servers must enforce an input-byte
-limit at the transport boundary. The default JSON and CBOR nesting limit is 128. See the [Safety Model](https://github.com/blueokanna/NextJson/blob/main/docs/SAFETY.md) for the auditable invariants and remaining
+`from_slice` / `from_str` operate on a complete in-memory input; `from_reader`
+(std) pulls incrementally from any `std::io::Read` source (see
+`StreamDecoder`). The default JSON and CBOR nesting limit is 128. See the [Safety Model](https://github.com/blueokanna/NextJson/blob/main/docs/SAFETY.md) for the auditable invariants and remaining
 application responsibilities.
 
 ### Benchmark

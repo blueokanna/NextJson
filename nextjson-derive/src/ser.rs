@@ -21,16 +21,6 @@ impl Code {
     }
 }
 
-fn is_option(ty: &str) -> bool {
-    let t = ty.trim();
-    t.starts_with("Option") || t.starts_with("::core::option::Option")
-}
-
-#[allow(dead_code)]
-fn field_required(f: &crate::Field, fa: &FieldAttrs, ca: &ContainerAttrs) -> bool {
-    !ca.default && !fa.has_default() && !fa.skip_deserializing && !is_option(&f.ty)
-}
-
 pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &str) -> String {
     let ca = &input.cattr;
     let mut c = Code::new();
@@ -62,20 +52,24 @@ pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &
                     continue;
                 }
                 let ident = field.ident.clone().unwrap_or_default();
-                let key = crate::schema::renamed_field(field, &fa, ca);
+                let key = crate::schema::renamed_field(field, &fa, ca, true);
                 if fa.flatten {
                     c.l(&format!(
                         "{{ let __flat = {cp}::to_vec(&self.{ident})?; \
                          if __flat.first() == ::core::option::Option::Some(&b'{{') {{ \
                          {cp}::private::flatten_into(&__flat, __e)?; \
-                         }} else {{ return Err({cp}::Error::custom(\"flatten: expected an object or map\")); }} }}"
+                         }} else {{ return Err({cp}::Error::custom(\"flatten: expected an object or map\").into()); }} }}"
                     ));
                     continue;
                 }
                 let call = field_ser_call(field, &fa, cp);
                 if let Some(pred) = &fa.skip_serializing_if {
+                    let subject = match &fa.getter {
+                        Some(g) => format!("{g}(&self)"),
+                        None => format!("&self.{ident}"),
+                    };
                     c.l(&format!(
-                        "if !({pred})(&self.{ident}) {{ __e.key({key:?})?; {call} }}"
+                        "if !({pred})({subject}) {{ __e.key({key:?})?; {call} }}"
                     ));
                 } else {
                     c.l(&format!("__e.key({key:?})?;"));
@@ -122,9 +116,23 @@ pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &
 fn field_ser_call(field: &crate::Field, fa: &FieldAttrs, cp: &str) -> String {
     let ident = field.ident.clone().unwrap_or_default();
     if let Some(p) = &fa.serialize_with {
-        format!("{p}(&self.{ident}, __e)?;")
+        let subject = match &fa.getter {
+            Some(g) => format!("{g}(&self)"),
+            None => format!("&self.{ident}"),
+        };
+        format!("{p}({subject}, __e)?;")
     } else if let Some(m) = &fa.with {
-        format!("{m}::serialize(&self.{ident}, __e)?;")
+        let subject = match &fa.getter {
+            Some(g) => format!("{g}(&self)"),
+            None => format!("&self.{ident}"),
+        };
+        format!("{m}::serialize({subject}, __e)?;")
+    } else if let Some(g) = &fa.getter {
+        // The getter returns a reference to the field; `&T: NsonSerialize`
+        // forwards through the blanket impl, so the field type never needs
+        // to be named (the external type's field may not even be a `String`
+        // spelled the same way).
+        format!("{cp}::NsonSerialize::nextencode({g}(&self), __e)?;")
     } else {
         format!(
             "<{} as {cp}::NsonSerialize>::nextencode(&self.{ident}, __e)?;",
@@ -202,13 +210,13 @@ fn enum_arms(
     c.l("match self {");
     for v in variants {
         let va = attr::variant_attrs(&v.attrs);
-        let vname = crate::schema::renamed_variant(v, &va, ca);
+        let vname = crate::schema::renamed_variant(v, &va, ca, true);
         if va.skip_serializing {
             c.l(&format!("Self::{} => {{}}", v.ident));
             continue;
         }
         let pat = variant_pat(&v.fields, &v.ident);
-        let body = variant_body(&v.fields, &vname, mode, ca, cp);
+        let body = variant_body(&v.fields, &vname, mode, ca, cp, &va);
         c.l(&format!("{pat} => {{"));
         c.l(&body);
         c.l("}");
@@ -241,27 +249,40 @@ fn variant_body(
     mode: &Mode,
     ca: &ContainerAttrs,
     cp: &str,
+    va: &crate::VariantAttrs,
 ) -> String {
     match mode {
-        Mode::External => external_body(fields, vname, ca, cp),
-        Mode::Internal { tag } => internal_body(fields, vname, tag, ca, cp),
-        Mode::Adjacent { tag, content } => adjacent_body(fields, vname, tag, content, ca, cp),
-        Mode::Untagged => untagged_body(fields, ca, cp),
+        Mode::External => external_body(fields, vname, ca, cp, va),
+        Mode::Internal { tag } => internal_body(fields, vname, tag, ca, cp, va),
+        Mode::Adjacent { tag, content } => adjacent_body(fields, vname, tag, content, ca, cp, va),
+        Mode::Untagged => untagged_body(fields, ca, cp, va),
     }
 }
 
-fn external_body(fields: &Fields, vname: &str, ca: &ContainerAttrs, cp: &str) -> String {
+fn external_body(
+    fields: &Fields,
+    vname: &str,
+    ca: &ContainerAttrs,
+    cp: &str,
+    va: &crate::VariantAttrs,
+) -> String {
     let mut c = Code::new();
     c.l(&format!("__e.key({vname:?})?;"));
-    content_write(&mut c, fields, ca, cp);
+    content_write(&mut c, fields, ca, cp, va);
     c.out()
 }
 
-fn content_write(c: &mut Code, fields: &Fields, ca: &ContainerAttrs, cp: &str) {
+fn content_write(
+    c: &mut Code,
+    fields: &Fields,
+    ca: &ContainerAttrs,
+    cp: &str,
+    va: &crate::VariantAttrs,
+) {
     match fields {
         Fields::Unit => c.l("__e.write_null()?;"),
         Fields::Unnamed(f) if f.len() == 1 => {
-            let fa = attr::field_attrs(&f[0].attrs);
+            let fa = attr::newtype_field_attrs(&attr::field_attrs(&f[0].attrs), va);
             c.l(&variant_field_call(&f[0], &fa, "__v0", cp));
         }
         Fields::Unnamed(f) => {
@@ -284,7 +305,7 @@ fn content_write(c: &mut Code, fields: &Fields, ca: &ContainerAttrs, cp: &str) {
                     continue;
                 }
                 let ident = field.ident.clone().unwrap_or_default();
-                let key = crate::schema::renamed_field(field, &fa, ca);
+                let key = crate::schema::renamed_variant_field(field, &fa, va, ca, true);
                 let call = variant_field_call(field, &fa, &ident, cp);
                 if let Some(pred) = &fa.skip_serializing_if {
                     c.l(&format!(
@@ -310,7 +331,14 @@ fn variant_field_call(_field: &crate::Field, fa: &FieldAttrs, binder: &str, cp: 
     }
 }
 
-fn internal_body(fields: &Fields, vname: &str, tag: &str, ca: &ContainerAttrs, cp: &str) -> String {
+fn internal_body(
+    fields: &Fields,
+    vname: &str,
+    tag: &str,
+    ca: &ContainerAttrs,
+    cp: &str,
+    va: &crate::VariantAttrs,
+) -> String {
     let mut c = Code::new();
     match fields {
         Fields::Unit => {
@@ -336,7 +364,7 @@ fn internal_body(fields: &Fields, vname: &str, tag: &str, ca: &ContainerAttrs, c
                     continue;
                 }
                 let ident = field.ident.clone().unwrap_or_default();
-                let key = crate::schema::renamed_field(field, &fa, ca);
+                let key = crate::schema::renamed_variant_field(field, &fa, va, ca, true);
                 if let Some(pred) = &fa.skip_serializing_if {
                     c.l(&format!(
                         "if !({pred})({ident}) {{ __m.insert({key:?}.to_string(), {cp}::to_value({ident})?); }}"
@@ -363,6 +391,7 @@ fn adjacent_body(
     content: &str,
     ca: &ContainerAttrs,
     cp: &str,
+    va: &crate::VariantAttrs,
 ) -> String {
     let mut c = Code::new();
     c.l("__e.begin_object()?;");
@@ -370,7 +399,7 @@ fn adjacent_body(
     match fields {
         Fields::Unit => {}
         Fields::Unnamed(f) if f.len() == 1 => {
-            let fa = attr::field_attrs(&f[0].attrs);
+            let fa = attr::newtype_field_attrs(&attr::field_attrs(&f[0].attrs), va);
             c.l(&format!("__e.key({content:?})?;"));
             c.l(&variant_field_call(&f[0], &fa, "__v0", cp));
         }
@@ -396,7 +425,7 @@ fn adjacent_body(
                     continue;
                 }
                 let ident = field.ident.clone().unwrap_or_default();
-                let key = crate::schema::renamed_field(field, &fa, ca);
+                let key = crate::schema::renamed_variant_field(field, &fa, va, ca, true);
                 c.l(&format!("__e.key({key:?})?;"));
                 c.l(&variant_field_call(field, &fa, &ident, cp));
             }
@@ -407,8 +436,13 @@ fn adjacent_body(
     c.out()
 }
 
-fn untagged_body(fields: &Fields, ca: &ContainerAttrs, cp: &str) -> String {
+fn untagged_body(
+    fields: &Fields,
+    ca: &ContainerAttrs,
+    cp: &str,
+    va: &crate::VariantAttrs,
+) -> String {
     let mut c = Code::new();
-    content_write(&mut c, fields, ca, cp);
+    content_write(&mut c, fields, ca, cp, va);
     c.out()
 }

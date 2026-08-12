@@ -134,7 +134,9 @@ impl<W: Write> SexprEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for SexprEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.frames.push(EFrame {
             kind: EFrameKind::List,
@@ -145,11 +147,11 @@ impl<W: Write> FormatEncoder for SexprEncoder<W> {
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         self.frames
             .pop()
             .ok_or_else(|| Error::custom("sexpr: list end without start"))?;
@@ -157,7 +159,7 @@ impl<W: Write> FormatEncoder for SexprEncoder<W> {
         Ok(())
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.frames.push(EFrame {
             kind: EFrameKind::Alist,
@@ -168,7 +170,7 @@ impl<W: Write> FormatEncoder for SexprEncoder<W> {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .last_mut()
@@ -185,7 +187,7 @@ impl<W: Write> FormatEncoder for SexprEncoder<W> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -197,66 +199,66 @@ impl<W: Write> FormatEncoder for SexprEncoder<W> {
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(b"nil");
         Ok(())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf
             .extend_from_slice(if value { b"#t" } else { b"#f" });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.write_atom(value);
         Ok(())
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         self.write_str(&value.to_string())
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(number_bytes(value).as_bytes());
         Ok(())
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.write_f64(value as f64)
     }
 }
@@ -467,7 +469,9 @@ fn utf8_len(b: u8) -> Option<usize> {
 }
 
 impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         // An alist is a `(...)` container; the target decides whether a
         // paren begins an object (alist) or an array (list).
@@ -482,7 +486,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         }
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let r = match self.next_token()? {
             Token::EndObject => Ok(()),
             other => Err(Error::invalid_type(
@@ -501,7 +505,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         r
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         // Alist format: `((key value) (key value) ...)`.
         self.skip_ws()?;
         if self.pos >= self.input.len() {
@@ -526,7 +530,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         Ok(Some(key))
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         // Close the current `(key value)` pair; the alist's own `)` is left
         // for `end_object`.
         self.skip_ws()?;
@@ -539,7 +543,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         }
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginArray => {
@@ -552,7 +556,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         }
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let r = match self.next_token()? {
             Token::EndArray => Ok(()),
             other => Err(Error::invalid_type("a list terminator", token_name(&other))),
@@ -568,45 +572,45 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         r
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         self.skip_ws()?;
         Ok(self.input.get(self.pos) != Some(&b')'))
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         self.skip_ws()?;
         Ok(self.input.get(self.pos) != Some(&b')'))
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         match self.next_token()? {
             Token::Null => Ok(()),
             other => Err(Error::invalid_type("null", token_name(&other))),
         }
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         match self.next_token()? {
             Token::Bool(b) => Ok(b),
             other => Err(Error::invalid_type("bool", token_name(&other))),
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         match self.next_token()? {
             Token::Number(n) => Ok(n),
             other => Err(Error::invalid_type("number", token_name(&other))),
         }
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => Ok(s),
             other => Err(Error::invalid_type("string", token_name(&other))),
         }
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => {
                 let mut chars = s.chars();
@@ -619,7 +623,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         match self.peek_token()? {
             Token::BeginObject | Token::BeginArray => {
                 // Generic skip: consume balanced delimiters via save/restore.
@@ -662,14 +666,14 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
         }
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("set").clone())
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }

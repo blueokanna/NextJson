@@ -305,7 +305,9 @@ impl<W: Write> CsvEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for CsvEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         match self.depth {
             0 => {
                 // Root: the rows container.
@@ -325,11 +327,11 @@ impl<W: Write> FormatEncoder for CsvEncoder<W> {
         }
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         match self.depth {
             2 => {
                 if self.object_open {
@@ -354,7 +356,7 @@ impl<W: Write> FormatEncoder for CsvEncoder<W> {
         }
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         if self.depth != 1 {
             return Err(Error::custom("csv: object must be a row"));
         }
@@ -372,7 +374,7 @@ impl<W: Write> FormatEncoder for CsvEncoder<W> {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         if !self.object_open {
             return Err(Error::custom("csv: key outside object row"));
         }
@@ -400,7 +402,7 @@ impl<W: Write> FormatEncoder for CsvEncoder<W> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         if !self.object_open {
             return Err(Error::custom("csv: object end without start"));
         }
@@ -409,47 +411,47 @@ impl<W: Write> FormatEncoder for CsvEncoder<W> {
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.push_cell("null".to_string())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.push_cell(if value { "true".into() } else { "false".into() })
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         self.push_cell(tree::number_string(value))
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.push_cell(value.to_string())
     }
 }
@@ -517,7 +519,9 @@ impl CsvDecoder {
 }
 
 impl FormatDecoder<'_> for CsvDecoder {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         if self.depth != 1 {
             return Err(Error::custom("csv: object must be a row"));
         }
@@ -548,7 +552,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         if self.depth != 2 {
             return Err(Error::custom("csv: object end without start"));
         }
@@ -560,7 +564,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         Ok(())
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'static, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'static, str>>, Self::Error> {
         if self.cell_index >= self.header.len() {
             return Ok(None);
         }
@@ -568,11 +572,11 @@ impl FormatDecoder<'_> for CsvDecoder {
         Ok(Some(Cow::Owned(key)))
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(self.cell_index < self.header.len())
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         if self.depth == 0 {
             // Root: the rows container.
             self.depth = 1;
@@ -594,7 +598,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         ))
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         match self.depth {
             2 => {
                 self.row_index += 1;
@@ -609,7 +613,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         }
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         if self.depth == 1 {
             Ok(self.row_index < self.rows.len())
         } else {
@@ -617,7 +621,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         }
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         if self.depth == 1 {
             Ok(self.row_index < self.rows.len())
         } else {
@@ -625,7 +629,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         }
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         let cell = self.scalar_cell()?;
         if cell != "null" {
             return Err(Error::custom("csv: expected null cell"));
@@ -633,7 +637,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         Ok(())
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         let cell = self.scalar_cell()?;
         match cell.as_str() {
             "true" | "1" => Ok(true),
@@ -642,17 +646,17 @@ impl FormatDecoder<'_> for CsvDecoder {
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         let cell = self.scalar_cell()?;
         parse_number(&cell)
     }
 
-    fn string(&mut self) -> Result<Cow<'static, str>> {
+    fn string(&mut self) -> Result<Cow<'static, str>, Self::Error> {
         let cell = self.scalar_cell()?;
         Ok(Cow::Owned(cell))
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         let s = self.scalar_cell()?;
         let mut chars = s.chars();
         match (chars.next(), chars.next()) {
@@ -661,12 +665,12 @@ impl FormatDecoder<'_> for CsvDecoder {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         self.next_cell()?;
         Ok(())
     }
 
-    fn peek_token(&mut self) -> Result<Token<'static>> {
+    fn peek_token(&mut self) -> Result<Token<'static>, Self::Error> {
         if self.lookahead.is_none() {
             let cell = self.next_cell()?;
             self.lookahead = Some(classify_cell(&cell));
@@ -674,7 +678,7 @@ impl FormatDecoder<'_> for CsvDecoder {
         Ok(self.lookahead.as_ref().expect("set").clone())
     }
 
-    fn next_token(&mut self) -> Result<Token<'static>> {
+    fn next_token(&mut self) -> Result<Token<'static>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }

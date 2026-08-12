@@ -242,9 +242,11 @@ MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 
 
 自有派生宏支持结构体、元组结构体、泛型、常量泛型和多种枚举表示。主要属性：
 
-- 容器：`rename_all`、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`；
-- 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`；
+- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`；
+- 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`、`getter`；
 - 变体：`rename`、`rename_all`、`skip`、方向性 skip。
+
+属性同时接受 `#[njson(...)]`、`#[nextjson(...)]` 与 `#[serde(...)]` 三种写法，迁移既有 serde 类型时无需改写属性。
 
 每个派生类型同时提供 `const SCHEMA: TypeSchema`：
 
@@ -265,7 +267,7 @@ let json_schema = nextjson::to_json_schema::<Point>();
 - JSON 和 CBOR 默认最多嵌套 128 层；
 - 整数使用检查运算，支持完整 Rust `i128/u128` 范围；
 - 拒绝非有限浮点、非法 UTF-8、非法 surrogate、尾随逗号和尾随数据；
-- reader API 会缓冲完整输入，服务端必须在传输层限制总字节数；
+- `from_slice` / `from_str` 针对完整内存输入；`from_reader`（std）从任意 `std::io::Read` 增量拉取（见 `StreamDecoder`）；
 - 库不能替代应用层的总长度、集合长度、CPU 时间和输出配额。
 
 详细说明见[安全模型](docs/SAFETY_CN.md)。

@@ -15,7 +15,10 @@ impl nextjson::NsonSchema for CsvReorderedObjectRows {
 }
 
 impl nextjson::NsonSerialize for CsvReorderedObjectRows {
-    fn nextencode<E: nextjson::FormatEncoder>(&self, encoder: &mut E) -> nextjson::Result<()> {
+    fn nextencode<E: nextjson::FormatEncoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), E::Error> {
         encoder.begin_array()?;
         encoder.separator()?;
         encoder.begin_object()?;
@@ -36,7 +39,10 @@ impl nextjson::NsonSerialize for CsvReorderedObjectRows {
 }
 
 impl nextjson::NsonSerialize for MissingArraySeparator {
-    fn nextencode<E: nextjson::FormatEncoder>(&self, encoder: &mut E) -> nextjson::Result<()> {
+    fn nextencode<E: nextjson::FormatEncoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), E::Error> {
         encoder.begin_array()?;
         encoder.write_null()?;
         encoder.end_array()

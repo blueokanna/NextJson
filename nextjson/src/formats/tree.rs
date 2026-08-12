@@ -93,23 +93,25 @@ impl CollectEncoder {
 }
 
 impl FormatEncoder for CollectEncoder {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.stack.push(Builder::Array(Vec::new()));
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         match self.stack.pop() {
             Some(Builder::Array(items)) => self.attach(Value::Array(items)),
             _ => Err(Error::custom("collector: array end without start")),
         }
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.stack.push(Builder::Object {
             map: Map::new(),
             pending_key: None,
@@ -117,7 +119,7 @@ impl FormatEncoder for CollectEncoder {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         match self.stack.last_mut() {
             Some(Builder::Object { map, pending_key }) => {
                 if pending_key.is_some() {
@@ -133,7 +135,7 @@ impl FormatEncoder for CollectEncoder {
         }
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         match self.stack.pop() {
             Some(Builder::Object { map, pending_key }) if pending_key.is_none() => {
                 self.attach(Value::Object(map))
@@ -145,47 +147,47 @@ impl FormatEncoder for CollectEncoder {
         }
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.attach(Value::Null)
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         self.attach(Value::from(*value))
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.attach(Value::from(value))
     }
 }
@@ -193,55 +195,57 @@ impl FormatEncoder for CollectEncoder {
 macro_rules! impl_collecting_format_encoder {
     ($encoder:ident) => {
         impl<W: $crate::write::Write> $crate::ser::FormatEncoder for $encoder<W> {
-            fn begin_array(&mut self) -> $crate::Result<()> {
+            type Error = $crate::error::Error;
+
+            fn begin_array(&mut self) -> $crate::Result<(), Self::Error> {
                 self.collector.begin_array()
             }
-            fn separator(&mut self) -> $crate::Result<()> {
+            fn separator(&mut self) -> $crate::Result<(), Self::Error> {
                 self.collector.separator()
             }
-            fn end_array(&mut self) -> $crate::Result<()> {
+            fn end_array(&mut self) -> $crate::Result<(), Self::Error> {
                 self.collector.end_array()
             }
-            fn begin_object(&mut self) -> $crate::Result<()> {
+            fn begin_object(&mut self) -> $crate::Result<(), Self::Error> {
                 self.collector.begin_object()
             }
-            fn key(&mut self, key: &str) -> $crate::Result<()> {
+            fn key(&mut self, key: &str) -> $crate::Result<(), Self::Error> {
                 self.collector.key(key)
             }
-            fn end_object(&mut self) -> $crate::Result<()> {
+            fn end_object(&mut self) -> $crate::Result<(), Self::Error> {
                 self.collector.end_object()
             }
-            fn write_null(&mut self) -> $crate::Result<()> {
+            fn write_null(&mut self) -> $crate::Result<(), Self::Error> {
                 self.collector.write_null()
             }
-            fn write_bool(&mut self, value: bool) -> $crate::Result<()> {
+            fn write_bool(&mut self, value: bool) -> $crate::Result<(), Self::Error> {
                 self.collector.write_bool(value)
             }
-            fn write_str(&mut self, value: &str) -> $crate::Result<()> {
+            fn write_str(&mut self, value: &str) -> $crate::Result<(), Self::Error> {
                 self.collector.write_str(value)
             }
-            fn write_char(&mut self, value: char) -> $crate::Result<()> {
+            fn write_char(&mut self, value: char) -> $crate::Result<(), Self::Error> {
                 self.collector.write_char(value)
             }
-            fn write_number(&mut self, value: &$crate::Number) -> $crate::Result<()> {
+            fn write_number(&mut self, value: &$crate::Number) -> $crate::Result<(), Self::Error> {
                 self.collector.write_number(value)
             }
-            fn write_i64(&mut self, value: i64) -> $crate::Result<()> {
+            fn write_i64(&mut self, value: i64) -> $crate::Result<(), Self::Error> {
                 self.collector.write_i64(value)
             }
-            fn write_u64(&mut self, value: u64) -> $crate::Result<()> {
+            fn write_u64(&mut self, value: u64) -> $crate::Result<(), Self::Error> {
                 self.collector.write_u64(value)
             }
-            fn write_i128(&mut self, value: i128) -> $crate::Result<()> {
+            fn write_i128(&mut self, value: i128) -> $crate::Result<(), Self::Error> {
                 self.collector.write_i128(value)
             }
-            fn write_u128(&mut self, value: u128) -> $crate::Result<()> {
+            fn write_u128(&mut self, value: u128) -> $crate::Result<(), Self::Error> {
                 self.collector.write_u128(value)
             }
-            fn write_f64(&mut self, value: f64) -> $crate::Result<()> {
+            fn write_f64(&mut self, value: f64) -> $crate::Result<(), Self::Error> {
                 self.collector.write_f64(value)
             }
-            fn write_f32(&mut self, value: f32) -> $crate::Result<()> {
+            fn write_f32(&mut self, value: f32) -> $crate::Result<(), Self::Error> {
                 self.collector.write_f32(value)
             }
         }
@@ -309,58 +313,60 @@ impl<'de> TreeDecoder<'de> {
 }
 
 impl<'de> FormatDecoder<'de> for TreeDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.inner.begin_object()
     }
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.inner.end_object()
     }
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         Ok(self.inner.object_key()?.map(|k| match k {
             Cow::Borrowed(s) => Cow::Borrowed(s),
             Cow::Owned(s) => Cow::Owned(s),
         }))
     }
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         self.inner.object_entry_sep()
     }
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.inner.begin_array()
     }
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         self.inner.end_array()
     }
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         self.inner.array_has_more()
     }
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         self.inner.array_entry_sep()
     }
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         self.inner.unit()
     }
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         self.inner.bool()
     }
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         self.inner.number()
     }
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         Ok(match self.inner.string()? {
             Cow::Borrowed(s) => Cow::Borrowed(s),
             Cow::Owned(s) => Cow::Owned(s),
         })
     }
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         self.inner.char()
     }
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         self.inner.skip_value()
     }
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         self.inner.peek_token()
     }
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         self.inner.next_token()
     }
     fn save(&self) -> Mark {

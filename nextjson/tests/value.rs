@@ -1,9 +1,10 @@
-//! 核心 API 集成测试：顶层入口、Value、Map、Number、json! 宏、错误处理。
+//! Core API integration testing: application entry point, Value, 
+//! Map, Number, json! macros, error handling.
 
 use nextjson::{json, to_value, Error, Map, NsonDeserialize, Number, Value};
 
 // ---------------------------------------------------------------------------
-// 顶层入口
+// Entrance
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -48,7 +49,7 @@ fn to_writer() {
 }
 
 // ---------------------------------------------------------------------------
-// json! 宏
+// json! Macro
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -187,7 +188,7 @@ fn number_big_values() {
 }
 
 // ---------------------------------------------------------------------------
-// 标准库类型往返
+// Standard library type round trip
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -280,7 +281,7 @@ fn boxed_and_atomic() {
 }
 
 // ---------------------------------------------------------------------------
-// 错误处理
+// Error handling
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -316,7 +317,7 @@ fn depth_limit_protection() {
     let deep = format!("{}0{}", "[".repeat(500), "]".repeat(500));
     let r: Result<Value, Error> = nextjson::from_str(&deep);
     assert!(r.is_err());
-    // 可配置更大的深度。
+    // Larger depths can be configured.
     let mut d = nextjson::Decoder::with_config(
         deep.as_bytes(),
         nextjson::DecodeConfig::default().max_depth(1000),
@@ -336,10 +337,10 @@ fn unicode_handling() {
 fn escaped_input() {
     let v: Value = nextjson::from_str(r#""\u0041\u00e9\u4e2d""#).unwrap();
     assert_eq!(v, Value::String("Aé中".into()));
-    // 代理对。
+    // Agent pair
     let v: Value = nextjson::from_str(r#""\ud83d\udca9""#).unwrap();
     assert_eq!(v, Value::String("💩".into()));
-    // 孤立代理对报错。
+    // Lone surrogate is invalid
     assert!(nextjson::from_str::<Value>(r#""\ud83d""#).is_err());
 }
 

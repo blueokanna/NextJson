@@ -29,7 +29,7 @@ impl<'de> NsonDeserialize<'de> for BrokenDecode {
     fn nextdecode_into<D: nextjson::FormatDecoder<'de>>(
         decoder: &mut D,
         _out: &mut DecodeSlot<Self>,
-    ) -> nextjson::Result<()> {
+    ) -> core::result::Result<(), D::Error> {
         decoder.unit()
     }
 }
@@ -152,7 +152,7 @@ impl<'de> NsonDeserialize<'de> for DropProbe {
     fn nextdecode_into<D: nextjson::FormatDecoder<'de>>(
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
-    ) -> nextjson::Result<()> {
+    ) -> core::result::Result<(), D::Error> {
         let _: &str = NsonDeserialize::nextdecode(decoder)?;
         out.write(DropProbe);
         Ok(())

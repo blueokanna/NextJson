@@ -156,17 +156,19 @@ impl<W: Write> BencodeEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for BencodeEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.buf.push(b'l');
         self.frames.push(EncodeFrame::List);
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         match self.frames.pop() {
             Some(EncodeFrame::List) => {}
             Some(frame) => {
@@ -179,7 +181,7 @@ impl<W: Write> FormatEncoder for BencodeEncoder<W> {
         Ok(())
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.buf.push(b'd');
         self.frames.push(EncodeFrame::Dict {
             entries: Vec::new(),
@@ -188,7 +190,7 @@ impl<W: Write> FormatEncoder for BencodeEncoder<W> {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         self.finish_dict_entry()?;
         match self.frames.last_mut() {
             Some(EncodeFrame::Dict { pending, .. }) => {
@@ -199,7 +201,7 @@ impl<W: Write> FormatEncoder for BencodeEncoder<W> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.finish_dict_entry()?;
         let mut entries = match self.frames.pop() {
             Some(EncodeFrame::Dict { entries, .. }) => entries,
@@ -224,28 +226,28 @@ impl<W: Write> FormatEncoder for BencodeEncoder<W> {
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         Err(Error::custom("bencode: no null type"))
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.write_int_decimal(if value { 1 } else { 0 });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.write_bytestring(value);
         Ok(())
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         let mut buf = [0u8; 4];
         let s = value.encode_utf8(&mut buf);
         self.write_bytestring(s);
         Ok(())
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         match *value {
             Number::I64(v) => self.write_i64(v),
             Number::U64(v) => self.write_u64(v),
@@ -255,22 +257,22 @@ impl<W: Write> FormatEncoder for BencodeEncoder<W> {
         }
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.write_int_decimal(value as i128);
         Ok(())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.write_int_decimal(value as i128);
         Ok(())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         self.write_int_decimal(value);
         Ok(())
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         match i128::try_from(value) {
             Ok(v) => {
                 self.write_int_decimal(v);
@@ -280,12 +282,23 @@ impl<W: Write> FormatEncoder for BencodeEncoder<W> {
         }
     }
 
-    fn write_f64(&mut self, _value: f64) -> Result<()> {
+    fn write_f64(&mut self, _value: f64) -> Result<(), Self::Error> {
         Err(Error::custom("bencode: no float type"))
     }
 
-    fn write_f32(&mut self, _value: f32) -> Result<()> {
+    fn write_f32(&mut self, _value: f32) -> Result<(), Self::Error> {
         Err(Error::custom("bencode: no float type"))
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> Result<(), Self::Error> {
+        self.write_unsigned_len(value.len());
+        self.buf.push(b':');
+        self.buf.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 
@@ -489,7 +502,9 @@ impl<'de> BencodeDecoder<'de> {
 }
 
 impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginObject => {
@@ -502,7 +517,7 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -519,7 +534,7 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         let _ = self
             .frames
             .last()
@@ -533,11 +548,11 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(!matches!(self.peek_token()?, Token::EndObject))
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginArray => {
@@ -550,7 +565,7 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -567,19 +582,19 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(!matches!(self.peek_token()?, Token::EndArray))
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         self.array_has_more()
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         Err(Error::custom("bencode: no null type"))
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         match self.number()? {
             Number::I64(0) | Number::U64(0) => Ok(false),
             Number::I64(1) | Number::U64(1) => Ok(true),
@@ -590,21 +605,21 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         match self.next_token()? {
             Token::Number(n) => Ok(n),
             other => Err(Error::invalid_type("an integer", token_name(&other))),
         }
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => Ok(s),
             other => Err(Error::invalid_type("a string", token_name(&other))),
         }
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => {
                 let mut chars = s.chars();
@@ -617,7 +632,7 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         match self.peek_token()? {
             Token::BeginObject => {
                 self.begin_object()?;
@@ -646,14 +661,14 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         }
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }
@@ -673,6 +688,46 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
         self.lookahead = None;
         self.frames.truncate(mark.frame_len);
         self.depth = mark.depth;
+    }
+
+    fn bytes(&mut self) -> Result<Cow<'de, [u8]>, Self::Error> {
+        // bencode byte strings are length-prefixed raw bytes (`len:bytes`),
+        // with no UTF-8 requirement. Reuse the string length parser, then
+        // take the raw slice without validating UTF-8.
+        let mut len: usize = 0;
+        let mut digits = 0usize;
+        let mut leading_zero = false;
+        loop {
+            let b = self.cur.byte()?;
+            match b {
+                b':' => break,
+                b'0'..=b'9' => {
+                    if digits == 0 {
+                        leading_zero = b == b'0';
+                    } else if leading_zero {
+                        return Err(Error::custom("bencode: string length has a leading zero"));
+                    }
+                    digits += 1;
+                    len = len
+                        .checked_mul(10)
+                        .and_then(|v| v.checked_add((b - b'0') as usize))
+                        .ok_or_else(|| Error::custom("bencode: string length overflow"))?;
+                }
+                other => {
+                    return Err(Error::custom(alloc::format!(
+                        "bencode: invalid string length byte 0x{other:02x}"
+                    )))
+                }
+            }
+        }
+        if digits == 0 {
+            return Err(Error::custom("bencode: empty string length"));
+        }
+        Ok(Cow::Borrowed(self.cur.take(len)?))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 

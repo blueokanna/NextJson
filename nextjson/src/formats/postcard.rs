@@ -114,7 +114,9 @@ impl<W: Write> PostcardEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for PostcardEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.frames.push(Frame {
             start: self.buf.len(),
             count: 0,
@@ -123,7 +125,7 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         if let Some(frame) = self.frames.last_mut() {
             frame.count = frame
                 .count
@@ -133,7 +135,7 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -142,7 +144,7 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         Ok(())
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.frames.push(Frame {
             start: self.buf.len(),
             count: 0,
@@ -151,7 +153,7 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         if let Some(frame) = self.frames.last_mut() {
             frame.count = frame
                 .count
@@ -164,7 +166,7 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -173,30 +175,30 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.buf.push(0x00);
         Ok(())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.buf.push(if value { 0x02 } else { 0x01 });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         let bytes = value.as_bytes();
         self.write_len(bytes.len())?;
         self.buf.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         let mut buf = [0u8; 4];
         let s = value.encode_utf8(&mut buf);
         self.write_str(s)
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         match *value {
             Number::U64(v) => self.write_u64(v),
             Number::U128(v) => self.write_u128(v),
@@ -206,36 +208,56 @@ impl<W: Write> FormatEncoder for PostcardEncoder<W> {
         }
     }
 
-    fn write_i64(&mut self, _value: i64) -> Result<()> {
+    fn write_i64(&mut self, _value: i64) -> Result<(), Self::Error> {
         Err(Error::custom(
             "postcard: signed integers are not self-describing",
         ))
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         write_varint(&mut self.buf, value);
         Ok(())
     }
 
-    fn write_i128(&mut self, _value: i128) -> Result<()> {
+    fn write_i128(&mut self, _value: i128) -> Result<(), Self::Error> {
         Err(Error::custom(
             "postcard: signed integers are not self-describing",
         ))
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         match u64::try_from(value) {
             Ok(v) => self.write_u64(v),
             Err(_) => Err(Error::custom("postcard: u128 exceeds 64 bits")),
         }
     }
 
-    fn write_f64(&mut self, _value: f64) -> Result<()> {
+    fn write_f64(&mut self, _value: f64) -> Result<(), Self::Error> {
         Err(Error::custom("postcard: floats are not self-describing"))
     }
 
-    fn write_f32(&mut self, _value: f32) -> Result<()> {
+    fn write_f32(&mut self, _value: f32) -> Result<(), Self::Error> {
         Err(Error::custom("postcard: floats are not self-describing"))
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> Result<(), Self::Error> {
+        self.write_len(value.len())?;
+        self.buf.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn map_key<K: crate::ser::NsonSerialize>(&mut self, key: &K) -> Result<(), Self::Error> {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.count = frame
+                .count
+                .checked_add(1)
+                .ok_or_else(|| Error::custom("postcard: map length overflow"))?;
+        }
+        K::nextencode(key, self)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 
@@ -322,7 +344,9 @@ impl<'de> PostcardDecoder<'de> {
 }
 
 impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         let count = self.read_count()?;
         self.frames.push(CFrame {
@@ -332,7 +356,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -344,7 +368,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         Ok(())
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         let frame = self
             .frames
             .last_mut()
@@ -357,7 +381,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         Ok(Some(key))
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(self
             .frames
             .last()
@@ -365,7 +389,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
             .unwrap_or(false))
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         let count = self.read_count()?;
         self.frames.push(CFrame {
@@ -375,7 +399,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -387,7 +411,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         Ok(())
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(self
             .frames
             .last()
@@ -395,7 +419,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
             .unwrap_or(false))
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         if let Some(frame) = self.frames.last_mut() {
             if frame.kind == CFrameKind::Seq && frame.remaining > 0 {
                 frame.remaining -= 1;
@@ -404,7 +428,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         self.array_has_more()
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         if self.cur.byte()? == 0x00 {
             Ok(())
         } else {
@@ -412,7 +436,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         }
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         match self.cur.byte()? {
             0x00 | 0x01 => Ok(false),
             0x02 => Ok(true),
@@ -422,15 +446,15 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         Ok(Number::U64(self.read_varint()?))
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         self.read_str()
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         let s = self.read_str()?;
         let mut chars = s.chars();
         match (chars.next(), chars.next()) {
@@ -439,15 +463,15 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         Err(Self::not_self_describing())
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         Err(Self::not_self_describing())
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         Err(Self::not_self_describing())
     }
 
@@ -463,5 +487,31 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
         self.cur.seek(mark.pos);
         self.frames.truncate(mark.frame_len);
         self.depth = mark.depth;
+    }
+
+    fn bytes(&mut self) -> Result<Cow<'de, [u8]>, Self::Error> {
+        let len = usize::try_from(self.read_count()?)
+            .map_err(|_| Error::custom("postcard: byte string length exceeds platform limit"))?;
+        let bytes = self.cur.take(len)?;
+        Ok(Cow::Borrowed(bytes))
+    }
+
+    fn map_key<K: for<'a> crate::de::NsonDeserialize<'a>>(
+        &mut self,
+    ) -> Result<Option<K>, Self::Error> {
+        let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| Error::custom("postcard: object key outside map"))?;
+        if frame.remaining == 0 {
+            return Ok(None);
+        }
+        frame.remaining -= 1;
+        let key = K::nextdecode(self)?;
+        Ok(Some(key))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }

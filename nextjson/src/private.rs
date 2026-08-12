@@ -39,7 +39,7 @@ impl<T> InitSlot<T> {
     pub fn nextdecode<'de, D: crate::de::FormatDecoder<'de>>(
         &mut self,
         decoder: &mut D,
-    ) -> Result<()>
+    ) -> Result<(), D::Error>
     where
         T: NsonDeserialize<'de>,
     {
@@ -74,10 +74,13 @@ pub fn from_tokens<'de>(tokens: Vec<Token<'de>>) -> Decoder<'de> {
     Decoder::from_tokens(tokens)
 }
 
+/// A whole object read as `(key, value token subtree)` pairs.
+type ObjectMap<'de> = Vec<(Cow<'de, str>, Vec<Token<'de>>)>;
+
 /// Read a whole object as `(key, value token subtree)` pairs.
 pub fn read_object_map<'de, D: crate::de::FormatDecoder<'de>>(
     decoder: &mut D,
-) -> Result<Vec<(Cow<'de, str>, Vec<Token<'de>>)>> {
+) -> Result<ObjectMap<'de>, D::Error> {
     let mut entries = Vec::new();
     decoder.begin_object()?;
     while let Some(key) = decoder.object_key()? {
@@ -161,7 +164,7 @@ pub fn write_tagged_object<E: crate::ser::FormatEncoder>(
     tag: &str,
     variant_name: &str,
     value: Value,
-) -> Result<()> {
+) -> Result<(), E::Error> {
     match value {
         Value::Object(m) => {
             encoder.begin_object()?;
@@ -175,7 +178,8 @@ pub fn write_tagged_object<E: crate::ser::FormatEncoder>(
         }
         _ => Err(crate::error::Error::custom(
             "internally tagged newtype variant must serialize to an object",
-        )),
+        )
+        .into()),
     }
 }
 
@@ -183,7 +187,10 @@ pub fn write_tagged_object<E: crate::ser::FormatEncoder>(
 ///
 /// Used by `flatten` so the flattened sub-object's fields merge into the
 /// enclosing container regardless of the destination format.
-fn emit_value<E: crate::ser::FormatEncoder>(value: &Value, encoder: &mut E) -> Result<()> {
+fn emit_value<E: crate::ser::FormatEncoder>(
+    value: &Value,
+    encoder: &mut E,
+) -> Result<(), E::Error> {
     match value {
         Value::Null => encoder.write_null(),
         Value::Bool(b) => encoder.write_bool(*b),
@@ -213,7 +220,10 @@ fn emit_value<E: crate::ser::FormatEncoder>(value: &Value, encoder: &mut E) -> R
 /// `json` must be the compact JSON text of an object (`{...}`). Its entries
 /// are re-emitted as key/value events so flattened structs work in every
 /// supported format, not just JSON.
-pub fn flatten_into<E: crate::ser::FormatEncoder>(json: &[u8], encoder: &mut E) -> Result<()> {
+pub fn flatten_into<E: crate::ser::FormatEncoder>(
+    json: &[u8],
+    encoder: &mut E,
+) -> Result<(), E::Error> {
     let mut decoder = Decoder::new(json);
     let value = Value::nextdecode(&mut decoder)?;
     decoder.end()?;
@@ -225,9 +235,7 @@ pub fn flatten_into<E: crate::ser::FormatEncoder>(json: &[u8], encoder: &mut E) 
             }
             Ok(())
         }
-        _ => Err(crate::error::Error::custom(
-            "flatten: expected an object or map",
-        )),
+        _ => Err(crate::error::Error::custom("flatten: expected an object or map").into()),
     }
 }
 

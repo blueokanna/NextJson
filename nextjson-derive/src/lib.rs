@@ -4,6 +4,24 @@
 //! `quote`, no `proc-macro2`. The input `TokenStream` is parsed by a
 //! hand-written recursive-descent parser into a small AST, and the output is
 //! generated as text and re-parsed.
+//!
+//! ## Forward compatibility contract
+//!
+//! A derive macro only ever receives a single item's tokens, and this parser
+//! interprets a deliberately **stable grammar subset**: the item header
+//! (`struct` / `enum` + name), the generic parameter list, the `where`
+//! clause, and the field / variant structure, plus `#[njson]` /
+//! `#[nextjson]` / `#[serde]` attributes. Everything inside a field or
+//! generic *type position* is carried through verbatim as an opaque token
+//! sequence, so new Rust syntax that appears in type positions (new
+//! literals, `impl Trait` forms, associated-type paths, ...) needs no parser
+//! change — it is round-tripped unchanged.
+//!
+//! The risk of future item-level grammar changes is handled defensively:
+//! `parse_input` requires that **every** input token be consumed. If a future
+//! Rust release extends item syntax in a way this parser does not understand,
+//! the macro fails with a loud `compile_error!` naming the leftover tokens
+//! instead of silently generating impls from a mis-parsed subset.
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
@@ -11,7 +29,7 @@
 
 extern crate proc_macro;
 
-use proc_macro::{Delimiter, Ident, Spacing, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Spacing, TokenStream, TokenTree};
 use std::str::FromStr;
 
 mod attr;
@@ -20,7 +38,7 @@ mod de;
 mod schema;
 mod ser;
 
-pub(crate) use attr::{ContainerAttrs, FieldAttrs, VariantAttrs};
+pub(crate) use attr::{ContainerAttrs, FieldAttrs, Meta, VariantAttrs};
 
 /// Parse a string into a TokenStream.
 pub(crate) fn ts(s: &str) -> TokenStream {
@@ -307,6 +325,9 @@ pub(crate) fn parse_input(input: TokenStream) -> Result<Input, String> {
         if p.eat_ident("where") {
             parse_where_clause(&mut p, &mut generics, false);
         }
+        // Tuple structs terminate with `;`; consume it so the trailing-input
+        // check below sees a fully parsed item.
+        p.eat_punct(';');
         let inner: Vec<TokenTree> = body.stream().into_iter().collect();
         Data::Struct(Fields::Unnamed(parse_unnamed_fields(&inner)))
     } else {
@@ -332,6 +353,18 @@ pub(crate) fn parse_input(input: TokenStream) -> Result<Input, String> {
             }
         }
     };
+
+    // The derive input must be a single item. Any tokens left over mean the
+    // hand-written parser did not understand part of the declaration; refuse
+    // to generate code from a silently mis-parsed subset (this is the
+    // forward-compatibility guard: if a future Rust release extends item
+    // syntax, the macro fails loudly instead of emitting wrong impls).
+    if p.i != toks.len() {
+        return Err(format!(
+            "nextjson: cannot parse trailing tokens: {}",
+            join(&toks[p.i..])
+        ));
+    }
 
     Ok(Input {
         ident,
@@ -458,17 +491,24 @@ fn parse_named_field(piece: &[TokenTree]) -> Field {
             _ => j += 1,
         }
     }
-    match colon {
-        Some(c) => Field {
-            ident: Some(join(&piece[p.i..c]).trim().to_string()),
-            ty: join(&piece[c + 1..]).trim().to_string(),
-            attrs: collect_metas(&attrs),
-        },
-        None => Field {
-            ident: None,
-            ty: join(&piece[p.i..]).trim().to_string(),
-            attrs: collect_metas(&attrs),
-        },
+    let (ident, ty) = match colon {
+        Some(c) => (
+            Some(join(&piece[p.i..c]).trim().to_string()),
+            join(&piece[c + 1..]).trim().to_string(),
+        ),
+        None => (None, join(&piece[p.i..]).trim().to_string()),
+    };
+    let mut field_metas = collect_metas(&attrs);
+    // `PhantomData` fields are not part of the data model (serde semantics):
+    // skip them on serialize and default them on deserialize. Normalizing at
+    // parse time keeps every codegen path (ser / de / schema) consistent.
+    if crate::schema::is_phantom_data(&ty) {
+        field_metas.push(Meta::Flag("skip".to_string()));
+    }
+    Field {
+        ident,
+        ty,
+        attrs: field_metas,
     }
 }
 
@@ -531,6 +571,15 @@ pub(crate) fn build_generics(
 ) -> (String, String, String) {
     let g = &input.generics;
     let c = &input.cattr;
+    let name = input.ident.clone();
+    // `remote` implements the traits for an external type; conversion bounds
+    // that mention `Self` must refer to that type instead of the mirror. The
+    // remote path already carries its generic arguments, while a local type
+    // must be written with the mirror's type parameters applied.
+    let (self_ty, remote_typed) = match &c.remote {
+        Some(r) => (r.clone(), true),
+        None => (name.clone(), false),
+    };
 
     let mut impl_params: Vec<String> = g.params.iter().map(|p| p.full.clone()).collect();
     if de {
@@ -548,37 +597,96 @@ pub(crate) fn build_generics(
     } else {
         format!("<{}>", names.join(", "))
     };
+    // The fully-instantiated `Self` for conversion bounds: for local types the
+    // type parameters must be applied (`Dst<T>`), for remote types the path
+    // already names them (`external::Foreign<T>`).
+    let self_ty_inst = if remote_typed {
+        self_ty.clone()
+    } else {
+        format!("{self_ty}{ty_generics}")
+    };
 
-    let mut preds: Vec<String> = if let Some(bound) = &c.bound {
-        let cleaned = bound.trim().trim_matches('"');
-        if cleaned.is_empty() {
-            Vec::new()
+    // The type's own where-clause predicates are ALWAYS required to name the
+    // type, so they are kept unconditionally. The `bound` attribute only
+    // replaces the *auto-generated per-type-parameter* bounds; serde behaves
+    // the same way.
+    let mut preds: Vec<String> = g.where_preds.clone();
+
+    let directional = if de {
+        c.bound_de.as_ref()
+    } else {
+        c.bound_ser.as_ref()
+    };
+    let bound = directional.or(c.bound.as_ref());
+    let auto_bound = |p: &GenericParam| -> Option<String> {
+        if p.kind != ParamKind::Type {
+            return None;
+        }
+        if de && has_flatten {
+            Some(format!(
+                "{0}: for<'__n> {1}::NsonDeserialize<'__n>",
+                p.name, cp
+            ))
+        } else if de {
+            Some(format!("{}: {}::NsonDeserialize<'de>", p.name, cp))
         } else {
-            cleaned
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
+            Some(format!("{}: {}::NsonSerialize", p.name, cp))
+        }
+    };
+    if let Some(bound) = bound {
+        let cleaned = bound.trim().trim_matches('"');
+        if !cleaned.is_empty() {
+            for s in cleaned.split(',') {
+                let s = s.trim();
+                if !s.is_empty() {
+                    preds.push(s.to_string());
+                }
+            }
         }
     } else {
-        let mut v: Vec<String> = g.where_preds.clone();
         for p in g.params.iter() {
-            if p.kind != ParamKind::Type {
-                continue;
-            }
-            if de && has_flatten {
-                v.push(format!(
-                    "{0}: for<'__n> {1}::NsonDeserialize<'__n>",
-                    p.name, cp
-                ));
-            } else if de {
-                v.push(format!("{}: {}::NsonDeserialize<'de>", p.name, cp));
-            } else {
-                v.push(format!("{}: {}::NsonSerialize", p.name, cp));
+            if let Some(b) = auto_bound(p) {
+                preds.push(b);
             }
         }
-        v
-    };
+    }
+
+    // Missing-field fallbacks that call `Default::default()` must be able to
+    // name the type parameters they fall back on, so every type parameter
+    // receives a `Default` bound when any fallback can fire for a generic
+    // field. This mirrors serde, which adds `T: Default` for exactly the same
+    // attribute combinations.
+    if de && de_uses_type_param_default(input) {
+        for p in g.params.iter() {
+            if p.kind == ParamKind::Type {
+                preds.push(format!("{}: ::core::default::Default", p.name));
+            }
+        }
+    }
+
+    // Conversion attributes add their own bounds.
+    if de {
+        if let Some(from) = &c.from {
+            preds.push(format!(
+                "{from}: {cp}::NsonDeserialize<'de> + ::core::convert::Into<{self_ty_inst}>"
+            ));
+        }
+        if let Some(from) = &c.try_from {
+            preds.push(format!(
+                "{from}: {cp}::NsonDeserialize<'de> + ::core::convert::TryInto<{self_ty_inst}>"
+            ));
+            preds.push(format!(
+                "<{from} as ::core::convert::TryInto<{self_ty_inst}>>::Error: ::core::fmt::Display"
+            ));
+        }
+    } else {
+        if let Some(into) = &c.into {
+            preds.push(format!("{self_ty_inst}: ::core::clone::Clone"));
+            preds.push(format!("{self_ty_inst}: ::core::convert::Into<{into}>"));
+            preds.push(format!("{into}: {cp}::NsonSerialize"));
+            preds.push(format!("{into}: {cp}::NsonSchema"));
+        }
+    }
 
     if de && has_borrow {
         for p in g.params.iter() {
@@ -597,52 +705,159 @@ pub(crate) fn build_generics(
     (impl_generics, ty_generics, where_clause)
 }
 
+/// Validate attribute combinations that serde rejects at compile time.
+///
+/// Returns an error message when the combination is invalid. Called by both
+/// derive entry points so the rejection is identical regardless of which
+/// macro is expanded first.
+fn validate_input(input: &Input) -> Option<String> {
+    // `transparent` is only meaningful on single-field structs.
+    if input.cattr.transparent {
+        match &input.data {
+            Data::Enum(_) => {
+                return Some("nextjson: `transparent` is not supported on enums".to_string());
+            }
+            Data::Struct(Fields::Named(f)) if f.len() != 1 => {
+                return Some("nextjson: `transparent` requires exactly one field".to_string());
+            }
+            Data::Struct(Fields::Unnamed(f)) if f.len() != 1 => {
+                return Some("nextjson: `transparent` requires exactly one field".to_string());
+            }
+            _ => {}
+        }
+    }
+    // `flatten` splices a nested map into the parent object, which is
+    // impossible for positional (unnamed) shapes.
+    if type_has_flag_on(input, |f, fa| fa.flatten && f.ident.is_none()) {
+        return Some(
+            "nextjson: `flatten` is not allowed on tuple structs or tuple variants".to_string(),
+        );
+    }
+    // `flatten` + `skip_serializing_if` conflicts: the decision to skip would
+    // depend on the flattened value, which serde rejects up front.
+    if type_has_flag_on(input, |_f, fa| {
+        fa.flatten && fa.skip_serializing_if.is_some()
+    }) {
+        return Some(
+            "nextjson: `flatten` cannot be combined with `skip_serializing_if`".to_string(),
+        );
+    }
+    None
+}
+
+/// Like [`type_has_flag`] but the predicate also sees the field (needed to
+/// tell named from unnamed fields).
+fn type_has_flag_on<F: Fn(&Field, &FieldAttrs) -> bool>(input: &Input, f: F) -> bool {
+    let check = |fld: &Field| f(fld, &attr::field_attrs(&fld.attrs));
+    match &input.data {
+        Data::Struct(fields) => fields.iter().any(check),
+        Data::Enum(variants) => variants.iter().any(|v| v.fields.iter().any(check)),
+    }
+}
+
 /// Emit the `NsonSchema` + `NsonSerialize` impls.
 pub(crate) fn generate_impls(input: &Input) -> TokenStream {
+    if let Some(msg) = validate_input(input) {
+        return err(&msg);
+    }
     let cp = input.cattr.crate_path.clone();
     let name = input.ident.clone();
+    // `remote` implements the traits for the external type itself. The remote
+    // path already names its generic arguments, so the mirror's type-generics
+    // are not appended a second time (`Foreign<T><T>` would not parse).
+    let (target, use_tg) = match &input.cattr.remote {
+        Some(r) => (r.clone(), false),
+        None => (name.clone(), true),
+    };
     let (ig, tg, wc) = build_generics(input, &cp, false, false, false);
-    let schema_expr = schema::schema_expr(input, &cp);
-    let body = match &input.data {
-        Data::Struct(f) => ser::serialize_struct(&name, f, input, &cp),
-        Data::Enum(v) => ser::serialize_enum(&name, v, input, &cp),
+    let tg_part = if use_tg { tg.as_str() } else { "" };
+    let body = if let Some(into) = &input.cattr.into {
+        // `into = "T"`: serialize by converting `self` to `T` first.
+        format!(
+            "let __v: {into} = ::core::convert::Into::into(self.clone());\n\
+             <{into} as {cp}::NsonSerialize>::nextencode(&__v, __e)"
+        )
+    } else {
+        match &input.data {
+            Data::Struct(f) => ser::serialize_struct(&name, f, input, &cp),
+            Data::Enum(v) => ser::serialize_enum(&name, v, input, &cp),
+        }
     };
     let out = format!(
         "#[automatically_derived]\n\
-         impl {ig} {cp}::NsonSchema for {name}{tg}{wc} {{\n\
+         impl {ig} {cp}::NsonSchema for {target}{tg_part}{wc} {{\n\
          \x20   const SCHEMA: {cp}::TypeSchema = {schema_expr};\n\
          }}\n\
          #[automatically_derived]\n\
-         impl {ig} {cp}::NsonSerialize for {name}{tg}{wc} {{\n\
-         \x20   fn nextencode<__E: {cp}::FormatEncoder>(&self, __e: &mut __E) -> {cp}::Result<()> {{\n\
+         impl {ig} {cp}::NsonSerialize for {target}{tg_part}{wc} {{\n\
+         \x20   fn nextencode<__E: {cp}::FormatEncoder>(&self, __e: &mut __E) -> ::core::result::Result<(), __E::Error> {{\n\
          {body}\n\
          \x20   }}\n\
-         }}"
+         }}",
+        schema_expr = schema::schema_expr(input, &cp)
     );
     ts(&out)
 }
 
 /// Emit the `NsonDeserialize` impl.
 pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
+    if let Some(msg) = validate_input(input) {
+        return err(&msg);
+    }
     let cp = input.cattr.crate_path.clone();
     let name = input.ident.clone();
+    // Container-level `default` supplies missing-field values from a `Self`
+    // instance, which only makes sense for structs (serde rejects it on
+    // enums as well).
+    if matches!(&input.data, Data::Enum(_)) && input.cattr.has_default() {
+        return err("nextjson: `default` is not supported on enums");
+    }
     let has_flatten = type_has_flag(input, |fa| fa.flatten);
     let has_borrow = type_has_flag(input, |fa| fa.borrow);
     if has_flatten && type_has_with(input) {
         return err("nextjson: `flatten` cannot be combined with `with` / `deserialize_with`");
     }
+    if has_flatten && input.cattr.deny_unknown_fields {
+        // flatten consumes every remaining key, so unknown-field rejection is
+        // silently impossible; serde rejects this combination at compile time.
+        return err("nextjson: `deny_unknown_fields` cannot be combined with `flatten`");
+    }
+    let (target, use_tg) = match &input.cattr.remote {
+        Some(r) => (r.clone(), false),
+        None => (name.clone(), true),
+    };
     let (ig, tg, wc) = build_generics(input, &cp, true, has_flatten, has_borrow);
-    let body = match &input.data {
-        Data::Struct(f) => de::deserialize_struct(&name, f, input, &cp, has_flatten),
-        Data::Enum(v) => de::deserialize_enum(&name, v, input, &cp, has_flatten),
+    let tg_part = if use_tg { tg.as_str() } else { "" };
+    let body = if let Some(from) = &input.cattr.from {
+        // `from = "T"`: deserialize a `T` then convert into `Self`.
+        format!(
+            "let __v: {from} = <{from} as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?;\n\
+             __out.write(::core::convert::Into::into(__v));\n\
+             ::core::result::Result::Ok(())"
+        )
+    } else if let Some(from) = &input.cattr.try_from {
+        // `try_from = "T"`: deserialize a `T` then fallibly convert.
+        format!(
+            "let __v: {from} = <{from} as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?;\n\
+             let __c: Self = ::core::convert::TryInto::try_into(__v).map_err(|__e| {{\n\
+             \x20   {cp}::FormatError::custom({cp}::__private::ToString::to_string(&__e))\n\
+             }})?;\n\
+             __out.write(__c);\n\
+             ::core::result::Result::Ok(())"
+        )
+    } else {
+        match &input.data {
+            Data::Struct(f) => de::deserialize_struct(&name, f, input, &cp, has_flatten),
+            Data::Enum(v) => de::deserialize_enum(&name, v, input, &cp, has_flatten),
+        }
     };
     let out = format!(
         "#[automatically_derived]\n\
-         impl {ig} {cp}::NsonDeserialize<'de> for {name}{tg}{wc} {{\n\
+         impl {ig} {cp}::NsonDeserialize<'de> for {target}{tg_part}{wc} {{\n\
          \x20   fn nextdecode_into<__D: {cp}::FormatDecoder<'de>>(\n\
          \x20       __d: &mut __D,\n\
          \x20       __out: &mut {cp}::DecodeSlot<Self>,\n\
-         \x20   ) -> {cp}::Result<()> {{\n\
+         \x20   ) -> ::core::result::Result<(), __D::Error> {{\n\
          {body}\n\
          \x20   }}\n\
          }}"
@@ -659,28 +874,65 @@ fn type_has_flag<F: Fn(&FieldAttrs) -> bool>(input: &Input, f: F) -> bool {
     }
 }
 
+/// Whether the generated deserializer can fall back to `Default::default()`
+/// for a field whose type is a generic parameter.
+///
+/// True when the container has a default, when any field has a bare
+/// `default` attribute, or when any field is `skip_deserializing` without an
+/// explicit `default = "path"` (which would supply its own value). Field-level
+/// `default = "path"` does not need the bound. `PhantomData` fields are
+/// excluded: `PhantomData<T>: Default` holds for every `T` with no bound.
+fn de_uses_type_param_default(input: &Input) -> bool {
+    if input.cattr.has_default() {
+        return true;
+    }
+    let mut found = false;
+    let mut scan = |f: &Field| {
+        if crate::schema::is_phantom_data(&f.ty) {
+            return;
+        }
+        let fa = attr::field_attrs(&f.attrs);
+        let bare_default = fa.default == Some(String::new());
+        let skip_without_path =
+            fa.skip_deserializing && !matches!(&fa.default, Some(d) if !d.is_empty());
+        if bare_default || skip_without_path {
+            found = true;
+        }
+    };
+    match &input.data {
+        Data::Struct(fields) => {
+            for f in fields.iter() {
+                scan(f);
+            }
+        }
+        Data::Enum(variants) => {
+            for v in variants {
+                for f in v.fields.iter() {
+                    scan(f);
+                }
+            }
+        }
+    }
+    found
+}
+
 fn type_has_with(input: &Input) -> bool {
     type_has_flag(input, |fa| {
         fa.with.is_some() || fa.deserialize_with.is_some()
     })
 }
 
-/// Build a `proc_macro::Ident` (kept for API symmetry).
-#[allow(dead_code)]
-pub(crate) fn ident(name: &str) -> Ident {
-    Ident::new(name, proc_macro::Span::call_site())
-}
-
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
 
-#[proc_macro_derive(NsonSerialize, attributes(njson, nextjson))]
+#[proc_macro_derive(NsonSerialize, attributes(njson, nextjson, serde))]
 /// Derive NextJson's native serialization contract and compile-time schema.
 ///
-/// Configuration is accepted through `#[njson(...)]`. The generated
-/// implementation writes directly through `NsonSerialize::nextencode` and
-/// exposes `NsonSchema::SCHEMA` without depending on another macro framework.
+/// Configuration is accepted through `#[njson(...)]` (and, for migration
+/// convenience, `#[serde(...)]`). The generated implementation writes
+/// directly through `NsonSerialize::nextencode` and exposes
+/// `NsonSchema::SCHEMA` without depending on another macro framework.
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
     match parse_input(input) {
         Ok(ast) => generate_impls(&ast),
@@ -688,15 +940,289 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(NsonDeserialize, attributes(njson, nextjson))]
+#[proc_macro_derive(NsonDeserialize, attributes(njson, nextjson, serde))]
 /// Derive NextJson's native decoding contract.
 ///
-/// Configuration is accepted through `#[njson(...)]`. The generated
-/// implementation decodes through checked `DecodeSlot` state and uses normal
-/// Rust drop semantics for partially initialized fields.
+/// Configuration is accepted through `#[njson(...)]` (and, for migration
+/// convenience, `#[serde(...)]`). The generated implementation decodes
+/// through checked `DecodeSlot` state and uses normal Rust drop semantics for
+/// partially initialized fields.
 pub fn derive_deserialize(input: TokenStream) -> TokenStream {
     match parse_input(input) {
         Ok(ast) => generate_de_impl(&ast),
         Err(e) => err(&e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The `proc_macro` API cannot be used in unit tests (it panics outside a
+    // macro expansion), so these tests build the small AST by hand and cover
+    // the pure logic: attribute parsing, validation, and impl-generics
+    // construction. Parser token-level behavior is exercised by the workspace
+    // integration tests, which compile real derives.
+
+    fn meta_flag(name: &str) -> Meta {
+        Meta::Flag(name.to_string())
+    }
+    fn meta_named(name: &str, value: &str) -> Meta {
+        Meta::Named(name.to_string(), value.to_string())
+    }
+    fn named_field(ident: &str, ty: &str, metas: Vec<Meta>) -> Field {
+        Field {
+            ident: Some(ident.to_string()),
+            ty: ty.to_string(),
+            attrs: metas,
+        }
+    }
+    fn unnamed_field(ty: &str, metas: Vec<Meta>) -> Field {
+        Field {
+            ident: None,
+            ty: ty.to_string(),
+            attrs: metas,
+        }
+    }
+    fn cattr(metas: &[Meta]) -> ContainerAttrs {
+        ContainerAttrs::from_metas(metas)
+    }
+    fn struct_named(cattr: ContainerAttrs, fields: Vec<Field>) -> Input {
+        Input {
+            ident: "S".into(),
+            generics: Generics::default(),
+            data: Data::Struct(Fields::Named(fields)),
+            cattr,
+        }
+    }
+    fn generic_input(
+        ident: &str,
+        params: Vec<GenericParam>,
+        where_preds: Vec<String>,
+        data: Data,
+        cattr: ContainerAttrs,
+    ) -> Input {
+        Input {
+            ident: ident.to_string(),
+            generics: Generics {
+                params,
+                where_preds,
+            },
+            data,
+            cattr,
+        }
+    }
+
+    // -- validate_input ------------------------------------------------------
+
+    #[test]
+    fn validate_rejects_transparent_enum() {
+        let input = Input {
+            ident: "E".into(),
+            generics: Generics::default(),
+            data: Data::Enum(vec![Variant {
+                ident: "A".into(),
+                fields: Fields::Unit,
+                attrs: vec![],
+            }]),
+            cattr: cattr(&[meta_flag("transparent")]),
+        };
+        let msg = validate_input(&input).expect("must reject transparent enum");
+        assert!(msg.contains("transparent"));
+    }
+
+    #[test]
+    fn validate_rejects_transparent_multi_field() {
+        let input = struct_named(
+            cattr(&[meta_flag("transparent")]),
+            vec![
+                named_field("a", "i32", vec![]),
+                named_field("b", "i32", vec![]),
+            ],
+        );
+        assert!(validate_input(&input).is_some());
+    }
+
+    #[test]
+    fn validate_rejects_flatten_on_tuple() {
+        let input = Input {
+            ident: "T".into(),
+            generics: Generics::default(),
+            data: Data::Struct(Fields::Unnamed(vec![unnamed_field(
+                "std::collections::BTreeMap<String, i32>",
+                vec![meta_flag("flatten")],
+            )])),
+            cattr: cattr(&[]),
+        };
+        let msg = validate_input(&input).expect("must reject flatten on tuple field");
+        assert!(msg.contains("flatten"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_flatten_with_skip_if() {
+        let input = struct_named(
+            cattr(&[]),
+            vec![named_field(
+                "m",
+                "std::collections::BTreeMap<String, i32>",
+                vec![
+                    meta_flag("flatten"),
+                    meta_named("skip_serializing_if", "Option::is_none"),
+                ],
+            )],
+        );
+        let msg = validate_input(&input).expect("must reject flatten + skip_serializing_if");
+        assert!(msg.contains("flatten"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn validate_accepts_valid_combinations() {
+        let ok = struct_named(
+            cattr(&[]),
+            vec![
+                named_field("a", "i32", vec![]),
+                named_field(
+                    "m",
+                    "std::collections::BTreeMap<String, i32>",
+                    vec![meta_flag("flatten")],
+                ),
+            ],
+        );
+        assert!(validate_input(&ok).is_none());
+
+        let w = Input {
+            ident: "W".into(),
+            generics: Generics::default(),
+            data: Data::Struct(Fields::Unnamed(vec![unnamed_field("i32", vec![])])),
+            cattr: cattr(&[meta_flag("transparent")]),
+        };
+        assert!(validate_input(&w).is_none());
+    }
+
+    // -- build_generics ------------------------------------------------------
+
+    #[test]
+    fn build_generics_keeps_where_clause_with_bound() {
+        // `bound` must replace only the auto bounds; the struct's own where
+        // clause must always survive.
+        let input = generic_input(
+            "S",
+            vec![GenericParam {
+                kind: ParamKind::Type,
+                full: "T".into(),
+                name: "T".into(),
+            }],
+            vec!["T: core::fmt::Debug".into()],
+            Data::Struct(Fields::Named(vec![named_field("v", "T", vec![])])),
+            cattr(&[meta_named("bound", "\"T: Clone\"")]),
+        );
+        let (_, _, wc) = build_generics(&input, "::nextjson", false, false, false);
+        assert!(wc.contains("Clone"), "missing user bound: {wc}");
+        assert!(wc.contains("Debug"), "missing struct where clause: {wc}");
+    }
+
+    #[test]
+    fn build_generics_instantiates_conversion_self_type() {
+        // Conversion bounds must name `Dst<T>`, never bare `Dst`.
+        let input = generic_input(
+            "Dst",
+            vec![GenericParam {
+                kind: ParamKind::Type,
+                full: "T".into(),
+                name: "T".into(),
+            }],
+            vec![],
+            Data::Struct(Fields::Named(vec![named_field("x", "T", vec![])])),
+            cattr(&[meta_named("from", "\"Src<T>\"")]),
+        );
+        let (_, _, wc) = build_generics(&input, "::nextjson", true, false, false);
+        assert!(
+            wc.contains("Into<Dst<T>>"),
+            "missing instantiated self: {wc}"
+        );
+        assert!(!wc.contains("Into<Dst>"), "bare self type: {wc}");
+    }
+
+    #[test]
+    fn build_generics_adds_default_bound_for_generic_default() {
+        // Container `default` on a generic struct must add `T: Default`.
+        let input = generic_input(
+            "S",
+            vec![GenericParam {
+                kind: ParamKind::Type,
+                full: "T".into(),
+                name: "T".into(),
+            }],
+            vec![],
+            Data::Struct(Fields::Named(vec![named_field("v", "T", vec![])])),
+            cattr(&[meta_flag("default")]),
+        );
+        let (_, _, wc) = build_generics(&input, "::nextjson", true, false, false);
+        assert!(
+            wc.contains("T: ::core::default::Default"),
+            "missing Default bound: {wc}"
+        );
+    }
+
+    #[test]
+    fn build_generics_remote_never_appends_generics_twice() {
+        // The impl target for `remote` carries its own generic arguments.
+        let input = generic_input(
+            "Mirror",
+            vec![GenericParam {
+                kind: ParamKind::Type,
+                full: "T".into(),
+                name: "T".into(),
+            }],
+            vec![],
+            Data::Struct(Fields::Named(vec![named_field("x", "T", vec![])])),
+            cattr(&[meta_named("remote", "external::Foreign<T>")]),
+        );
+        let (_, _, wc) = build_generics(&input, "::nextjson", false, false, false);
+        assert!(
+            wc.contains("T: ::nextjson::NsonSerialize"),
+            "missing auto bound: {wc}"
+        );
+    }
+
+    // -- default-bound detection ---------------------------------------------
+
+    #[test]
+    fn default_bound_not_needed_for_phantom_data() {
+        // A `PhantomData` field must not force `T: Default`.
+        let input = struct_named(
+            cattr(&[]),
+            vec![
+                named_field("_m", "core::marker::PhantomData<T>", vec![]),
+                named_field("n", "i32", vec![]),
+            ],
+        );
+        assert!(!de_uses_type_param_default(&input));
+
+        // With a container default the bound is required again.
+        let input2 = struct_named(
+            cattr(&[meta_flag("default")]),
+            vec![named_field("v", "T", vec![])],
+        );
+        assert!(de_uses_type_param_default(&input2));
+    }
+
+    // -- PhantomData detection ----------------------------------------------
+
+    #[test]
+    fn phantom_detection_spellings() {
+        assert!(crate::schema::is_phantom_data("PhantomData<T>"));
+        assert!(crate::schema::is_phantom_data(
+            "core::marker::PhantomData<T>"
+        ));
+        assert!(crate::schema::is_phantom_data(
+            "::core::marker::PhantomData<T>"
+        ));
+        assert!(crate::schema::is_phantom_data(
+            "std::marker::PhantomData<T>"
+        ));
+        assert!(!crate::schema::is_phantom_data("Vec<T>"));
+        assert!(!crate::schema::is_phantom_data("Option<PhantomData<T>>"));
+        assert!(!crate::schema::is_phantom_data("Phantom"));
     }
 }

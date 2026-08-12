@@ -165,7 +165,9 @@ impl<W: Write> MsgPackEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.frames.push(Frame {
             start: self.buf.len(),
             kind: FrameKind::Array,
@@ -175,7 +177,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         if let Some(frame) = self.frames.last_mut() {
             frame.count = frame
                 .count
@@ -185,7 +187,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -193,7 +195,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         self.patch_container(frame)
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.frames.push(Frame {
             start: self.buf.len(),
             kind: FrameKind::Map,
@@ -203,7 +205,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         if let Some(frame) = self.frames.last_mut() {
             frame.count = frame
                 .count
@@ -213,7 +215,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         self.write_string(key)
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -221,26 +223,36 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         self.patch_container(frame)
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn map_key<K: crate::ser::NsonSerialize>(&mut self, key: &K) -> Result<(), Self::Error> {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.count = frame
+                .count
+                .checked_add(1)
+                .ok_or_else(|| Error::custom("msgpack: map length overflow"))?;
+        }
+        K::nextencode(key, self)
+    }
+
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.push(0xC0);
         Ok(())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.push(if value { 0xC3 } else { 0xC2 });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.write_string(value)
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         let mut buf = [0u8; 4];
         self.write_string(value.encode_utf8(&mut buf))
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         match *value {
             Number::I64(v) => self.write_i64(v),
             Number::U64(v) => self.write_u64(v),
@@ -250,7 +262,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         }
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         if (-32..=127).contains(&value) {
             self.push(value as u8);
         } else if (-128..=127).contains(&value) {
@@ -269,7 +281,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         Ok(())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         if value <= 127 {
             self.push(value as u8);
         } else if value <= u8::MAX as u64 {
@@ -288,7 +300,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         Ok(())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         match i64::try_from(value) {
             Ok(v) => self.write_i64(v),
             Err(_) => Err(Error::custom(
@@ -297,7 +309,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         }
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         match u64::try_from(value) {
             Ok(v) => self.write_u64(v),
             Err(_) => Err(Error::custom(
@@ -306,16 +318,37 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
         }
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.push(0xCB);
         self.extend(&value.to_be_bytes());
         Ok(())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.push(0xCA);
         self.extend(&value.to_be_bytes());
         Ok(())
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> Result<(), Self::Error> {
+        let len = u32::try_from(value.len())
+            .map_err(|_| Error::custom("msgpack: byte string exceeds u32 wire limit"))?;
+        if len <= u8::MAX as u32 {
+            self.push(0xC4);
+            self.push(len as u8);
+        } else if len <= u16::MAX as u32 {
+            self.push(0xC5);
+            self.extend(&(len as u16).to_be_bytes());
+        } else {
+            self.push(0xC6);
+            self.extend(&len.to_be_bytes());
+        }
+        self.extend(value);
+        Ok(())
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 
@@ -535,7 +568,9 @@ impl<'de> MsgPackDecoder<'de> {
 }
 
 impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginObject => {
@@ -547,7 +582,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         }
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -559,7 +594,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         Ok(())
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         let frame = self
             .frames
             .last_mut()
@@ -572,7 +607,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         Ok(Some(key))
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(self
             .frames
             .last()
@@ -580,7 +615,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
             .unwrap_or(false))
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginArray => {
@@ -592,7 +627,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         }
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -604,7 +639,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         Ok(())
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(self
             .frames
             .last()
@@ -612,7 +647,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
             .unwrap_or(false))
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         // Count-based containers have no separator byte; the standard array
         // decode loop calls `array_entry_sep` once after every element, so it
         // is the exact hook for consuming one element.
@@ -624,35 +659,35 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         self.array_has_more()
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         match self.next_token()? {
             Token::Null => Ok(()),
             other => Err(Error::invalid_type("null", token_name(&other))),
         }
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         match self.next_token()? {
             Token::Bool(b) => Ok(b),
             other => Err(Error::invalid_type("bool", token_name(&other))),
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         match self.next_token()? {
             Token::Number(n) => Ok(n),
             other => Err(Error::invalid_type("number", token_name(&other))),
         }
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => Ok(s),
             other => Err(Error::invalid_type("string", token_name(&other))),
         }
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => {
                 let mut chars = s.chars();
@@ -665,7 +700,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         match self.peek_token()? {
             Token::BeginObject => {
                 self.begin_object()?;
@@ -694,7 +729,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         }
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.read_token()?);
         }
@@ -703,7 +738,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
             .ok_or_else(|| Error::custom("msgpack: lookahead unavailable"))
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }
@@ -724,5 +759,68 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         self.pending = None;
         self.frames.truncate(mark.frame_len);
         self.depth = mark.depth;
+    }
+
+    fn bytes(&mut self) -> Result<Cow<'de, [u8]>, Self::Error> {
+        let b = self.header()?;
+        match b {
+            0xC4 => {
+                let len = self.read_u8()? as usize;
+                Ok(Cow::Borrowed(self.cur.take(len)?))
+            }
+            0xC5 => {
+                let len = self.read_be_u16()? as usize;
+                Ok(Cow::Borrowed(self.cur.take(len)?))
+            }
+            0xC6 => {
+                let len = usize::try_from(self.read_be_u32()?)
+                    .map_err(|_| Error::custom("msgpack: byte string exceeds platform limit"))?;
+                Ok(Cow::Borrowed(self.cur.take(len)?))
+            }
+            0xA0..=0xBF | 0xD9..=0xDB => {
+                let s = self.read_str()?;
+                match s {
+                    Cow::Borrowed(s) => Ok(Cow::Borrowed(s.as_bytes())),
+                    Cow::Owned(s) => Ok(Cow::Owned(s.into_bytes())),
+                }
+            }
+            0x90..=0x9F | 0xDC | 0xDD => {
+                // Legacy encoding: `Vec<u8>` used to be written as an array of
+                // small integers. Keep reading it so old data round-trips.
+                self.cur.rewind(1);
+                self.begin_array()?;
+                let mut out = Vec::new();
+                while self.array_has_more()? {
+                    out.push(self.u8()?);
+                    if !self.array_entry_sep()? {
+                        break;
+                    }
+                }
+                self.end_array()?;
+                Ok(Cow::Owned(out))
+            }
+            other => Err(Error::custom(alloc::format!(
+                "msgpack: expected bin/str/array, got 0x{other:02x}"
+            ))),
+        }
+    }
+
+    fn map_key<K: for<'a> crate::de::NsonDeserialize<'a>>(
+        &mut self,
+    ) -> Result<Option<K>, Self::Error> {
+        let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| Error::custom("msgpack: object key outside map"))?;
+        if frame.remaining == 0 {
+            return Ok(None);
+        }
+        frame.remaining -= 1;
+        let key = K::nextdecode(self)?;
+        Ok(Some(key))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }

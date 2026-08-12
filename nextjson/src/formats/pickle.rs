@@ -158,57 +158,59 @@ impl<W: Write> PickleEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for PickleEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.buf.push(0x5D); // EMPTY_LIST
         self.buf.push(0x28); // MARK
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         self.buf.push(0x65); // APPENDS
         Ok(())
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.buf.push(0x7D); // EMPTY_DICT
         self.buf.push(0x28); // MARK
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         self.write_binunicode(key)
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.buf.push(0x75); // SETITEMS
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.buf.push(0x4E); // NONE
         Ok(())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.buf.push(if value { 0x88 } else { 0x89 });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.write_binunicode(value)
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         let mut buf = [0u8; 4];
         let s = value.encode_utf8(&mut buf);
         self.write_binunicode(s)
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         match *value {
             Number::I64(v) => self.write_i64(v),
             Number::U64(v) => self.write_u64(v),
@@ -218,17 +220,17 @@ impl<W: Write> FormatEncoder for PickleEncoder<W> {
         }
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.write_binint(value);
         Ok(())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.write_binuint(value);
         Ok(())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         match i64::try_from(value) {
             Ok(v) => self.write_binint(v),
             Err(_) => self.write_long(value),
@@ -236,7 +238,7 @@ impl<W: Write> FormatEncoder for PickleEncoder<W> {
         Ok(())
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         match u64::try_from(value) {
             Ok(v) => self.write_binuint(v),
             Err(_) => {
@@ -250,7 +252,7 @@ impl<W: Write> FormatEncoder for PickleEncoder<W> {
         Ok(())
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         if !value.is_finite() {
             return Err(Error::custom("pickle: non-finite float"));
         }
@@ -259,8 +261,26 @@ impl<W: Write> FormatEncoder for PickleEncoder<W> {
         Ok(())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.write_f64(value as f64)
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> Result<(), Self::Error> {
+        let len = u32::try_from(value.len())
+            .map_err(|_| Error::custom("pickle: bytes exceeds u32 wire limit"))?;
+        if len <= 0xFF {
+            self.buf.push(0x8C); // SHORT_BINBYTES
+            self.buf.push(len as u8);
+        } else {
+            self.buf.push(0x42); // BINBYTES
+            self.buf.extend_from_slice(&len.to_le_bytes());
+        }
+        self.buf.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 

@@ -160,23 +160,25 @@ impl<W: Write> UrlFormEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for UrlFormEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         Err(Error::custom(
             "urlform: nested containers are not representable",
         ))
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         Err(Error::custom(
             "urlform: nested containers are not representable",
         ))
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         if self.root_written {
             return Err(Error::custom(
                 "urlform: nested containers are not representable",
@@ -187,60 +189,60 @@ impl<W: Write> FormatEncoder for UrlFormEncoder<W> {
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         self.pending_key = Some(key.to_string());
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.in_object = false;
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.flush_value("null")
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.flush_value(if value { "true" } else { "false" })
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.flush_value(value)
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         let mut buf = [0u8; 4];
         let s = value.encode_utf8(&mut buf);
         self.flush_value(s)
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         let s = number_to_string(value);
         self.flush_value(&s)
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.flush_value(&value.to_string())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.flush_value(&value.to_string())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         self.flush_value(&value.to_string())
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         self.flush_value(&value.to_string())
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.flush_value(&value.to_string())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.flush_value(&value.to_string())
     }
 }
@@ -320,7 +322,9 @@ impl<'de> UrlFormDecoder<'de> {
 }
 
 impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         if self.root_written {
             return Err(Error::custom(
                 "urlform: nested containers are not representable",
@@ -331,12 +335,12 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.in_object = false;
         Ok(())
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         if !self.in_object {
             return Err(Error::custom("urlform: object key outside object"));
         }
@@ -353,36 +357,36 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
         }
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(self.pos < self.input.len())
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         Err(Error::custom(
             "urlform: nested containers are not representable",
         ))
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         Err(Error::custom(
             "urlform: nested containers are not representable",
         ))
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         self.take_value()?;
         Ok(())
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         match self.take_value()?.as_str() {
             "true" | "1" => Ok(true),
             "false" | "0" => Ok(false),
@@ -392,16 +396,16 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         let s = self.take_value()?;
         parse_number(&s)
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         Ok(Cow::Owned(self.take_value()?))
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         let s = self.take_value()?;
         let mut chars = s.chars();
         match (chars.next(), chars.next()) {
@@ -410,12 +414,12 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         self.take_value()?;
         Ok(())
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
             self.lookahead = Some(if self.in_object {
                 // Peek must NOT consume the pending value: `Option` / `Value`
@@ -435,7 +439,7 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
         Ok(self.lookahead.as_ref().expect("set").clone())
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }

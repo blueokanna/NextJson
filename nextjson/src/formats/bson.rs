@@ -58,6 +58,7 @@ const T_DOUBLE: u8 = 0x01;
 const T_STRING: u8 = 0x02;
 const T_DOC: u8 = 0x03;
 const T_ARRAY: u8 = 0x04;
+const T_BINARY: u8 = 0x05;
 const T_BOOL: u8 = 0x08;
 const T_NULL: u8 = 0x0A;
 const T_INT32: u8 = 0x10;
@@ -180,11 +181,13 @@ impl<W: Write> BsonEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for BsonEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.begin_doc(T_ARRAY, DocKind::Array { next_index: 0 })
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         // Array elements are `<type><"N"><value>`; the type byte is patched
         // by the element's value method.
         if self.pending_type.is_some() {
@@ -212,15 +215,15 @@ impl<W: Write> FormatEncoder for BsonEncoder<W> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         self.end_doc(true)
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.begin_doc(T_DOC, DocKind::Object)
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         if key.as_bytes().contains(&0) {
             return Err(Error::custom("bson: object key contains NUL"));
         }
@@ -239,22 +242,22 @@ impl<W: Write> FormatEncoder for BsonEncoder<W> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.end_doc(false)
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.element_start(T_NULL)?;
         Ok(())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.element_start(T_BOOL)?;
         self.buf.push(if value { 1 } else { 0 });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         let len = value
             .len()
             .checked_add(1)
@@ -267,13 +270,13 @@ impl<W: Write> FormatEncoder for BsonEncoder<W> {
         Ok(())
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         let mut buf = [0u8; 4];
         let s = value.encode_utf8(&mut buf);
         self.write_str(s)
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         match *value {
             Number::I64(v) => self.write_i64(v),
             Number::U64(v) => self.write_u64(v),
@@ -283,7 +286,7 @@ impl<W: Write> FormatEncoder for BsonEncoder<W> {
         }
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         if i32::try_from(value).is_ok() {
             self.element_start(T_INT32)?;
             self.buf.extend_from_slice(&(value as i32).to_le_bytes());
@@ -294,28 +297,28 @@ impl<W: Write> FormatEncoder for BsonEncoder<W> {
         Ok(())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         match i64::try_from(value) {
             Ok(v) => self.write_i64(v),
             Err(_) => Err(Error::custom("bson: u64 exceeds int64 range")),
         }
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         match i64::try_from(value) {
             Ok(v) => self.write_i64(v),
             Err(_) => Err(Error::custom("bson: i128 exceeds int64 range")),
         }
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         match i64::try_from(value) {
             Ok(v) => self.write_i64(v),
             Err(_) => Err(Error::custom("bson: u128 exceeds int64 range")),
         }
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         if !value.is_finite() {
             return Err(Error::custom(
                 "bson: non-finite float is outside the data model",
@@ -326,8 +329,22 @@ impl<W: Write> FormatEncoder for BsonEncoder<W> {
         Ok(())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.write_f64(value as f64)
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> Result<(), Self::Error> {
+        let len = i32::try_from(value.len())
+            .map_err(|_| Error::custom("bson: byte string exceeds i32 wire limit"))?;
+        self.element_start(T_BINARY)?;
+        self.buf.extend_from_slice(&len.to_le_bytes());
+        self.buf.push(0); // generic binary subtype
+        self.buf.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 
@@ -478,7 +495,9 @@ impl<'de> BsonDecoder<'de> {
 }
 
 impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         if self.frames.is_empty() && self.lookahead.is_none() {
             // Root: classify the document before committing, so a numeric-key
@@ -515,7 +534,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -533,7 +552,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         Ok(())
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         if self.cur.peek()? == 0 {
             return Ok(None);
         }
@@ -543,11 +562,11 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         Ok(Some(name))
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(self.cur.peek()? != 0)
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         if self.frames.is_empty() && self.lookahead.is_none() {
             // Root: only a numeric-key array document is an array.
@@ -583,7 +602,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         let frame = self
             .frames
             .pop()
@@ -601,15 +620,15 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         Ok(())
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(self.cur.peek()? != 0)
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Ok(self.cur.peek()? != 0)
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return match t {
                 Token::Null => Ok(()),
@@ -625,7 +644,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return match t {
                 Token::Bool(b) => Ok(b),
@@ -645,7 +664,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return match t {
                 Token::Number(n) => Ok(n),
@@ -672,7 +691,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return match t {
                 Token::Str(s) => Ok(s),
@@ -688,7 +707,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         let s = self.string()?;
         let mut chars = s.chars();
         match (chars.next(), chars.next()) {
@@ -697,7 +716,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         match self.peek_token()? {
             Token::BeginObject => {
                 self.begin_object()?;
@@ -726,14 +745,14 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         }
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }
@@ -754,6 +773,42 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
         self.pending_type = None;
         self.frames.truncate(mark.frame_len);
         self.depth = mark.depth;
+    }
+
+    fn bytes(&mut self) -> Result<Cow<'de, [u8]>, Self::Error> {
+        if let Some(t) = self.lookahead.take() {
+            return match t {
+                Token::Str(s) => match s {
+                    Cow::Borrowed(s) => Ok(Cow::Borrowed(s.as_bytes())),
+                    Cow::Owned(s) => Ok(Cow::Owned(s.into_bytes())),
+                },
+                other => Err(Error::invalid_type("binary", token_name(&other))),
+            };
+        }
+        let ty = self.next_type()?;
+        match ty {
+            T_BINARY => {
+                let wire_len = self.cur.le_u32()?;
+                let len = usize::try_from(wire_len)
+                    .map_err(|_| Error::custom("bson: binary length exceeds platform limit"))?;
+                let _subtype = self.cur.byte()?;
+                Ok(Cow::Borrowed(self.cur.take(len)?))
+            }
+            T_STRING => {
+                let s = self.read_string_value()?;
+                match s {
+                    Cow::Borrowed(s) => Ok(Cow::Borrowed(s.as_bytes())),
+                    Cow::Owned(s) => Ok(Cow::Owned(s.into_bytes())),
+                }
+            }
+            other => Err(Error::custom(alloc::format!(
+                "bson: expected binary or string, found type 0x{other:02x}"
+            ))),
+        }
+    }
+
+    fn is_human_readable(&self) -> bool {
+        false
     }
 }
 

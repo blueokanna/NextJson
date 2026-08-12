@@ -5,7 +5,12 @@ use crate::{Data, Fields, Input};
 
 /// Generate the schema constant expression for a type.
 pub(crate) fn schema_expr(input: &Input, cp: &str) -> String {
-    let name = input.ident.clone();
+    // With `remote`, the schema names the external type being described.
+    let name = input
+        .cattr
+        .remote
+        .clone()
+        .unwrap_or_else(|| input.ident.clone());
     let ca = &input.cattr;
     match &input.data {
         Data::Struct(fields) => struct_schema(fields, ca, cp, &name),
@@ -36,7 +41,7 @@ fn struct_schema(fields: &Fields, ca: &ContainerAttrs, cp: &str, name: &str) -> 
                 .iter()
                 .map(|field| {
                     let fa = attr::field_attrs(&field.attrs);
-                    field_type_schema(&field.ty, fa.skip_serializing, cp)
+                    field_wire_schema(field, &fa, cp)
                 })
                 .collect();
             format!("{cp}::TypeSchema::Tuple(&[{}])", items.join(", "))
@@ -49,7 +54,7 @@ fn enum_schema(variants: &[crate::Variant], ca: &ContainerAttrs, cp: &str, name:
         .iter()
         .map(|v| {
             let va = attr::variant_attrs(&v.attrs);
-            let serialized = renamed_variant(v, &va, ca);
+            let serialized = renamed_variant(v, &va, ca, true);
             let ty = variant_type_schema(v, &va, &serialized, ca, cp);
             format!(
                 "{cp}::VariantSchema {{ name: {serialized:?}, orig: {:?}, ty: {ty} }}",
@@ -85,11 +90,17 @@ fn variant_type_schema(
 ) -> String {
     match &v.fields {
         Fields::Unit => format!("{cp}::TypeSchema::Unit"),
-        Fields::Unnamed(f) if f.len() == 1 => field_type_schema(&f[0].ty, va.skip_serializing, cp),
+        Fields::Unnamed(f) if f.len() == 1 => {
+            let fa = attr::newtype_field_attrs(&attr::field_attrs(&f[0].attrs), va);
+            field_wire_schema(&f[0], &fa, cp)
+        }
         Fields::Unnamed(f) => {
             let items: Vec<String> = f
                 .iter()
-                .map(|field| field_type_schema(&field.ty, false, cp))
+                .map(|field| {
+                    let fa = attr::field_attrs(&field.attrs);
+                    field_wire_schema(field, &fa, cp)
+                })
                 .collect();
             format!("{cp}::TypeSchema::Tuple(&[{}])", items.join(", "))
         }
@@ -98,7 +109,7 @@ fn variant_type_schema(
                 .iter()
                 .map(|field| {
                     let fa = attr::field_attrs(&field.attrs);
-                    field_schema_tokens(field, &fa, ca, cp)
+                    variant_field_schema_tokens(field, &fa, va, ca, cp)
                 })
                 .collect();
             format!(
@@ -117,43 +128,153 @@ fn field_schema_tokens(
     cp: &str,
 ) -> String {
     let orig = field.ident.clone().unwrap_or_default();
-    let serialized = renamed_field(field, fa, ca);
-    let required =
-        !ca.default && !fa.has_default() && !fa.skip_deserializing && !is_option_type(&field.ty);
+    let serialized = renamed_field(field, fa, ca, true);
+    let required = !ca.has_default()
+        && !fa.has_default()
+        && !fa.skip_deserializing
+        && !is_phantom_data(&field.ty)
+        && !is_option_type(&field.ty);
     let flattened = fa.flatten;
-    let ty = field_type_schema(&field.ty, fa.skip_serializing, cp);
+    let ty = field_wire_schema(field, fa, cp);
     format!(
         "{cp}::FieldSchema {{ name: {serialized:?}, orig: {orig:?}, \
          required: {required}, flattened: {flattened}, ty: {ty} }}"
     )
 }
 
-/// The serialized name of a field.
-pub(crate) fn renamed_field(field: &crate::Field, fa: &FieldAttrs, ca: &ContainerAttrs) -> String {
+/// Schema for a struct-variant field, honoring the variant's `rename_all`
+/// and the container's `rename_all_fields` instead of the container-level
+/// `rename_all` (which only renames the variant names themselves).
+fn variant_field_schema_tokens(
+    field: &crate::Field,
+    fa: &FieldAttrs,
+    va: &crate::VariantAttrs,
+    ca: &ContainerAttrs,
+    cp: &str,
+) -> String {
+    let orig = field.ident.clone().unwrap_or_default();
+    let serialized = renamed_variant_field(field, fa, va, ca, true);
+    let required = !ca.has_default()
+        && !fa.has_default()
+        && !fa.skip_deserializing
+        && !is_phantom_data(&field.ty)
+        && !is_option_type(&field.ty);
+    let flattened = fa.flatten;
+    let ty = field_wire_schema(field, fa, cp);
+    format!(
+        "{cp}::FieldSchema {{ name: {serialized:?}, orig: {orig:?}, \
+         required: {required}, flattened: {flattened}, ty: {ty} }}"
+    )
+}
+
+/// The rename rule for one direction, falling back to the shared rule.
+fn rename_rule(ca: &ContainerAttrs, ser: bool) -> Option<String> {
+    if ser {
+        ca.rename_all_ser.clone().or_else(|| ca.rename_all.clone())
+    } else {
+        ca.rename_all_de.clone().or_else(|| ca.rename_all.clone())
+    }
+}
+
+/// The serialized name of a field (`ser = true`: serialize direction,
+/// `ser = false`: deserialize direction).
+pub(crate) fn renamed_field(
+    field: &crate::Field,
+    fa: &FieldAttrs,
+    ca: &ContainerAttrs,
+    ser: bool,
+) -> String {
     if let Some(r) = &fa.rename {
         return r.clone();
     }
     let orig = field.ident.clone().unwrap_or_default();
-    match &ca.rename_all {
-        Some(rule) => crate::case::apply(rule, &orig),
+    match rename_rule(ca, ser) {
+        Some(rule) => crate::case::apply(&rule, &orig),
         None => orig,
     }
 }
 
-/// The serialized name of a variant.
+/// The serialized name of a variant (`ser = true`: serialize direction,
+/// `ser = false`: deserialize direction).
+///
+/// Only container-level rules apply to the variant name itself; a variant's
+/// own `rename_all` renames its *fields* (serde semantics), handled by
+/// [`renamed_variant_field`].
 pub(crate) fn renamed_variant(
     v: &crate::Variant,
     va: &crate::VariantAttrs,
     ca: &ContainerAttrs,
+    ser: bool,
 ) -> String {
     if let Some(r) = &va.rename {
         return r.clone();
     }
     let orig = v.ident.clone();
-    let rule = va.rename_all.as_ref().or(ca.rename_all.as_ref());
-    match rule {
-        Some(rule) => crate::case::apply(rule, &orig),
+    match rename_rule(ca, ser) {
+        Some(rule) => crate::case::apply(&rule, &orig),
         None => orig,
+    }
+}
+
+/// The rename rule for a struct-variant's fields.
+///
+/// Precedence: variant `rename_all` > container `rename_all_fields`
+/// (directional first, then shared). The container-level `rename_all` is NOT
+/// consulted here — for enums it renames variant names, not their fields
+/// (serde semantics).
+pub(crate) fn variant_field_rule(
+    va: &crate::VariantAttrs,
+    ca: &ContainerAttrs,
+    ser: bool,
+) -> Option<String> {
+    va.rename_all.clone().or_else(|| {
+        if ser {
+            ca.rename_all_fields_ser
+                .clone()
+                .or_else(|| ca.rename_all_fields.clone())
+        } else {
+            ca.rename_all_fields_de
+                .clone()
+                .or_else(|| ca.rename_all_fields.clone())
+        }
+    })
+}
+
+/// The serialized name of a struct-variant field (honoring the variant's own
+/// rename rules; `ser = true`: serialize direction, `false`: deserialize).
+pub(crate) fn renamed_variant_field(
+    field: &crate::Field,
+    fa: &FieldAttrs,
+    va: &crate::VariantAttrs,
+    ca: &ContainerAttrs,
+    ser: bool,
+) -> String {
+    if let Some(r) = &fa.rename {
+        return r.clone();
+    }
+    let orig = field.ident.clone().unwrap_or_default();
+    match variant_field_rule(va, ca, ser) {
+        Some(rule) => crate::case::apply(&rule, &orig),
+        None => orig,
+    }
+}
+
+/// The wire schema for a field's serialized representation.
+///
+/// Fields routed through `serialize_with` / `deserialize_with` / `with` /
+/// `getter` may have a wire type that differs from their Rust type (and the
+/// Rust type may not even implement `NsonSchema`), so they are described as
+/// [`TypeSchema::Opaque`].
+fn field_wire_schema(field: &crate::Field, fa: &FieldAttrs, cp: &str) -> String {
+    if fa.serialize_with.is_some()
+        || fa.deserialize_with.is_some()
+        || fa.with.is_some()
+        || fa.getter.is_some()
+        || is_phantom_data(&field.ty)
+    {
+        format!("{cp}::TypeSchema::Opaque")
+    } else {
+        field_type_schema(&field.ty, fa.skip_serializing, cp)
     }
 }
 
@@ -162,6 +283,18 @@ pub(crate) fn is_option_type(ty: &str) -> bool {
     generic_arg(ty.trim(), "Option").is_some()
 }
 
+/// Whether a field type is `PhantomData<T>` in any path spelling
+/// (`PhantomData<T>`, `core::marker::PhantomData<T>`,
+/// `::core::marker::PhantomData<T>`, ...).
+///
+/// serde treats such fields as not part of the data model: they are skipped
+/// on serialize and defaulted on deserialize, and never appear on the wire.
+pub(crate) fn is_phantom_data(ty: &str) -> bool {
+    let t = ty.trim();
+    let base = t.split('<').next().unwrap_or(t).trim();
+    let base = base.rsplit("::").next().unwrap_or(base).trim();
+    base == "PhantomData"
+}
 /// Schema expression for a field type.
 pub(crate) fn field_type_schema(ty: &str, skipped: bool, cp: &str) -> String {
     if skipped {
@@ -291,11 +424,15 @@ fn known_type_schema(ty: &str, cp: &str) -> Option<String> {
 }
 
 /// Extract the single type argument of `Name<Arg>`.
+///
+/// Handles path-qualified names. The token join produces `core :: option ::
+/// Option < T >`, so the segment after the final `::` carries a leading
+/// space and must be trimmed before comparison.
 fn generic_arg(t: &str, name: &str) -> Option<String> {
     let t = t.trim();
     let idx = t.find('<')?;
     let base = t[..idx].trim();
-    let base = base.rsplit("::").next().unwrap_or(base);
+    let base = base.rsplit("::").next().unwrap_or(base).trim();
     if base != name {
         return None;
     }

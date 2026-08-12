@@ -284,12 +284,17 @@ fn transparent_newtype() {
 #[test]
 fn with_module() {
     mod custom {
-        use nextjson::{FormatDecoder, FormatEncoder, Result};
+        use nextjson::{FormatDecoder, FormatEncoder};
 
-        pub fn serialize<E: FormatEncoder>(s: &str, e: &mut E) -> Result<()> {
+        pub fn serialize<E: FormatEncoder>(
+            s: &str,
+            e: &mut E,
+        ) -> core::result::Result<(), E::Error> {
             e.write_str(&s.to_uppercase())
         }
-        pub fn deserialize<'de, D: FormatDecoder<'de>>(d: &mut D) -> Result<String> {
+        pub fn deserialize<'de, D: FormatDecoder<'de>>(
+            d: &mut D,
+        ) -> core::result::Result<String, D::Error> {
             Ok(d.string()?.to_lowercase())
         }
     }
@@ -307,10 +312,15 @@ fn with_module() {
 
 #[test]
 fn serialize_with_and_deserialize_with() {
-    fn ser_double<E: nextjson::FormatEncoder>(v: &i32, e: &mut E) -> nextjson::Result<()> {
+    fn ser_double<E: nextjson::FormatEncoder>(
+        v: &i32,
+        e: &mut E,
+    ) -> core::result::Result<(), E::Error> {
         e.write_i64(*v as i64 * 2)
     }
-    fn de_half<'de, D: nextjson::FormatDecoder<'de>>(d: &mut D) -> nextjson::Result<i32> {
+    fn de_half<'de, D: nextjson::FormatDecoder<'de>>(
+        d: &mut D,
+    ) -> core::result::Result<i32, D::Error> {
         Ok(d.number()?.as_i64().unwrap() as i32 / 2)
     }
 

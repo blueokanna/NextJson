@@ -84,16 +84,13 @@
 //! conversions use checked arithmetic, and decoders cap nesting at 128 by
 //! default.
 //! Applications must still enforce total input bytes, collection sizes, CPU
-//! time, and output quotas. Reader APIs buffer their complete input.
+//! time, and output quotas. `from_slice` / `from_str` operate on a complete
+//! in-memory input; `from_reader` (std) pulls incrementally from any
+//! `std::io::Read` source.
 //!
 //! See the repository's [English README], [Chinese README], [safety model], and
 //! [benchmark protocol] for the complete supported surface and reproducibility
 //! requirements.
-//!
-//! [English README]: https://github.com/blueokanna/NextJson/blob/main/README.md
-//! [Chinese README]: https://github.com/blueokanna/NextJson/blob/main/README_CN.md
-//! [safety model]: https://github.com/blueokanna/NextJson/blob/main/docs/SAFETY.md
-//! [benchmark protocol]: https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -108,18 +105,24 @@ extern crate std;
 #[cfg(feature = "derive")]
 pub use nextjson_derive::{NsonDeserialize, NsonSerialize};
 
-pub use crate::de::{DecodeConfig, DecodeSlot, Decoder, FormatDecoder, NsonDeserialize, Token};
+pub use crate::bytes::Bytes;
+pub use crate::de::{
+    DecodeConfig, DecodeSlot, Decoder, FormatDecoder, NsonDeserialize, OptionTag, Token,
+};
 pub use crate::encoding::{EncodeConfig, Encoder};
-pub use crate::error::{Error, Result};
+pub use crate::error::{Error, FormatError, Result};
 pub use crate::map::Map;
 pub use crate::number::Number;
 pub use crate::schema::{
     EnumSchema, FieldSchema, NsonSchema, StructSchema, TypeSchema, VariantSchema,
 };
 pub use crate::ser::{FormatEncoder, NsonSerialize};
+#[cfg(feature = "std")]
+pub use crate::stream::StreamDecoder;
 pub use crate::value::Value;
 pub use crate::write::Write;
 
+mod bytes;
 pub mod cross_format;
 pub mod de;
 pub mod encoding;
@@ -132,6 +135,8 @@ mod number;
 pub mod private;
 mod schema;
 mod ser;
+#[cfg(feature = "std")]
+pub mod stream;
 mod value;
 mod write;
 
@@ -254,17 +259,20 @@ pub fn from_slice<'de, T: NsonDeserialize<'de>>(slice: &'de [u8]) -> Result<T> {
 
 /// Deserialize from a `std::io::Read` (requires the `std` feature).
 ///
-/// The target type must be deserializable for any lifetime (owned).
+/// The input is pulled incrementally (see [`StreamDecoder`]), so decoding
+/// starts before the whole payload has arrived. The target type must be
+/// deserializable for any lifetime (owned): borrowed inputs (`&str`, `&[u8]`,
+/// `nextjson::Bytes`) cannot come from a stream.
 #[cfg(feature = "std")]
 pub fn from_reader<R, T>(reader: R) -> Result<T>
 where
     R: std::io::Read,
     T: for<'de> NsonDeserialize<'de>,
 {
-    let mut buf = Vec::new();
-    let mut reader = reader;
-    reader.read_to_end(&mut buf).map_err(Error::io)?;
-    from_slice(&buf)
+    let mut decoder = StreamDecoder::new(reader);
+    let value = T::nextdecode(&mut decoder)?;
+    decoder.end()?;
+    Ok(value)
 }
 
 // ---------------------------------------------------------------------------

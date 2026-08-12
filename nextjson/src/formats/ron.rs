@@ -122,31 +122,33 @@ impl<W: Write> RonEncoder<W> {
 }
 
 impl<W: Write> FormatEncoder for RonEncoder<W> {
-    fn begin_array(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.frames.push((true, true));
         self.buf.push(b'[');
         Ok(())
     }
 
-    fn separator(&mut self) -> Result<()> {
+    fn separator(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         self.frames.pop();
         self.buf.push(b']');
         Ok(())
     }
 
-    fn begin_object(&mut self) -> Result<()> {
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.frames.push((false, true));
         self.buf.push(b'{');
         Ok(())
     }
 
-    fn key(&mut self, key: &str) -> Result<()> {
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
         self.key_sep()?;
         self.write_quoted(key);
         self.buf.push(b':');
@@ -154,74 +156,74 @@ impl<W: Write> FormatEncoder for RonEncoder<W> {
         Ok(())
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.frames.pop();
         self.buf.push(b'}');
         Ok(())
     }
 
-    fn write_null(&mut self) -> Result<()> {
+    fn write_null(&mut self) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(b"None");
         Ok(())
     }
 
-    fn write_bool(&mut self, value: bool) -> Result<()> {
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf
             .extend_from_slice(if value { b"true" } else { b"false" });
         Ok(())
     }
 
-    fn write_str(&mut self, value: &str) -> Result<()> {
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.write_quoted(value);
         Ok(())
     }
 
-    fn write_char(&mut self, value: char) -> Result<()> {
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.write_quoted(&value.to_string());
         Ok(())
     }
 
-    fn write_number(&mut self, value: &Number) -> Result<()> {
+    fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(number_bytes(value).as_bytes());
         Ok(())
     }
 
-    fn write_i64(&mut self, value: i64) -> Result<()> {
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_u64(&mut self, value: u64) -> Result<()> {
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_i128(&mut self, value: i128) -> Result<()> {
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_u128(&mut self, value: u128) -> Result<()> {
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_f64(&mut self, value: f64) -> Result<()> {
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.value_sep()?;
         self.buf.extend_from_slice(value.to_string().as_bytes());
         Ok(())
     }
 
-    fn write_f32(&mut self, value: f32) -> Result<()> {
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
         self.write_f64(value as f64)
     }
 }
@@ -539,7 +541,9 @@ fn utf8_len(b: u8) -> Option<usize> {
 }
 
 impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
-    fn begin_object(&mut self) -> Result<()> {
+    type Error = crate::error::Error;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginObject => Ok(()),
@@ -547,7 +551,7 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         }
     }
 
-    fn end_object(&mut self) -> Result<()> {
+    fn end_object(&mut self) -> Result<(), Self::Error> {
         self.leave_container()?;
         let r = match self.next_token()? {
             Token::EndObject => Ok(()),
@@ -558,7 +562,7 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         r
     }
 
-    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
+    fn object_key(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         if matches!(self.peek_token()?, Token::EndObject) {
             return Ok(None);
         }
@@ -573,7 +577,7 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         Ok(Some(key))
     }
 
-    fn object_entry_sep(&mut self) -> Result<bool> {
+    fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
         self.skip_ws()?;
         if self.input.get(self.pos) == Some(&b',') {
             self.pos += 1;
@@ -581,7 +585,7 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         Ok(!matches!(self.peek_token()?, Token::EndObject))
     }
 
-    fn begin_array(&mut self) -> Result<()> {
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.enter_container()?;
         match self.next_token()? {
             Token::BeginArray => Ok(()),
@@ -589,7 +593,7 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         }
     }
 
-    fn end_array(&mut self) -> Result<()> {
+    fn end_array(&mut self) -> Result<(), Self::Error> {
         self.leave_container()?;
         let r = match self.next_token()? {
             Token::EndArray => Ok(()),
@@ -600,11 +604,11 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         r
     }
 
-    fn array_has_more(&mut self) -> Result<bool> {
+    fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(!matches!(self.peek_token()?, Token::EndArray))
     }
 
-    fn array_entry_sep(&mut self) -> Result<bool> {
+    fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         self.skip_ws()?;
         if self.input.get(self.pos) == Some(&b',') {
             self.pos += 1;
@@ -612,35 +616,35 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         self.array_has_more()
     }
 
-    fn unit(&mut self) -> Result<()> {
+    fn unit(&mut self) -> Result<(), Self::Error> {
         match self.next_token()? {
             Token::Null => Ok(()),
             other => Err(Error::invalid_type("null", token_name(&other))),
         }
     }
 
-    fn bool(&mut self) -> Result<bool> {
+    fn bool(&mut self) -> Result<bool, Self::Error> {
         match self.next_token()? {
             Token::Bool(b) => Ok(b),
             other => Err(Error::invalid_type("bool", token_name(&other))),
         }
     }
 
-    fn number(&mut self) -> Result<Number> {
+    fn number(&mut self) -> Result<Number, Self::Error> {
         match self.next_token()? {
             Token::Number(n) => Ok(n),
             other => Err(Error::invalid_type("number", token_name(&other))),
         }
     }
 
-    fn string(&mut self) -> Result<Cow<'de, str>> {
+    fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => Ok(s),
             other => Err(Error::invalid_type("string", token_name(&other))),
         }
     }
 
-    fn char(&mut self) -> Result<char> {
+    fn char(&mut self) -> Result<char, Self::Error> {
         match self.next_token()? {
             Token::Str(s) => {
                 let mut chars = s.chars();
@@ -653,7 +657,7 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         }
     }
 
-    fn skip_value(&mut self) -> Result<()> {
+    fn skip_value(&mut self) -> Result<(), Self::Error> {
         match self.peek_token()? {
             Token::BeginObject => {
                 self.begin_object()?;
@@ -682,14 +686,14 @@ impl<'de> FormatDecoder<'de> for RonDecoder<'de> {
         }
     }
 
-    fn peek_token(&mut self) -> Result<Token<'de>> {
+    fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("set").clone())
     }
 
-    fn next_token(&mut self) -> Result<Token<'de>> {
+    fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
         }

@@ -4,7 +4,11 @@ use alloc::string::String;
 use core::fmt;
 
 /// Global result alias for `nextjson`.
-pub type Result<T> = core::result::Result<T, Error>;
+///
+/// The error type defaults to [`Error`] so existing code can keep writing
+/// `Result<T>`. Format codecs that carry their own error type use the second
+/// parameter (`Result<T, CodecError>`).
+pub type Result<T, E = Error> = core::result::Result<T, E>;
 
 /// A JSON error carrying positional information.
 ///
@@ -213,6 +217,24 @@ impl From<&str> for Error {
         Error::custom(msg)
     }
 }
+
+/// Error type contract for format codecs.
+///
+/// Every [`FormatEncoder`](crate::ser::FormatEncoder) and
+/// [`FormatDecoder`](crate::de::FormatDecoder) implementation selects its own
+/// error type. Generic serialization / deserialization code only ever builds
+/// [`Error`] values (via [`Error::custom`] and friends), so a codec error type
+/// must be able to wrap them. This lets external binary codecs return their
+/// own rich errors from format methods while nextjson's generic code keeps
+/// working unchanged.
+pub trait FormatError: From<Error> + core::fmt::Debug {
+    /// Build a custom error message.
+    fn custom(msg: impl Into<alloc::string::String>) -> Self {
+        Error::custom(msg).into()
+    }
+}
+
+impl FormatError for Error {}
 
 #[cfg(test)]
 mod tests {

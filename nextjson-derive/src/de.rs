@@ -21,13 +21,38 @@ impl Code {
     }
 }
 
+/// Whether a type is `Option<...>` in any path spelling (`Option<T>`, bare or
+/// `core`/`std`/`::`-qualified). Path spellings arrive from the token join as
+/// `core :: option :: Option < T >`, which a plain prefix check misses, so this
+/// delegates to the shared, path-aware helper in [`crate::schema`].
 fn is_option(ty: &str) -> bool {
-    let t = ty.trim();
-    t.starts_with("Option") || t.starts_with("::core::option::Option")
+    crate::schema::is_option_type(ty)
 }
 
 fn field_required(f: &crate::Field, fa: &FieldAttrs, ca: &ContainerAttrs) -> bool {
-    !ca.default && !fa.has_default() && !fa.skip_deserializing && !is_option(&f.ty)
+    !ca.has_default() && !fa.has_default() && !fa.skip_deserializing && !is_option(&f.ty)
+}
+
+/// The deserialize-side key of a field, honoring an optional variant-level
+/// rename rule (used for struct-variant fields). `vrule == None` means a
+/// plain struct field, which uses the container rules.
+fn field_name(
+    field: &crate::Field,
+    fa: &FieldAttrs,
+    ca: &ContainerAttrs,
+    ser: bool,
+    vrule: Option<&str>,
+) -> String {
+    match vrule {
+        Some(rule) => {
+            if let Some(r) = &fa.rename {
+                r.clone()
+            } else {
+                crate::case::apply(rule, &field.ident.clone().unwrap_or_default())
+            }
+        }
+        None => crate::schema::renamed_field(field, fa, ca, ser),
+    }
 }
 
 fn default_expr(f: &crate::Field, fa: &FieldAttrs) -> String {
@@ -122,9 +147,9 @@ pub(crate) fn deserialize_struct(
                 ));
             }
             let nextdecode = if has_flatten {
-                gen_map_nextdecode(f, ca, cp, "__d")
+                gen_map_nextdecode(f, ca, cp, "__d", None)
             } else {
-                gen_match_nextdecode(f, ca, cp, "__d")
+                gen_match_nextdecode(f, ca, cp, "__d", None)
             };
             c.l(&nextdecode);
             let assigns: Vec<String> = f
@@ -166,7 +191,7 @@ pub(crate) fn deserialize_struct(
                 let id = format!("__v{i}");
                 if i > 0 {
                     c.l(&format!(
-                        "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, \"a tuple struct\")); }}"
+                        "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, \"a tuple struct\").into()); }}"
                     ));
                 }
                 if fa.skip_deserializing {
@@ -181,7 +206,7 @@ pub(crate) fn deserialize_struct(
                 names.push(id);
             }
             c.l(&format!(
-                "if __d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({count}, \"a tuple struct\")); }}"
+                "if __d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({count}, \"a tuple struct\").into()); }}"
             ));
             c.l("__d.end_array()?;");
             c.l(&format!("__out.write(Self({}));", names.join(", ")));
@@ -197,6 +222,7 @@ fn gen_match_nextdecode(
     ca: &ContainerAttrs,
     cp: &str,
     decoder: &str,
+    vrule: Option<&str>,
 ) -> String {
     let deny = ca.deny_unknown_fields;
     let tracked: Vec<(usize, &crate::Field, FieldAttrs)> = fields
@@ -221,6 +247,9 @@ fn gen_match_nextdecode(
             c.l(&default_write(i, &init));
         }
     }
+    if let Some(path) = &ca.default_path {
+        c.l(&format!("let __default: Self = {path}();"));
+    }
 
     let n = tracked.len();
     let (decl, set_tpl, check_tpl) = seen_decl(n, cp);
@@ -234,7 +263,7 @@ fn gen_match_nextdecode(
         // `idx` is the position within `tracked` (0..n) and therefore the
         // bit/`Vec<bool>` index used by `seen_decl`; `i` stays the original
         // field index used for the `__slot{i}` storage.
-        let main = crate::schema::renamed_field(f, fa, ca);
+        let main = field_name(f, fa, ca, false, vrule);
         let mut pats = vec![format!("{main:?}")];
         for a in &fa.alias {
             pats.push(format!("{a:?}"));
@@ -253,7 +282,7 @@ fn gen_match_nextdecode(
     c.l("_ => {");
     if deny {
         c.l(&format!(
-            "return Err({cp}::Error::unknown_field(__key.into_owned()));"
+            "return Err({cp}::Error::unknown_field(__key.into_owned()).into());"
         ));
     } else {
         c.l(&format!("{decoder}.skip_value()?;"));
@@ -270,10 +299,19 @@ fn gen_match_nextdecode(
         if field_required(f, fa, ca) {
             let orig = ident.clone();
             c.l(&format!(
-                "if !({check}) {{ return Err({cp}::Error::missing_field({orig:?})); }};"
+                "if !({check}) {{ return Err({cp}::Error::missing_field({orig:?}).into()); }};"
             ));
         } else {
-            let init = default_expr(f, fa);
+            // Missing-field fallback precedence:
+            //   1. explicit field-level `default = "path"`;
+            //   2. container-level `default = "path"` (per-field value taken
+            //      from the default instance);
+            //   3. `Default::default()` (bare `default`, container `default`).
+            let init = match &fa.default {
+                Some(d) if !d.is_empty() => format!("{d}()"),
+                _ if ca.default_path.is_some() => format!("__default.{ident}"),
+                _ => format!("<{} as ::core::default::Default>::default()", f.ty),
+            };
             let dw = default_write(*i, &init);
             c.l(&format!("if !({check}) {{ {dw} }};"));
         }
@@ -287,6 +325,7 @@ fn gen_map_nextdecode(
     ca: &ContainerAttrs,
     cp: &str,
     decoder: &str,
+    vrule: Option<&str>,
 ) -> String {
     let tracked: Vec<(usize, &crate::Field, FieldAttrs)> = fields
         .iter()
@@ -310,6 +349,9 @@ fn gen_map_nextdecode(
             c.l(&default_write(i, &init));
         }
     }
+    if let Some(path) = &ca.default_path {
+        c.l(&format!("let __default: Self = {path}();"));
+    }
 
     c.l(&format!(
         "let mut __map = <{cp}::Map as {cp}::NsonDeserialize<'de>>::nextdecode({decoder})?;"
@@ -321,7 +363,7 @@ fn gen_map_nextdecode(
             continue;
         }
         let ident = f.ident.clone().unwrap_or_default();
-        let main = crate::schema::renamed_field(f, fa, ca);
+        let main = field_name(f, fa, ca, false, vrule);
         let mut keys = vec![format!("__map.remove({main:?})")];
         for a in &fa.alias {
             keys.push(format!(".or_else(|| __map.remove({a:?}))"));
@@ -340,10 +382,14 @@ fn gen_map_nextdecode(
         if field_required(f, fa, ca) {
             let orig = ident.clone();
             c.l(&format!(
-                "::core::option::Option::None => {{ return Err({cp}::Error::missing_field({orig:?})); }}"
+                "::core::option::Option::None => {{ return Err({cp}::Error::missing_field({orig:?}).into()); }}"
             ));
         } else {
-            let init = default_expr(f, fa);
+            let init = match &fa.default {
+                Some(d) if !d.is_empty() => format!("{d}()"),
+                _ if ca.default_path.is_some() => format!("__default.{ident}"),
+                _ => format!("<{} as ::core::default::Default>::default()", f.ty),
+            };
             let dw = default_write(*i, &init);
             c.l(&format!("::core::option::Option::None => {{ {dw} }}"));
         }
@@ -376,6 +422,7 @@ fn gen_map_nextdecode(
 fn gen_variant_struct_nextdecode(
     variant: &str,
     fields: &[crate::Field],
+    va: &crate::VariantAttrs,
     ca: &ContainerAttrs,
     cp: &str,
     decoder: &str,
@@ -389,10 +436,11 @@ fn gen_variant_struct_nextdecode(
             f.ty
         ));
     }
+    let vrule = crate::schema::variant_field_rule(va, ca, false);
     let nextdecode = if has_flatten {
-        gen_map_nextdecode(fields, ca, cp, decoder)
+        gen_map_nextdecode(fields, ca, cp, decoder, vrule.as_deref())
     } else {
-        gen_match_nextdecode(fields, ca, cp, decoder)
+        gen_match_nextdecode(fields, ca, cp, decoder, vrule.as_deref())
     };
     c.l(&nextdecode);
     let mut assigns = Vec::new();
@@ -419,6 +467,21 @@ pub(crate) fn deserialize_enum(
     let ca = &input.cattr;
     if ca.untagged && (ca.tag.is_some() || ca.content.is_some()) {
         return crate::err_str("nextjson: `untagged` cannot be combined with `tag` / `content`");
+    }
+    // `#[njson(other)]` (serde semantics): only valid on a unit variant of an
+    // internally or adjacently tagged enum, where it becomes the catch-all.
+    if let Some(v) = variants
+        .iter()
+        .find(|v| attr::variant_attrs(&v.attrs).other)
+    {
+        if ca.tag.is_none() {
+            return crate::err_str(
+                "nextjson: `other` is only allowed in internally tagged or adjacently tagged enums",
+            );
+        }
+        if !matches!(v.fields, Fields::Unit) {
+            return crate::err_str("nextjson: `other` variant must be a unit variant");
+        }
     }
     if let Some(tag) = &ca.tag {
         if let Some(content) = &ca.content {
@@ -450,12 +513,16 @@ fn deserialize_external(
         if va.skip_deserializing {
             continue;
         }
-        let vname = crate::schema::renamed_variant(v, &va, ca);
+        let vname = crate::schema::renamed_variant(v, &va, ca, false);
+        let mut pats = vec![format!("{vname:?}")];
+        for a in &va.alias {
+            pats.push(format!("{a:?}"));
+        }
         let body = match &v.fields {
             Fields::Unit => format!("__d.unit()?; __out.write(Self::{});", v.ident),
             Fields::Unnamed(f) if f.len() == 1 => {
                 let field = &f[0];
-                let fa = attr::field_attrs(&field.attrs);
+                let fa = attr::newtype_field_attrs(&attr::field_attrs(&field.attrs), &va);
                 let expr = field_decode_expr(field, &fa, cp, "__d");
                 format!("let __v = {expr}; __out.write(Self::{}(__v));", v.ident)
             }
@@ -468,7 +535,7 @@ fn deserialize_external(
                     let id = format!("__v{i}");
                     if i > 0 {
                         sub.l(&format!(
-                            "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, \"a tuple variant\")); }}"
+                            "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, \"a tuple variant\").into()); }}"
                         ));
                     }
                     if fa.skip_deserializing {
@@ -483,7 +550,7 @@ fn deserialize_external(
                     names.push(id);
                 }
                 sub.l(&format!(
-                    "if __d.array_entry_sep()? {{ return Err({cp}::Error::custom(\"too many elements in tuple variant\")); }}"
+                    "if __d.array_entry_sep()? {{ return Err({cp}::Error::custom(\"too many elements in tuple variant\").into()); }}"
                 ));
                 sub.l("__d.end_array()?;");
                 sub.l(&format!(
@@ -495,20 +562,20 @@ fn deserialize_external(
             }
             Fields::Named(f) => {
                 let constructed =
-                    gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__d", has_flatten);
+                    gen_variant_struct_nextdecode(&v.ident, f, &va, ca, cp, "__d", has_flatten);
                 format!("__out.write({constructed});")
             }
         };
-        c.l(&format!("{vname:?} => {{"));
+        c.l(&format!("{} => {{", pats.join(" | ")));
         c.l(&body);
         c.l("}");
     }
     c.l(&format!(
-        "_ => return Err({cp}::Error::unknown_variant(__key.into_owned())),"
+        "_ => return Err({cp}::Error::unknown_variant(__key.into_owned()).into()),"
     ));
     c.l("}");
     c.l(&format!(
-        "if __d.object_entry_sep()? {{ return Err({cp}::Error::custom(\"expected a single-variant enum object\")); }}"
+        "if __d.object_entry_sep()? {{ return Err({cp}::Error::custom(\"expected a single-variant enum object\").into()); }}"
     ));
     c.l("__d.end_object()?;");
     c.l("::core::result::Result::Ok(())");
@@ -547,12 +614,16 @@ fn deserialize_internal(
         if va.skip_deserializing {
             continue;
         }
-        let vname = crate::schema::renamed_variant(v, &va, ca);
+        let vname = crate::schema::renamed_variant(v, &va, ca, false);
+        let mut pats = vec![format!("{vname:?}")];
+        for a in &va.alias {
+            pats.push(format!("{a:?}"));
+        }
         let body = match &v.fields {
             Fields::Unit => format!("__out.write(Self::{});", v.ident),
             Fields::Unnamed(f) if f.len() == 1 => {
                 let field = &f[0];
-                let fa = attr::field_attrs(&field.attrs);
+                let fa = attr::newtype_field_attrs(&attr::field_attrs(&field.attrs), &va);
                 let expr = field_decode_expr(field, &fa, cp, "__sub");
                 format!(
                     "let __tokens = {cp}::private::tokens_to_object(__rest); \
@@ -595,7 +666,7 @@ fn deserialize_internal(
             }
             Fields::Named(f) => {
                 let constructed =
-                    gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__sub", has_flatten);
+                    gen_variant_struct_nextdecode(&v.ident, f, &va, ca, cp, "__sub", has_flatten);
                 format!(
                     "let __tokens = {cp}::private::tokens_to_object(__rest); \
                      let mut __sub = {cp}::private::from_tokens(__tokens); \
@@ -605,16 +676,28 @@ fn deserialize_internal(
                 )
             }
         };
-        c.l(&format!("{vname:?} => {{"));
+        c.l(&format!("{} => {{", pats.join(" | ")));
         c.l(&body);
         c.l("}");
     }
-    c.l(&format!(
-        "_ => return Err({cp}::Error::unknown_variant(__tag)),"
-    ));
+    c.l(&catch_all_arm(variants, cp));
     c.l("}");
     c.l("::core::result::Result::Ok(())");
     c.out()
+}
+
+/// The catch-all `_` arm for internally / adjacently tagged enums: write the
+/// `#[njson(other)]` unit variant when present, otherwise fail on the
+/// unknown tag.
+fn catch_all_arm(variants: &[crate::Variant], cp: &str) -> String {
+    if let Some(v) = variants
+        .iter()
+        .find(|v| attr::variant_attrs(&v.attrs).other)
+    {
+        format!("_ => {{ __out.write(Self::{}); }}", v.ident)
+    } else {
+        format!("_ => return Err({cp}::Error::unknown_variant(__tag).into())")
+    }
 }
 
 fn deserialize_adjacent(
@@ -639,7 +722,7 @@ fn deserialize_adjacent(
     c.l(&format!(
         "if __k == {tag:?} {{ __tag = ::core::option::Option::Some({cp}::private::token_to_string(&__v)?); }} \
          else if __k == {content:?} {{ __content = ::core::option::Option::Some(__v); }} \
-         else {{ return Err({cp}::Error::unknown_field(__k.into_owned())); }}"
+         else {{ return Err({cp}::Error::unknown_field(__k.into_owned()).into()); }}"
     ));
     c.l("}");
     c.l(&format!(
@@ -652,16 +735,20 @@ fn deserialize_adjacent(
         if va.skip_deserializing {
             continue;
         }
-        let vname = crate::schema::renamed_variant(v, &va, ca);
+        let vname = crate::schema::renamed_variant(v, &va, ca, false);
+        let mut pats = vec![format!("{vname:?}")];
+        for a in &va.alias {
+            pats.push(format!("{a:?}"));
+        }
         let body = match &v.fields {
             Fields::Unit => format!(
-                "if __content.is_some() {{ return Err({cp}::Error::custom(\"adjacently tagged unit variant must not carry content\")); }} \
+                "if __content.is_some() {{ return Err({cp}::Error::custom(\"adjacently tagged unit variant must not carry content\").into()); }} \
                  __out.write(Self::{});",
                 v.ident
             ),
             Fields::Unnamed(f) if f.len() == 1 => {
                 let field = &f[0];
-                let fa = attr::field_attrs(&field.attrs);
+                let fa = attr::newtype_field_attrs(&attr::field_attrs(&field.attrs), &va);
                 let expr = field_decode_expr(field, &fa, cp, "__sub");
                 format!(
                     "let __c = __content.ok_or_else(|| {cp}::Error::missing_field({content:?}))?; \
@@ -700,7 +787,8 @@ fn deserialize_adjacent(
                 )
             }
             Fields::Named(f) => {
-                let constructed = gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__sub", has_flatten);
+                let constructed =
+                    gen_variant_struct_nextdecode(&v.ident, f, &va, ca, cp, "__sub", has_flatten);
                 format!(
                     "let __c = __content.ok_or_else(|| {cp}::Error::missing_field({content:?}))?; \
                      let mut __sub = {cp}::private::from_tokens(__c); \
@@ -710,13 +798,11 @@ fn deserialize_adjacent(
                 )
             }
         };
-        c.l(&format!("{vname:?} => {{"));
+        c.l(&format!("{} => {{", pats.join(" | ")));
         c.l(&body);
         c.l("}");
     }
-    c.l(&format!(
-        "_ => return Err({cp}::Error::unknown_variant(__tag)),"
-    ));
+    c.l(&catch_all_arm(variants, cp));
     c.l("}");
     c.l("::core::result::Result::Ok(())");
     c.out()
@@ -739,7 +825,7 @@ fn deserialize_untagged(
             Fields::Unit => format!("__d.unit()?; ::core::result::Result::Ok(Self::{})", v.ident),
             Fields::Unnamed(f) if f.len() == 1 => {
                 let field = &f[0];
-                let fa = attr::field_attrs(&field.attrs);
+                let fa = attr::newtype_field_attrs(&attr::field_attrs(&field.attrs), &va);
                 let expr = field_decode_expr(field, &fa, cp, "__d");
                 format!(
                     "let __v = {expr}; ::core::result::Result::Ok(Self::{}(__v))",
@@ -775,15 +861,13 @@ fn deserialize_untagged(
             }
             Fields::Named(f) => {
                 let constructed =
-                    gen_variant_struct_nextdecode(&v.ident, f, ca, cp, "__d", has_flatten);
+                    gen_variant_struct_nextdecode(&v.ident, f, &va, ca, cp, "__d", has_flatten);
                 format!("let __v = {constructed}; ::core::result::Result::Ok(__v)")
             }
         };
         c.l("{");
         c.l("__d.restore(__mark);");
-        c.l(&format!(
-            "let __result: {cp}::Result<Self> = (|| -> {cp}::Result<Self> {{"
-        ));
+        c.l("let __result: ::core::result::Result<Self, __D::Error> = (|| -> ::core::result::Result<Self, __D::Error> {");
         c.l(&body);
         c.l("})();");
         c.l("if let ::core::result::Result::Ok(__v) = __result {");
@@ -793,7 +877,7 @@ fn deserialize_untagged(
         c.l("}");
     }
     c.l(&format!(
-        "::core::result::Result::Err({cp}::Error::custom(\"data did not match any variant of untagged enum\"))"
+        "::core::result::Result::Err({cp}::Error::custom(\"data did not match any variant of untagged enum\").into())"
     ));
     c.out()
 }
