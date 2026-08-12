@@ -1,4 +1,4 @@
-//! Core API integration testing: application entry point, Value, 
+//! Core API integration testing: application entry point, Value,
 //! Map, Number, json! macros, error handling.
 
 use nextjson::{json, to_value, Error, Map, NsonDeserialize, Number, Value};

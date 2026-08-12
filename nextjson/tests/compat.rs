@@ -259,7 +259,7 @@ fn remote_with_getter() {
     let schema = nextjson::schema_of::<external::External>();
     assert!(matches!(
         schema,
-        nextjson::TypeSchema::Struct(ref s) if s.name == "external::External"
+        nextjson::TypeSchema::Struct(s) if s.name == "external::External"
     ));
 }
 
@@ -476,7 +476,7 @@ fn stream_decoder_scalars() {
     use nextjson::StreamDecoder;
     let mut d = StreamDecoder::new(br#"null true 1 -2.5 "s" "c" "#.as_slice());
     assert_eq!(d.unit().unwrap(), ());
-    assert_eq!(d.bool().unwrap(), true);
+    assert!(d.bool().unwrap());
     assert_eq!(d.number().unwrap().as_u64(), Some(1));
     assert_eq!(d.number().unwrap().as_f64(), -2.5);
     assert_eq!(d.string().unwrap().as_ref(), "s");

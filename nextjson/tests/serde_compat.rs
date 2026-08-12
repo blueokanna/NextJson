@@ -1,18 +1,14 @@
-//! serde 语法兼容层的新增能力测试。
+//! Testing new capabilities added to the serde syntax compatibility layer.
 //!
-//! 覆盖本仓库本次新增的 serde 兼容特性：
-//! - 容器级 `default = "path"`（默认实例补缺字段）
-//! - 变体 `alias`（反序列化别名）
-//! - 变体 `other`（内部/邻接标签枚举的兜底变体）
-//! - 容器 `rename_all_fields` 与变体级 `rename_all`（结构体变体字段改名）
-//! - `serialize_with` / `deserialize_with` / `with` 字段的 schema 降级为
-//!   `Opaque`（字段类型无需实现 `NsonSchema`，可编译）
+//! Overriding the serde compatibility features added in this repository:
+//! - Container-level `default = "path"` (default instance filler field)
+//! - Variant `alias` (deserialization alias)
+//! - Variant `other` (fallback variant for internal/adjacent tag enumeration)
+//! - Container `rename_all_fields` and variant-level `rename_all` (struct variant field renaming)
+//! - Schema downgrade for `serialize_with` / `deserialize_with` / `with` fields
+//! `Opaque` (field type does not need to implement `NsonSchema`, compileable)
 
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, TypeSchema};
-
-// ---------------------------------------------------------------------------
-// 容器级 default = "path"
-// ---------------------------------------------------------------------------
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
 #[njson(default = "default_config")]
@@ -32,7 +28,7 @@ fn default_config() -> Config {
 
 #[test]
 fn container_default_path() {
-    // 缺字段时从默认实例取值（serde 语义）。
+    // When a field is missing, the value is taken from the default instance (serde semantics).
     let back: Config = from_str(r#"{"port":9000}"#).unwrap();
     assert_eq!(
         back,
@@ -42,7 +38,7 @@ fn container_default_path() {
             debug: false
         }
     );
-    // 全量字段照常。
+    // All fields remain unchanged
     let full: Config = from_str(r#"{"host":"h","port":1,"debug":true}"#).unwrap();
     assert_eq!(
         full,
@@ -58,7 +54,7 @@ fn container_default_path() {
     );
 }
 
-// 字段级显式 default 优先于容器级 default。
+// Explicit default values ​​at the field level take precedence over container-level default values
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
 #[njson(default = "dflt2")]
 struct Precedence {
@@ -81,7 +77,7 @@ fn field_default_wins_over_container_path() {
 }
 
 // ---------------------------------------------------------------------------
-// 变体 alias
+// Variant alias
 // ---------------------------------------------------------------------------
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -97,7 +93,6 @@ fn variant_alias_external() {
     assert_eq!(back, Status::InProgress);
     let back: Status = from_str(r#"{"in_progress":null}"#).unwrap();
     assert_eq!(back, Status::InProgress);
-    // 序列化仍用主名。
     assert_eq!(
         to_string(&Status::InProgress).unwrap(),
         r#"{"InProgress":null}"#
@@ -121,7 +116,7 @@ fn variant_alias_internal() {
 }
 
 // ---------------------------------------------------------------------------
-// 变体 other（内部标签枚举兜底）
+// Variants other (internal tag enumeration catch-all)
 // ---------------------------------------------------------------------------
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -137,7 +132,7 @@ enum Event {
 
 #[test]
 fn variant_other_internal() {
-    // 未知标签落入兜底变体，而不是报错。
+    // The unknown label falls into the catch-all variant instead of being reported as an error.
     let back: Event = from_str(r#"{"type":"Scroll","dx":1}"#).unwrap();
     assert_eq!(back, Event::Unknown);
     let back: Event = from_str(r#"{"type":"Click","x":1,"y":2}"#).unwrap();
@@ -145,7 +140,7 @@ fn variant_other_internal() {
 }
 
 // ---------------------------------------------------------------------------
-// rename_all_fields 与变体级 rename_all
+// rename_all_fields and variant-level rename_all
 // ---------------------------------------------------------------------------
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -157,7 +152,6 @@ enum Api {
 #[test]
 fn rename_all_fields_on_struct_variant() {
     let v = Api::GetUser { user_id: 7 };
-    // 变体名按 rename_all=snake_case；变体字段按 rename_all_fields=camelCase。
     assert_eq!(to_string(&v).unwrap(), r#"{"get_user":{"userId":7}}"#);
     let back: Api = from_str(r#"{"get_user":{"userId":7}}"#).unwrap();
     assert_eq!(back, v);
@@ -174,7 +168,7 @@ fn variant_level_rename_all_for_fields() {
     let v = Local::Ping {
         host_name: "h".into(),
     };
-    // 变体字段按变体级 rename_all=snake_case。
+    // The variant field is set to variant level: rename_all = snake_case.
     assert_eq!(to_string(&v).unwrap(), r#"{"Ping":{"host_name":"h"}}"#);
     let back: Local = from_str(r#"{"Ping":{"host_name":"h"}}"#).unwrap();
     assert_eq!(back, v);
@@ -183,10 +177,8 @@ fn variant_level_rename_all_for_fields() {
 // ---------------------------------------------------------------------------
 // serialize_with / deserialize_with / with 字段的 schema 必须为 Opaque
 // ---------------------------------------------------------------------------
-
-/// 故意不实现 `NsonSchema` / `NsonSerialize` 的外部类型（类似 `SystemTime`）。
 #[derive(Debug, PartialEq)]
-struct OpaqueMillis(u64);
+pub struct OpaqueMillis(pub u64);
 
 mod ops {
     use super::OpaqueMillis;
@@ -213,7 +205,6 @@ struct Wire {
 
 #[test]
 fn custom_serializer_schema_is_opaque() {
-    // 编译即验证：OpaqueMillis 未实现 NsonSchema，schema 生成必须走 Opaque。
     let v = Wire {
         name: "x".into(),
         ts: OpaqueMillis(1234),
@@ -237,7 +228,7 @@ fn custom_serializer_schema_is_opaque() {
 }
 
 // ---------------------------------------------------------------------------
-// PhantomData 字段自动跳过（serde 语义）
+// PhantomData Fields are automatically skipped (serde semantics)
 // ---------------------------------------------------------------------------
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]

@@ -7,9 +7,8 @@ use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, TypeSchema, 
 // ---------------------------------------------------------------------------
 // 1. The `serialize_with` or `with` method on the `newtype` variant/tuple struct (schema must be `Opaque`)
 // ---------------------------------------------------------------------------
-
 #[derive(Debug, PartialEq)]
-struct Raw(u64);
+pub struct Raw(pub u64);
 
 mod raw_ops {
     use super::Raw;
