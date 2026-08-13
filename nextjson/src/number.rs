@@ -167,23 +167,56 @@ impl Number {
         }
 
         if raw.first() == Some(&b'-') {
-            let value = parse_i128(raw)
-                .ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, None, None, 0))?;
-            if value >= i64::MIN as i128 {
-                Ok(Number::I64(value as i64))
-            } else {
-                Ok(Number::I128(value))
+            match parse_i64_fast(raw) {
+                Some(value) => Ok(Number::I64(value)),
+                None => {
+                    let value = parse_i128(raw)
+                        .ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, None, None, 0))?;
+                    Ok(Number::I128(value))
+                }
             }
         } else {
-            let value = parse_u128(raw)
-                .ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, None, None, 0))?;
-            if value <= u64::MAX as u128 {
-                Ok(Number::U64(value as u64))
-            } else {
-                Ok(Number::U128(value))
+            match parse_u64_fast(raw) {
+                Some(value) => Ok(Number::U64(value)),
+                None => {
+                    let value = parse_u128(raw)
+                        .ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, None, None, 0))?;
+                    Ok(Number::U128(value))
+                }
             }
         }
     }
+}
+
+/// Native-width signed parsing fast path: returns `None` when the magnitude
+/// does not fit in `i64`, in which case the caller falls back to the 128-bit
+/// parser.
+fn parse_i64_fast(raw: &[u8]) -> Option<i64> {
+    debug_assert_eq!(raw[0], b'-');
+    let magnitude = parse_u64_fast(&raw[1..])?;
+    let min_magnitude = 1_u64 << 63; // |i64::MIN|
+    if magnitude <= min_magnitude {
+        Some(if magnitude == min_magnitude {
+            i64::MIN
+        } else {
+            -(magnitude as i64)
+        })
+    } else {
+        None
+    }
+}
+
+/// Native-width unsigned parsing fast path: returns `None` on overflow, in
+/// which case the caller falls back to the 128-bit parser. `u64` multiply /
+/// add is a single hardware instruction pair on x86-64, unlike the widened
+/// `u128` arithmetic used by the fallback.
+fn parse_u64_fast(raw: &[u8]) -> Option<u64> {
+    let mut value = 0_u64;
+    for &byte in raw {
+        let digit = (byte.wrapping_sub(b'0')) as u64;
+        value = value.checked_mul(10)?.checked_add(digit)?;
+    }
+    Some(value)
 }
 
 /// Hand-rolled overflow-checked signed integer parsing (`i128`).
@@ -353,6 +386,12 @@ mod tests {
         assert_eq!(
             Number::parse(b"-9223372036854775808", false).unwrap(),
             Number::I64(i64::MIN)
+        );
+        // One past i64::MIN: the magnitude overflows i64 but fits i128; this
+        // pins the fast-path -> 128-bit fallback boundary.
+        assert_eq!(
+            Number::parse(b"-9223372036854775809", false).unwrap(),
+            Number::I128(-9_223_372_036_854_775_809)
         );
         assert_eq!(
             Number::parse(b"18446744073709551615", false).unwrap(),

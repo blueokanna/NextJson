@@ -1,0 +1,2 @@
+# Build artifacts for the standalone comparison crate (its own workspace).
+/target

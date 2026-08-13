@@ -235,7 +235,8 @@ Container attributes include `rename_all` (including the directional
 `serialize`/`deserialize` form), `tag`, `content`, `untagged`,
 `deny_unknown_fields`, `default`, `transparent`, `crate`, `bound` (including
 directional `bound(serialize=…, deserialize=…)`), `into`, `from`, `try_from`,
-`remote`, and `expecting`. Field attributes include `rename`, `alias`,
+`remote`, and `expecting` (accepted for serde source compatibility; the
+design has no `Visitor` to attach it to, so it carries no behavior). Field attributes include `rename`, `alias`,
 `default`, `skip`, directional skips, `skip_serializing_if`, `flatten`,
 `borrow`, `with`, `serialize_with`, `deserialize_with`, and `getter`. Variant
 attributes include `rename`, `rename_all`, `skip`, and directional skips.
@@ -271,8 +272,10 @@ application responsibilities.
 ### Benchmark
 
 The repository-owned benchmark compares encode/decode throughput and encoded
-size across all 14 formats over the same 128-record fixture. It imports no
-comparison library in the workspace and does not claim universal superiority.
+size across the 14 wire formats that can represent the fixture (of the 16
+registered: `envy` reads the process environment rather than a wire format,
+and `urlform` only represents a flat map). It imports no comparison library
+in the workspace and does not claim universal superiority.
 
 ```text
 cargo bench --locked -p nextjson --bench format_comparison

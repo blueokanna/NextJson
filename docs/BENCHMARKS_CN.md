@@ -84,7 +84,9 @@ cargo run --release
 同一数据（256 条 `Record`）、同一预热、同一测量循环、同一进程、同一机器。
 int-only 行使用无 float 的 `IntRecord` 模型，隔离出纯整数格式化路径的成本。
 
-优化后（原生宽度整数写出器，本开发机，2 秒窗口，单次运行）：
+原生宽度整数写出器之后、解析器快路径落地之前记录（本开发机，2 秒窗口，
+单次运行）——因此下表 decode 列早于 `parse_u64_fast`/`parse_i64_fast` 改动；
+解析器改进在下一节用原语级数字量化：
 
 | case | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
 | --- | --- | --- | --- | --- | --- |
@@ -93,9 +95,15 @@ int-only 行使用无 float 的 `IntRecord` 模型，隔离出纯整数格式化
 | nextjson_encode_intonly | 44446 | 8752 | 389.00 | 2854 | 126.86 |
 | serde_json_encode_intonly | 44446 | 18625 | 827.80 | 4401 | 195.62 |
 
+笔记本的绝对吞吐随电源状态与散热预算波动：同一个二进制在同一台机器上，一个
+下午的多次运行里 nextjson 编码出现在约 158 到 278 MB/s（serde_json 约 340
+到 460 MB/s），两个库对频率变化的反应不同，比值也在约 1.2x 到 2.9x 之间移动。
+因此上表记录的是方法论所述的那一次特定运行，而不是平滑平均值；下一节的
+原语级 A/B 数字才是可复现的增量。
+
 ### 为什么 nextjson 比 serde_json 慢——以及「确实是 release 模式」的证据
 
-以上所有数字都来自 `cargo run --release`，使用工作区 `[profile.release]`
+以上所有表格数字都来自 `cargo run --release`，使用工作区 `[profile.release]`
 （`opt-level = 3`、`lto = "thin"`、`codegen-units = 1`）。对比跑的是 release
 而非 debug 是可证明的：在 **debug** 构建下编译器会关闭 serde 的优化，此时
 nextjson 反而**快于** serde_json：
@@ -107,11 +115,16 @@ nextjson 反而**快于** serde_json：
 
 release 差距来自三个可测量的原因：
 
-1. **整数格式化把 `u64`/`i64` 加宽成 `u128`**（占主导）。宽路径每次除法都要
-   调用 compiler-rt 的 `__udivti3` libcall，比原生 64 位除法慢数倍。nextjson
-   现在通过原生宽度的 `write_u64_into`/`write_i64_into`（硬件 `div`）写整数，
-   隔离数据集上编码吞吐从约 291 提升到 368 MB/s（纯整数从约 339 到 389 MB/s），
-   线格式字节完全不变。
+1. **整数转换把 `u64`/`i64` 加宽成 `u128`**（编码侧占主导，解码侧显著）。
+   编码侧宽路径每次除法都要调用 compiler-rt 的 `__udivti3` libcall，比原生
+   64 位除法慢数倍。nextjson 现在通过原生宽度的 `write_u64_into`/
+   `write_i64_into`（硬件 `div`）写整数，隔离数据集上编码吞吐从约 291 提升
+   到 368 MB/s（纯整数从约 339 到 389 MB/s）。解析器存在同样的加宽：
+   `Number::parse` 曾把每个整数都用 `u128` 运算逐位累积（每位的乘加链都很长）。
+   现在改为原生宽度的 `parse_u64_fast`/`parse_i64_fast`，仅在真正溢出时才回退
+   到 128 位解析器，整数密集的解码负载不再付出加宽成本。同进程 A/B 微基准
+   （混合位数、各 2 秒）实测该原语 5.1 ns/次（快路径）对比 38.2 ns/次（宽路径），
+   原语级降低 7.4 倍。两个方向的线格式字节完全不变。
 2. **浮点格式化**走 `fmt::Display`/`core::write!`，而 serde_json 用 Ryū。
    去掉浮点只占差距的约 16%，所以这是次要因素。
 3. **结构性**：serde_json 是单态化、专精 JSON 的热路径（查表数字、预分配

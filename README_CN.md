@@ -242,7 +242,8 @@ MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 
 
 自有派生宏支持结构体、元组结构体、泛型、常量泛型和多种枚举表示。主要属性：
 
-- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`；
+- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`（仅为 serde 源码兼容而接受；本设计没有 `Visitor` 可挂载
+该信息，故不产生行为）；
 - 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`、`getter`；
 - 变体：`rename`、`rename_all`、`skip`、方向性 skip。
 
@@ -274,8 +275,9 @@ let json_schema = nextjson::to_json_schema::<Point>();
 
 ### Benchmark
 
-自有 benchmark 比较同一份 128 记录数据在全部 14 种格式上的编码/解码吞吐与编码体积。
-工作区不引入任何对比库，也不制造“普遍更快”结论。
+自有 benchmark 比较同一份 128 记录数据在 14 种可表示该数据的线格式上的编码/解码
+吞吐与编码体积（注册的 16 种格式中：`envy` 读取进程环境而非线格式，`urlform`
+只能表示扁平 map，故不计入）。工作区不引入任何对比库，也不制造"普遍更快"结论。
 
 ```text
 cargo bench --locked -p nextjson --bench format_comparison

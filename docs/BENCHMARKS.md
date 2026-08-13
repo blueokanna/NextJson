@@ -91,8 +91,10 @@ Same fixture (256 `Record`s), same warm-up, same measurement loop, same
 process, same machine. The int-only rows use a float-free `IntRecord` model so
 the integer-formatting path is isolated from float cost.
 
-Post-optimization (native-width integer writers, this developer machine,
-2 s window, single run):
+Post native-width integer writers, recorded before the parser fast path
+landed (this developer machine, 2 s window, single run) — the decode columns
+below therefore predate the `parse_u64_fast`/`parse_i64_fast` change; the
+parser improvement is quantified per-primitive in the next section instead:
 
 | case | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
 | --- | --- | --- | --- | --- | --- |
@@ -101,9 +103,18 @@ Post-optimization (native-width integer writers, this developer machine,
 | nextjson_encode_intonly | 44446 | 8752 | 389.00 | 2854 | 126.86 |
 | serde_json_encode_intonly | 44446 | 18625 | 827.80 | 4401 | 195.62 |
 
+Absolute throughput on a laptop varies with power state and thermal budget;
+repeated runs of this exact binary on the same machine have produced
+nextjson encode numbers between ~158 and ~278 MB/s (serde_json ~340-460)
+across a single afternoon, and the *ratio* moved between ~1.2x and ~2.9x
+as the two libraries react differently to frequency changes. For that
+reason the table above records one specific run (the one quoted in the
+methodology) rather than a smoothed average, and the per-primitive A/B
+numbers in the next section are the reproducible deltas.
+
 ### Why nextjson is slower than serde_json — and the evidence it is release mode
 
-All published numbers above come from `cargo run --release` with the workspace
+All table numbers above come from `cargo run --release` with the workspace
 `[profile.release]` (`opt-level = 3`, `lto = "thin"`, `codegen-units = 1`). That
 the comparison runs in release mode, not debug, is provable: in a **debug**
 build the compiler disables serde's optimizations, and nextjson is *faster*
@@ -116,12 +127,21 @@ than serde_json:
 
 Three measurable causes account for the release gap:
 
-1. **Integer formatting widened `u64`/`i64` to `u128`** (was the dominant cost).
-   The wide path forced a compiler-rt `__udivti3` libcall for every division,
-   several times slower than native 64-bit division. nextjson now writes
-   integers through native-width `write_u64_into`/`write_i64_into` (hardware
-   `div`), which raised encode throughput from ~291 to 368 MB/s on the
-   isolation fixture (int-only from ~339 to 389 MB/s). Same wire bytes.
+1. **Integer conversions widened `u64`/`i64` to `u128`** (dominant on encode,
+   significant on decode). On the encode side the widened path forced a
+   compiler-rt `__udivti3` libcall for every division, several times slower
+   than a native 64-bit `div`. nextjson now writes integers through
+   native-width `write_u64_into`/`write_i64_into` (hardware `div`), which
+   raised encode throughput from ~291 to 368 MB/s on the isolation fixture
+   (int-only from ~339 to 389 MB/s). The parser had the same widening:
+   `Number::parse` accumulated every integer digit in `u128` arithmetic
+   (long multiply/add chains per digit). It now parses through native-width
+   `parse_u64_fast`/`parse_i64_fast` and falls back to the 128-bit parser
+   only on genuine overflow, so integer-heavy decode payloads no longer pay
+   the widened cost. An in-process A/B on the parsing primitive (mixed digit
+   lengths, 2 s per side) measures 5.1 ns/call for the fast path versus
+   38.2 ns/call for the widened path — a 7.4x reduction on the primitive.
+   Wire bytes are identical in both directions.
 2. **Float formatting** goes through `fmt::Display`/`core::write!` while
    serde_json uses Ryū. Removing floats from the fixture accounts for only
    ~16% of the gap, so this is secondary.
