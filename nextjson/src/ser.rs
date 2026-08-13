@@ -805,8 +805,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
 
     /// Write a character (a one-scalar string) on the hot path.
     ///
-    /// Implemented directly instead of routing through [`write_str`] so a
-    /// single character skips the full-string raw-copy scan.
+    /// Implemented directly instead of routing through
+    /// [`Encoder::write_str`](Encoder::write_str) so a single character skips
+    /// the full-string raw-copy scan.
     pub fn write_char(&mut self, c: char) -> Result<()> {
         if VALIDATE {
             self.start_value()?;
