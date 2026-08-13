@@ -404,6 +404,17 @@ impl<'de> FormatDecoder<'de> for Decoder<'de> {
 
 /// Deserialization trait: decode `Self` from any [`FormatDecoder`].
 pub trait NsonDeserialize<'de>: Sized {
+    /// Human-readable description of the value this type decodes from.
+    ///
+    /// This is the metadata serde's `Visitor::expecting` carries. The default
+    /// is the type's fully qualified path, so hand-written implementations get
+    /// meaningful type-mismatch messages without extra work; the derive macro
+    /// respects the `expecting` attribute and hand-written implementations may
+    /// override this with a friendlier description.
+    fn expecting() -> &'static str {
+        core::any::type_name::<Self>()
+    }
+
     /// Decode into `out`.
     ///
     /// Implementations must call [`DecodeSlot::write`] before returning `Ok`.

@@ -329,6 +329,16 @@ fn split_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Block-scalar trailing-newline policy (`|`, `|-`, `|+`, `>`...).
+enum BlockChomp {
+    /// Default: keep a single trailing newline.
+    Clip,
+    /// `-`: strip all trailing newlines.
+    Strip,
+    /// `+`: keep all trailing newlines.
+    Keep,
+}
+
 struct YamlParser {
     lines: Vec<String>,
     pos: usize,
@@ -385,6 +395,11 @@ impl YamlParser {
             self.pos += 1;
             return Ok(value);
         }
+        if stripped.starts_with('|') || stripped.starts_with('>') {
+            let header = stripped.to_string();
+            self.pos += 1;
+            return self.parse_block_scalar(indent, &header);
+        }
         if stripped.starts_with("- ") || stripped == "-" {
             self.parse_sequence(indent)
         } else if contains_colon_separator(stripped) {
@@ -429,6 +444,8 @@ impl YamlParser {
                 // `- key: value` — inline mapping item.
                 let map = self.parse_mapping_from_rest(indent, rest)?;
                 items.push(Value::Object(map));
+            } else if rest.starts_with('|') || rest.starts_with('>') {
+                items.push(self.parse_block_scalar(indent, rest)?);
             } else {
                 let value = parse_scalar(rest)?;
                 items.push(value);
@@ -472,6 +489,8 @@ impl YamlParser {
                 } else {
                     map.insert(key, Value::Null);
                 }
+            } else if rest.starts_with('|') || rest.starts_with('>') {
+                map.insert(key, self.parse_block_scalar(indent, rest)?);
             } else {
                 let value = parse_scalar(rest)?;
                 map.insert(key, value);
@@ -497,6 +516,8 @@ impl YamlParser {
             } else {
                 map.insert(key, Value::Null);
             }
+        } else if value_rest.starts_with('|') || value_rest.starts_with('>') {
+            map.insert(key, self.parse_block_scalar(indent, value_rest)?);
         } else {
             map.insert(key, parse_scalar(value_rest)?);
         }
@@ -537,6 +558,94 @@ impl YamlParser {
             }
         }
         Ok(map)
+    }
+
+    /// Parse a block scalar (`|` literal or `>` folded). The header line has
+    /// already been consumed (`self.pos` points past it); `parent_indent` is
+    /// the indentation of the node that contains the block scalar. Supports
+    /// chomping indicators (`-` / `+`) and an explicit indentation indicator
+    /// (`|2`, `|2-`, ...), per the YAML block-scalar header grammar.
+    fn parse_block_scalar(&mut self, parent_indent: usize, header: &str) -> Result<Value> {
+        let header = strip_comment(header).trim_end();
+        let folded = header.starts_with('>');
+        let mut chomp = BlockChomp::Clip;
+        let mut indent_indicator: Option<usize> = None;
+        for ch in header[1..].chars() {
+            match ch {
+                '0'..='9' => indent_indicator = Some(ch as usize - '0' as usize),
+                '-' => chomp = BlockChomp::Strip,
+                '+' => chomp = BlockChomp::Keep,
+                _ => return Err(Error::custom("yaml: invalid block scalar header")),
+            }
+        }
+        // Collect content lines (blank lines included). A non-blank line at
+        // or above the parent indent ends the block.
+        let mut raw_lines: Vec<String> = Vec::new();
+        let mut first_content_indent: Option<usize> = None;
+        while let Some(line) = self.current().map(str::to_string) {
+            let li = leading_spaces(&line)?;
+            if !line.trim().is_empty() && li <= parent_indent {
+                break;
+            }
+            if !line.trim().is_empty() && first_content_indent.is_none() {
+                first_content_indent = Some(li);
+            }
+            raw_lines.push(line);
+            self.pos += 1;
+        }
+        let block_indent = match indent_indicator {
+            Some(n) => parent_indent + n,
+            None => first_content_indent.unwrap_or(parent_indent + 1),
+        };
+        let mut content: Vec<String> = Vec::new();
+        for line in &raw_lines {
+            if line.trim().is_empty() {
+                content.push(String::new());
+            } else {
+                content.push(line.get(block_indent..).unwrap_or("").to_string());
+            }
+        }
+        // Drop trailing blank lines, remembering how many there were so the
+        // `Keep` chomping policy can restore the exact newline count.
+        let mut trailing_blanks = 0;
+        while content.last().is_some_and(|l| l.is_empty()) {
+            content.pop();
+            trailing_blanks += 1;
+        }
+        let mut text = if folded {
+            // `>` folds single line breaks into spaces; blank lines stay as
+            // line breaks.
+            let mut s = String::new();
+            for (i, line) in content.iter().enumerate() {
+                if i > 0 {
+                    if content[i - 1].is_empty() || line.is_empty() {
+                        s.push('\n');
+                    } else {
+                        s.push(' ');
+                    }
+                }
+                s.push_str(line);
+            }
+            s
+        } else {
+            content.join("\n")
+        };
+        match chomp {
+            BlockChomp::Strip => {}
+            BlockChomp::Clip => {
+                if !content.is_empty() {
+                    text.push('\n');
+                }
+            }
+            // Keep preserves every trailing newline: one per remaining content
+            // line's terminator plus one per dropped trailing blank line.
+            BlockChomp::Keep => {
+                for _ in 0..=trailing_blanks {
+                    text.push('\n');
+                }
+            }
+        }
+        Ok(Value::from(text))
     }
 }
 

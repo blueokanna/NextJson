@@ -214,8 +214,8 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | `json` | null/bool/int/float/str | array/object | RFC 8259; full model |
 | `json5` | as JSON + `Infinity`/`NaN` | + comments, unquoted keys, single quotes, trailing commas | encoder emits strict JSON |
 | `hjson` | as JSON | + unquoted keys/strings, comments | encoder emits strict JSON |
-| `yaml` | null/bool/int/float/str | block + flow subset | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]` |
-| `toml` | bool/int/float/str (no null) | tables, arrays, inline tables | document-shaped: a bare scalar root is rejected |
+| `yaml` | null/bool/int/float/str | block + flow subset | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]`, block scalars `|`/`>` (with `-`/`+` chomping and indentation indicator) |
+| `toml` | bool/int/float/str (no null) | tables, arrays, inline tables, multi-line strings | document-shaped: a bare scalar root is rejected; `"""`/`'''` multi-line strings with `\` continuation |
 | `ron` | bool/int/float/str/char | map/seq/tuple/struct/enum | `Some(...)` wrappers round-trip |
 | `sexpr` | atoms, quoted strings, numbers, `#t`/`#f`, `nil` | lists; maps as alists | schema-less nested-map `Value` decoding is ambiguous; use typed targets |
 | `csv` | int/float/bool/str | rows; object rows with header | RFC 4180 |
@@ -257,8 +257,9 @@ Container attributes include `rename_all` (including the directional
 `serialize`/`deserialize` form), `tag`, `content`, `untagged`,
 `deny_unknown_fields`, `default`, `transparent`, `crate`, `bound` (including
 directional `bound(serialize=…, deserialize=…)`), `into`, `from`, `try_from`,
-`remote`, and `expecting` (accepted for serde source compatibility; the
-design has no `Visitor` to attach it to, so it carries no behavior). Field attributes include `rename`, `alias`,
+`remote`, and `expecting` (overrides the type description used in
+  deserialization type-mismatch / length-mismatch error messages; the default
+  is the type's fully qualified path). Field attributes include `rename`, `alias`,
 `default`, `skip`, directional skips, `skip_serializing_if`, `flatten`,
 `borrow`, `with`, `serialize_with`, `deserialize_with`, and `getter`. Variant
 attributes include `rename`, `rename_all`, `skip`, and directional skips.

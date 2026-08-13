@@ -525,8 +525,24 @@ impl<'a> Parser<'a> {
         self.skip_ws_and_comments()?;
         let b = self.text.as_bytes().get(self.pos).copied().unwrap_or(0);
         match b {
-            b'"' => Ok(Value::from(self.parse_basic_string()?)),
-            b'\'' => Ok(Value::from(self.parse_literal_string()?)),
+            b'"' => {
+                if self.text.as_bytes().get(self.pos + 1) == Some(&b'"')
+                    && self.text.as_bytes().get(self.pos + 2) == Some(&b'"')
+                {
+                    Ok(Value::from(self.parse_multi_basic_string()?))
+                } else {
+                    Ok(Value::from(self.parse_basic_string()?))
+                }
+            }
+            b'\'' => {
+                if self.text.as_bytes().get(self.pos + 1) == Some(&b'\'')
+                    && self.text.as_bytes().get(self.pos + 2) == Some(&b'\'')
+                {
+                    Ok(Value::from(self.parse_multi_literal_string()?))
+                } else {
+                    Ok(Value::from(self.parse_literal_string()?))
+                }
+            }
             b'[' | b'{' => {
                 if self.depth >= 128 {
                     return Err(Error::custom("toml: nesting limit exceeded"));
@@ -724,6 +740,126 @@ impl<'a> Parser<'a> {
         Ok(s)
     }
 
+    /// Multi-line basic string (`"""..."""`), TOML 1.0.
+    ///
+    /// The newline immediately following the opening delimiter is trimmed;
+    /// a backslash at the end of a line trims that newline plus all following
+    /// whitespace (line-ending backslash); escapes behave like basic strings;
+    /// trailing whitespace before the closing delimiter is trimmed.
+    fn parse_multi_basic_string(&mut self) -> Result<String> {
+        self.pos += 3; // opening `"""`
+        self.skip_crlf();
+        let mut out = String::new();
+        loop {
+            if self.pos + 3 <= self.text.len()
+                && &self.text.as_bytes()[self.pos..self.pos + 3] == b"\"\"\""
+            {
+                self.pos += 3;
+                break;
+            }
+            if self.pos >= self.text.len() {
+                return Err(Error::custom("toml: unterminated multi-line string"));
+            }
+            let b = self.text.as_bytes()[self.pos];
+            if b == b'\\' {
+                self.pos += 1;
+                if self.pos >= self.text.len() {
+                    return Err(Error::custom("toml: unterminated escape"));
+                }
+                // Line-ending backslash: trim it and all following whitespace.
+                let nb = self.text.as_bytes()[self.pos];
+                if nb == b'\n'
+                    || (nb == b'\r' && self.text.as_bytes().get(self.pos + 1) == Some(&b'\n'))
+                {
+                    if nb == b'\r' {
+                        self.pos += 1;
+                    }
+                    self.pos += 1; // '\n'
+                    while self.pos < self.text.len()
+                        && matches!(self.text.as_bytes()[self.pos], b' ' | b'\t' | b'\n' | b'\r')
+                    {
+                        self.pos += 1;
+                    }
+                    continue;
+                }
+                match nb {
+                    b'n' => out.push('\n'),
+                    b't' => out.push('\t'),
+                    b'r' => out.push('\r'),
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'b' => out.push('\u{8}'),
+                    b'f' => out.push('\u{c}'),
+                    b'u' => {
+                        let cp = self.read_hex(4)?;
+                        out.push(
+                            char::from_u32(cp)
+                                .ok_or_else(|| Error::custom("toml: invalid unicode escape"))?,
+                        );
+                    }
+                    b'U' => {
+                        let cp = self.read_hex(8)?;
+                        out.push(
+                            char::from_u32(cp)
+                                .ok_or_else(|| Error::custom("toml: invalid unicode escape"))?,
+                        );
+                    }
+                    other => {
+                        return Err(Error::custom(alloc::format!(
+                            "toml: invalid escape '\\{}'",
+                            other as char
+                        )))
+                    }
+                }
+                self.pos += 1;
+            } else {
+                let len = utf8_len(b).ok_or_else(|| Error::custom("toml: invalid utf-8"))?;
+                let chunk = &self.text[self.pos..self.pos + len];
+                out.push_str(chunk);
+                self.pos += len;
+            }
+        }
+        // Trim trailing whitespace (spaces / tabs / newlines) before the
+        // closing delimiter, per the TOML multi-line string rules.
+        Ok(trim_whitespace_end(&out).to_string())
+    }
+
+    /// Multi-line literal string (`'''...'''`), TOML 1.0.
+    ///
+    /// No escapes; the newline immediately following the opening delimiter is
+    /// trimmed; trailing whitespace before the closing delimiter is trimmed.
+    fn parse_multi_literal_string(&mut self) -> Result<String> {
+        self.pos += 3; // opening `'''`
+        self.skip_crlf();
+        let start = self.pos;
+        loop {
+            if self.pos + 3 <= self.text.len()
+                && &self.text.as_bytes()[self.pos..self.pos + 3] == b"'''"
+            {
+                break;
+            }
+            if self.pos >= self.text.len() {
+                return Err(Error::custom(
+                    "toml: unterminated multi-line literal string",
+                ));
+            }
+            self.pos += 1;
+        }
+        let s = self.text[start..self.pos].to_string();
+        self.pos += 3;
+        Ok(trim_whitespace_end(&s).to_string())
+    }
+
+    /// Skip a single CRLF / LF after an opening multi-line delimiter.
+    fn skip_crlf(&mut self) {
+        if self.pos < self.text.len() && self.text.as_bytes()[self.pos] == b'\r' {
+            self.pos += 1;
+        }
+        if self.pos < self.text.len() && self.text.as_bytes()[self.pos] == b'\n' {
+            self.pos += 1;
+        }
+    }
+
     fn read_hex(&mut self, n: usize) -> Result<u32> {
         let mut v: u32 = 0;
         for _ in 0..n {
@@ -745,6 +881,12 @@ impl<'a> Parser<'a> {
         self.pos += lit.len();
         Ok(())
     }
+}
+
+/// Trim trailing ASCII whitespace (spaces, tabs, CR, LF) from a multi-line
+/// string before its closing delimiter, per the TOML multi-line rules.
+fn trim_whitespace_end(s: &str) -> &str {
+    s.trim_end_matches([' ', '\t', '\n', '\r'])
 }
 
 /// Insert a (possibly dotted) key into a map, creating intermediate tables.

@@ -229,8 +229,8 @@ assert_eq!(json2, json);
 | `json`     | null/bool/int/float/str                | array/object     | RFC 8259，完整模型 |
 | `json5`    | 同 JSON + `Infinity`/`NaN`             | + 注释、未加引号键、单引号、尾随逗号 | 编码器输出严格 JSON |
 | `hjson`    | 同 JSON                                | + 未加引号键/字符串、注释 | 编码器输出严格 JSON |
-| `yaml`     | null/bool/int/float/str                | 块式 + 流式子集   | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]` |
-| `toml`     | bool/int/float/str（无 null）          | 表、数组、内联表 | 文档形态：裸标量根被拒绝 |
+| `yaml`     | null/bool/int/float/str                | 块式 + 流式子集   | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]`、块标量 `|`/`>`（含 `-`/`+` chomping 与缩进指示符） |
+| `toml`     | bool/int/float/str（无 null）          | 表、数组、内联表、多行字符串 | 文档形态：裸标量根被拒绝；`"""`/`'''` 多行字符串、`\` 续行 |
 | `ron`      | bool/int/float/str/char                | map/seq/元组/结构体/枚举 | `Some(...)` 包装可往返 |
 | `sexpr`    | 原子、带引号字符串、数字、`#t`/`#f`、`nil` | 列表；map 编为 alist | 无模式 `Value` 解码嵌套 map 有歧义，请用类型化目标 |
 | `csv`      | int/float/bool/str                     | 行；带表头的对象行 | RFC 4180 |
@@ -258,8 +258,7 @@ MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 
 
 自有派生宏支持结构体、元组结构体、泛型、常量泛型和多种枚举表示。主要属性：
 
-- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`（仅为 serde 源码兼容而接受；本设计没有 `Visitor` 可挂载
-该信息，故不产生行为）；
+- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`（覆写反序列化类型/长度不匹配错误消息中的类型描述；默认是类型的完整路径）；
 - 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`、`getter`；
 - 变体：`rename`、`rename_all`、`skip`、方向性 skip。
 

@@ -191,7 +191,7 @@ pub(crate) fn deserialize_struct(
                 let id = format!("__v{i}");
                 if i > 0 {
                     c.l(&format!(
-                        "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, \"a tuple struct\").into()); }}"
+                        "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
                     ));
                 }
                 if fa.skip_deserializing {
@@ -206,7 +206,7 @@ pub(crate) fn deserialize_struct(
                 names.push(id);
             }
             c.l(&format!(
-                "if __d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({count}, \"a tuple struct\").into()); }}"
+                "if __d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({count}, Self::expecting()).into()); }}"
             ));
             c.l("__d.end_array()?;");
             c.l(&format!("__out.write(Self({}));", names.join(", ")));
@@ -505,7 +505,7 @@ fn deserialize_external(
     let mut c = Code::new();
     c.l("__d.begin_object()?;");
     c.l(&format!(
-        "let __key = __d.object_key()?.ok_or_else(|| {cp}::Error::invalid_length(0, \"an enum variant\"))?;"
+        "let __key = __d.object_key()?.ok_or_else(|| {cp}::Error::invalid_length(0, Self::expecting()))?;"
     ));
     c.l("match __key.as_ref() {");
     for v in variants {
@@ -535,7 +535,7 @@ fn deserialize_external(
                     let id = format!("__v{i}");
                     if i > 0 {
                         sub.l(&format!(
-                            "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, \"a tuple variant\").into()); }}"
+                            "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
                         ));
                     }
                     if fa.skip_deserializing {

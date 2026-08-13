@@ -56,6 +56,28 @@ fn unescaped_strings_borrow_the_original_input() {
     assert_eq!(value.as_ptr(), input.as_ptr().wrapping_add(1));
 }
 
+#[test]
+fn string_escaping_agrees_across_swar_chunk_boundaries() {
+    // The raw-copy fast path scans in 8-byte SWAR chunks; every length around
+    // the chunk boundary plus every escapable character must round-trip.
+    let probe = [
+        '"', '\\', '\u{0}', '\u{1f}', ' ', 'a', '\u{7f}', '\u{80}', 'é', '中', '\u{2028}',
+    ];
+    for len in 0..20usize {
+        let mut base = String::new();
+        for _ in 0..len {
+            base.push('a');
+        }
+        for &c in &probe {
+            let mut s = base.clone();
+            s.push(c);
+            let encoded = nextjson::nextencode(&s).unwrap();
+            let back: String = nextjson::nextdecode(&encoded).unwrap();
+            assert_eq!(back, s, "length {len} char {c:?}");
+        }
+    }
+}
+
 struct FailingSink {
     writes: usize,
     flushes: usize,

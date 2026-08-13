@@ -9,7 +9,6 @@
 //! - `Opaque` (field type does not need to implement `NsonSchema`, compileable)
 
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, TypeSchema};
-
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
 #[njson(default = "default_config")]
 struct Config {

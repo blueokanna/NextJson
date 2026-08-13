@@ -301,6 +301,58 @@ fn toml_rejects_excessive_nesting() {
 }
 
 #[test]
+fn toml_multi_line_basic_string() {
+    let input = br#"
+s = """
+Roses are red
+Violets are blue"""
+t = "simple"
+"#;
+    let value: nextjson::Value = formats::Toml.decode(input).unwrap();
+    assert_eq!(
+        value["s"],
+        nextjson::Value::from("Roses are red\nViolets are blue")
+    );
+    assert_eq!(value["t"], nextjson::Value::from("simple"));
+}
+
+#[test]
+fn toml_multi_line_string_continuation_and_trim() {
+    // Line-ending backslash trims the newline plus following whitespace;
+    // trailing whitespace before the closing delimiter is trimmed.
+    let input = br#"
+s = """
+first \
+    continued
+   last   """
+t = '''
+literal
+  text'''
+"#;
+    let value: nextjson::Value = formats::Toml.decode(input).unwrap();
+    assert_eq!(
+        value["s"],
+        nextjson::Value::from("first continued\n   last")
+    );
+    assert_eq!(value["t"], nextjson::Value::from("literal\n  text"));
+}
+
+#[test]
+fn toml_multi_line_string_escapes() {
+    let input = br#"
+s = """
+quote \" here
+unicode \u00e9
+"""
+"#;
+    let value: nextjson::Value = formats::Toml.decode(input).unwrap();
+    assert_eq!(
+        value["s"],
+        nextjson::Value::from("quote \" here\nunicode é")
+    );
+}
+
+#[test]
 fn yaml_roundtrips() {
     let mut m = nextjson::Map::new();
     m.insert("name".to_string(), nextjson::Value::from("NextJson"));
@@ -1142,4 +1194,52 @@ fn yaml_sequence_item_nested_block() {
     assert_eq!(value[0]["name"], nextjson::Value::from("x"));
     assert_eq!(value[0]["details"]["a"], nextjson::Value::from(1_i64));
     assert_eq!(value[1]["name"], nextjson::Value::from("y"));
+}
+
+#[test]
+fn yaml_block_scalar_literal() {
+    let input = b"text: |\n  line one\n  line two\nnext: 1\n";
+    let value: nextjson::Value = formats::Yaml.decode(&input[..]).unwrap();
+    assert_eq!(value["text"], nextjson::Value::from("line one\nline two\n"));
+    assert_eq!(value["next"], nextjson::Value::from(1_i64));
+}
+
+#[test]
+fn yaml_block_scalar_chomping() {
+    let strip: nextjson::Value = formats::Yaml.decode(b"t: |-\n  a\n  b\n").unwrap();
+    assert_eq!(strip["t"], nextjson::Value::from("a\nb"));
+    let keep: nextjson::Value = formats::Yaml.decode(b"t: |+\n  a\n\n\n").unwrap();
+    assert_eq!(keep["t"], nextjson::Value::from("a\n\n\n"));
+    let clip: nextjson::Value = formats::Yaml.decode(b"t: |\n  a\n\n\n").unwrap();
+    assert_eq!(clip["t"], nextjson::Value::from("a\n"));
+}
+
+#[test]
+fn yaml_block_scalar_folded() {
+    let value: nextjson::Value = formats::Yaml
+        .decode(b"t: >\n  folded\n  text\n  next\n")
+        .unwrap();
+    assert_eq!(value["t"], nextjson::Value::from("folded text next\n"));
+}
+
+#[test]
+fn yaml_block_scalar_in_sequence() {
+    let value: nextjson::Value = formats::Yaml.decode(b"- |\n  first\n- second\n").unwrap();
+    assert_eq!(value[0], nextjson::Value::from("first\n"));
+    assert_eq!(value[1], nextjson::Value::from("second"));
+}
+
+#[test]
+fn yaml_block_scalar_indent_indicator() {
+    // `|2` strips exactly two spaces of indentation from every content line.
+    let input = b"t: |2\n    four spaces\n  two\n";
+    let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
+    assert_eq!(value["t"], nextjson::Value::from("  four spaces\ntwo\n"));
+}
+
+#[test]
+fn yaml_block_scalar_header_comment() {
+    let input = b"t: | # comment\n  content\n";
+    let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
+    assert_eq!(value["t"], nextjson::Value::from("content\n"));
 }

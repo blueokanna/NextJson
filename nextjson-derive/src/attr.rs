@@ -107,7 +107,8 @@ pub(crate) struct ContainerAttrs {
     pub try_from: Option<String>,
     /// `#[serde(remote = "Type")]`: implement the traits for an external type.
     pub remote: Option<String>,
-    /// `#[serde(expecting = "...")]`: accepted for serde compatibility.
+    /// `#[serde(expecting = "...")]`: overrides the default type-description
+    /// used in deserialization type-mismatch / length-mismatch messages.
     pub expecting: Option<String>,
 }
 

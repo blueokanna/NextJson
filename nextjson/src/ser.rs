@@ -531,7 +531,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
             writer,
             buf: Vec::with_capacity(1024),
             depth: 0,
-            frames: Vec::new(),
+            // Preallocate for the common nesting depth so deeply nested
+            // containers do not reallocate on every `begin_*` push.
+            frames: Vec::with_capacity(32),
             root_written: false,
             pretty: config.pretty,
             indent: config.indent,
@@ -801,10 +803,41 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
         self.maybe_flush()
     }
 
-    /// Write a character.
+    /// Write a character (a one-scalar string) on the hot path.
+    ///
+    /// Implemented directly instead of routing through [`write_str`] so a
+    /// single character skips the full-string raw-copy scan.
     pub fn write_char(&mut self, c: char) -> Result<()> {
-        let mut buf = [0u8; 4];
-        self.write_str(c.encode_utf8(&mut buf))
+        if VALIDATE {
+            self.start_value()?;
+        }
+        self.buf.push(b'"');
+        match c {
+            '"' => self.buf.extend_from_slice(b"\\\""),
+            '\\' => self.buf.extend_from_slice(b"\\\\"),
+            '\n' => self.buf.extend_from_slice(b"\\n"),
+            '\r' => self.buf.extend_from_slice(b"\\r"),
+            '\t' => self.buf.extend_from_slice(b"\\t"),
+            '\u{8}' => self.buf.extend_from_slice(b"\\b"),
+            '\u{c}' => self.buf.extend_from_slice(b"\\f"),
+            c if (c as u32) < 0x20 => {
+                self.buf.extend_from_slice(b"\\u00");
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let v = c as u32;
+                self.buf.push(HEX[(v >> 4) as usize]);
+                self.buf.push(HEX[(v & 0xF) as usize]);
+            }
+            _ if self.escape_non_ascii && (c as u32) >= 0x80 => {
+                write_unicode_escape(&mut self.buf, c);
+            }
+            _ => {
+                let mut tmp = [0u8; 4];
+                self.buf
+                    .extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+            }
+        }
+        self.buf.push(b'"');
+        self.maybe_flush()
     }
 
     /// Write a number.
@@ -898,6 +931,52 @@ impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
     }
 }
 
+/// Whether a 64-bit chunk contains any byte that must be escaped in JSON.
+///
+/// SWAR (SIMD-within-a-register) detection, no `unsafe`: control characters
+/// (< 0x20), `"`, `\`, and (when `escape_non_ascii`) any byte >= 0x80. The
+/// `hasless` trick answers "does any byte satisfy the predicate" correctly
+/// even when borrow propagation blurs which byte, because a borrow only
+/// happens when a lower byte is itself a true positive.
+#[inline]
+fn chunk_needs_escape(chunk: u64, escape_non_ascii: bool) -> bool {
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    // Any byte < 0x20.
+    if (chunk.wrapping_sub(0x2020_2020_2020_2020)) & !chunk & HIGH != 0 {
+        return true;
+    }
+    // Any byte == 0x22 (`"`).
+    let quote = chunk ^ 0x2222_2222_2222_2222;
+    if (quote.wrapping_sub(ONES)) & !quote & HIGH != 0 {
+        return true;
+    }
+    // Any byte == 0x5C (`\`).
+    let backslash = chunk ^ 0x5C5C_5C5C_5C5C_5C5C;
+    if (backslash.wrapping_sub(ONES)) & !backslash & HIGH != 0 {
+        return true;
+    }
+    // Any byte >= 0x80 (only when non-ASCII must be escaped).
+    escape_non_ascii && (chunk & HIGH) != 0
+}
+
+/// Whether `bytes` can be copied into JSON verbatim (no escaping needed).
+#[inline]
+fn can_copy_raw(bytes: &[u8], escape_non_ascii: bool) -> bool {
+    let mut i = 0;
+    let len = bytes.len();
+    while i + 8 <= len {
+        let chunk = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+        if chunk_needs_escape(chunk, escape_non_ascii) {
+            return false;
+        }
+        i += 8;
+    }
+    bytes[i..].iter().all(|&byte| {
+        byte >= 0x20 && byte != b'"' && byte != b'\\' && (!escape_non_ascii || byte < 0x80)
+    })
+}
+
 /// Write `"..."` with JSON escaping into `buf`.
 ///
 /// Shared by the encoder (for values and object keys) and the cross-format
@@ -906,9 +985,7 @@ impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
 fn write_escaped_str(buf: &mut Vec<u8>, s: &str, escape_non_ascii: bool) {
     buf.push(b'"');
     let bytes = s.as_bytes();
-    if bytes.iter().all(|&byte| {
-        byte >= 0x20 && byte != b'"' && byte != b'\\' && (!escape_non_ascii || byte < 0x80)
-    }) {
+    if can_copy_raw(bytes, escape_non_ascii) {
         buf.extend_from_slice(bytes);
         buf.push(b'"');
         return;

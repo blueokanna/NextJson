@@ -828,6 +828,12 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
     };
     let (ig, tg, wc) = build_generics(input, &cp, true, has_flatten, has_borrow);
     let tg_part = if use_tg { tg.as_str() } else { "" };
+    // `expecting = "..."` overrides the default `type_name`-based description
+    // used in type-mismatch and length-mismatch error messages.
+    let expecting = match &input.cattr.expecting {
+        Some(e) => format!("\n     fn expecting() -> &'static str {{ {:?} }}\n", e),
+        None => String::new(),
+    };
     let body = if let Some(from) = &input.cattr.from {
         // `from = "T"`: deserialize a `T` then convert into `Self`.
         format!(
@@ -854,6 +860,7 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
     let out = format!(
         "#[automatically_derived]\n\
          impl {ig} {cp}::NsonDeserialize<'de> for {target}{tg_part}{wc} {{\n\
+         {expecting}\
          \x20   fn nextdecode_into<__D: {cp}::FormatDecoder<'de>>(\n\
          \x20       __d: &mut __D,\n\
          \x20       __out: &mut {cp}::DecodeSlot<Self>,\n\
