@@ -246,3 +246,72 @@ fn phantom_data_field_auto_skipped() {
     let back: WithMarker<i32> = from_str(r#"{"value":5}"#).unwrap();
     assert_eq!(back.value, 5);
 }
+
+// ---------------------------------------------------------------------------
+// Container-level type mismatches name the expected type (`expecting`).
+// ---------------------------------------------------------------------------
+
+#[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+#[njson(expecting = "a config object")]
+struct ExpectingObj {
+    a: u32,
+}
+
+#[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+struct PlainObj {
+    a: u32,
+}
+
+#[test]
+fn container_type_mismatch_carries_expecting_attribute() {
+    // `begin_object` hits `[`: the message names the type, not a bare token.
+    let err = nextjson::nextdecode::<ExpectingObj>(b"[1]").unwrap_err();
+    assert!(
+        err.to_string().contains("a config object"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.to_string().contains("found array"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn container_type_mismatch_carries_default_type_name() {
+    let err = nextjson::nextdecode::<PlainObj>(b"[1]").unwrap_err();
+    assert!(
+        err.to_string().contains("PlainObj"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn scalar_errors_are_not_polluted_by_container_expecting() {
+    // A field type mismatch keeps its own scalar description.
+    let err = nextjson::nextdecode::<PlainObj>(br#"{"a":"x"}"#).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("number"), "unexpected message: {msg}");
+    assert!(!msg.contains("PlainObj"), "unexpected message: {msg}");
+}
+
+#[test]
+fn hand_written_impl_can_set_expecting_for_containers() {
+    #[derive(Debug)]
+    struct Hand;
+    impl<'de> NsonDeserialize<'de> for Hand {
+        fn nextdecode_into<D: nextjson::FormatDecoder<'de>>(
+            decoder: &mut D,
+            out: &mut nextjson::DecodeSlot<Self>,
+        ) -> core::result::Result<(), D::Error> {
+            decoder.set_expecting("a hand");
+            decoder.begin_object()?;
+            out.write(Hand);
+            Ok(())
+        }
+    }
+    let err = nextjson::nextdecode::<Hand>(b"[1]").unwrap_err();
+    assert!(
+        err.to_string().contains("a hand"),
+        "unexpected message: {err}"
+    );
+}

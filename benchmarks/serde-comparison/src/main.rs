@@ -53,6 +53,52 @@ fn fixture() -> Vec<Record> {
         .collect()
 }
 
+/// A document-shaped, unsigned-only fixture.
+///
+/// TOML and BSON require a document (table / BSON document) root, and
+/// nextjson's postcard codec rejects signed integers and floats, so these
+/// formats are measured on a `Config` value instead of `Vec<Record>`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, NsonSerialize, NsonDeserialize)]
+struct Config {
+    title: String,
+    owner: Owner,
+    tags: Vec<String>,
+    retries: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, NsonSerialize, NsonDeserialize)]
+struct Owner {
+    name: String,
+    id: u64,
+}
+
+fn config_fixture() -> Config {
+    Config {
+        title: "NextJson benchmark".into(),
+        owner: Owner {
+            name: "blueokanna".into(),
+            id: 42,
+        },
+        tags: vec!["json".into(), "zero-copy".into(), "benchmark".into()],
+        retries: 3,
+    }
+}
+
+/// Round-trip a nextjson format and a serde format on the same value, then
+/// measure both encode and decode throughput.
+fn pair_bench(
+    nextjson_name: &str,
+    serde_name: &str,
+    duration: Duration,
+    nextjson_encode: &dyn Fn() -> Vec<u8>,
+    nextjson_decode: &dyn Fn(&[u8]),
+    serde_encode: &dyn Fn() -> Vec<u8>,
+    serde_decode: &dyn Fn(&[u8]),
+) {
+    bench(nextjson_name, duration, nextjson_encode, nextjson_decode);
+    bench(serde_name, duration, serde_encode, serde_decode);
+}
+
 fn measure(duration: Duration, mut operation: impl FnMut()) -> f64 {
     let start = Instant::now();
     let mut iterations = 0_u64;
@@ -92,32 +138,173 @@ fn main() {
     let duration = Duration::from_millis(duration_ms.max(100));
 
     let records = fixture();
+    let config = config_fixture();
 
-    // Correctness self-check: both libraries round-trip the fixture exactly.
-    let njson_json = nextjson::nextencode(&records).unwrap();
-    assert_eq!(
-        nextjson::nextdecode::<Vec<Record>>(&njson_json).unwrap(),
-        records
-    );
-    let serde_json_bytes = serde_json::to_vec(&records).unwrap();
-    let serde_back: Vec<Record> = serde_json::from_slice(&serde_json_bytes).unwrap();
-    assert_eq!(serde_back, records);
+    // Correctness self-check: every format round-trips its fixture exactly.
+    check_nextjson(&records, nextjson::formats::Json);
+    check_serde(&records, |b| serde_json::from_slice(b), || serde_json::to_vec(&records).unwrap());
+    check_nextjson(&records, nextjson::formats::Yaml);
+    check_serde(&records, |b| serde_yaml::from_slice(b), || serde_yaml::to_string(&records).unwrap().into_bytes());
+    check_nextjson(&records, nextjson::formats::Ron);
+    check_serde(&records, |b| ron::from_str(std::str::from_utf8(b).unwrap()), || ron::to_string(&records).unwrap().into_bytes());
+    check_nextjson(&records, nextjson::formats::MsgPack);
+    check_serde(&records, |b| rmp_serde::from_slice(b), || rmp_serde::to_vec(&records).unwrap());
+    check_nextjson(&records, nextjson::formats::Cbor);
+    check_serde(&records, |b| ciborium::from_reader::<Vec<Record>, _>(&b[..]), || ciborium_serialize(&records));
+    check_serde(&records, |b| bincode::deserialize(b), || bincode::serialize(&records).unwrap());
+    check_nextjson(&config, nextjson::formats::Toml);
+    check_serde(&config, |b| toml::from_str(std::str::from_utf8(b).unwrap()), || toml::to_string(&config).unwrap().into_bytes());
+    check_nextjson(&config, nextjson::formats::Bson);
+    check_serde(&config, |b| bson::from_slice(b), || bson::to_vec(&config).unwrap());
+    check_nextjson(&config, nextjson::formats::Postcard);
+    check_serde(&config, |b| postcard::from_bytes(b), || postcard::to_allocvec(&config).unwrap());
 
     println!("case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps");
-    bench(
-        "nextjson_encode",
+
+    // JSON (both)
+    pair_bench(
+        "nextjson_json",
+        "serde_json",
         duration,
         &|| nextjson::nextencode(&records).unwrap(),
         &|b| {
             black_box(nextjson::nextdecode::<Vec<Record>>(b).unwrap());
         },
-    );
-    bench(
-        "serde_json_encode",
-        duration,
         &|| serde_json::to_vec(&records).unwrap(),
         &|b| {
             black_box(serde_json::from_slice::<Vec<Record>>(b).unwrap());
+        },
+    );
+    // YAML (both)
+    pair_bench(
+        "nextjson_yaml",
+        "serde_yaml",
+        duration,
+        &|| nextjson::formats::encode_with(&records, nextjson::formats::Yaml).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Yaml)
+                    .unwrap(),
+            );
+        },
+        &|| serde_yaml::to_string(&records).unwrap().into_bytes(),
+        &|b| {
+            black_box(serde_yaml::from_slice::<Vec<Record>>(b).unwrap());
+        },
+    );
+    // RON (both)
+    pair_bench(
+        "nextjson_ron",
+        "serde_ron",
+        duration,
+        &|| nextjson::formats::encode_with(&records, nextjson::formats::Ron).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Ron)
+                    .unwrap(),
+            );
+        },
+        &|| ron::to_string(&records).unwrap().into_bytes(),
+        &|b| {
+            black_box(ron::from_str::<Vec<Record>>(std::str::from_utf8(b).unwrap()).unwrap());
+        },
+    );
+    // MessagePack (both)
+    pair_bench(
+        "nextjson_msgpack",
+        "rmp_serde",
+        duration,
+        &|| nextjson::formats::encode_with(&records, nextjson::formats::MsgPack).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::MsgPack)
+                    .unwrap(),
+            );
+        },
+        &|| rmp_serde::to_vec(&records).unwrap(),
+        &|b| {
+            black_box(rmp_serde::from_slice::<Vec<Record>>(b).unwrap());
+        },
+    );
+    // CBOR (both)
+    pair_bench(
+        "nextjson_cbor",
+        "ciborium",
+        duration,
+        &|| nextjson::formats::encode_with(&records, nextjson::formats::Cbor).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Cbor)
+                    .unwrap(),
+            );
+        },
+        &|| ciborium_serialize(&records),
+        &|b| {
+            black_box(ciborium::from_reader::<Vec<Record>, _>(&b[..]).unwrap());
+        },
+    );
+    // Bincode (serde only: nextjson has no bincode codec)
+    bench(
+        "nextjson_bincode(na)",
+        duration,
+        &|| Vec::new(),
+        &|_| {},
+    );
+    bench(
+        "serde_bincode",
+        duration,
+        &|| bincode::serialize(&records).unwrap(),
+        &|b| {
+            black_box(bincode::deserialize::<Vec<Record>>(b).unwrap());
+        },
+    );
+    // TOML (both, document-shaped Config fixture)
+    pair_bench(
+        "nextjson_toml",
+        "serde_toml",
+        duration,
+        &|| nextjson::formats::encode_with(&config, nextjson::formats::Toml).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Toml).unwrap(),
+            );
+        },
+        &|| toml::to_string(&config).unwrap().into_bytes(),
+        &|b| {
+            black_box(toml::from_str::<Config>(std::str::from_utf8(b).unwrap()).unwrap());
+        },
+    );
+    // BSON (both, document-shaped Config fixture)
+    pair_bench(
+        "nextjson_bson",
+        "serde_bson",
+        duration,
+        &|| nextjson::formats::encode_with(&config, nextjson::formats::Bson).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Bson).unwrap(),
+            );
+        },
+        &|| bson::to_vec(&config).unwrap(),
+        &|b| {
+            black_box(bson::from_slice::<Config>(b).unwrap());
+        },
+    );
+    // Postcard (both, unsigned Config fixture)
+    pair_bench(
+        "nextjson_postcard",
+        "serde_postcard",
+        duration,
+        &|| nextjson::formats::encode_with(&config, nextjson::formats::Postcard).unwrap(),
+        &|b| {
+            black_box(
+                nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Postcard)
+                    .unwrap(),
+            );
+        },
+        &|| postcard::to_allocvec(&config).unwrap(),
+        &|b| {
+            black_box(postcard::from_bytes::<Config>(b).unwrap());
         },
     );
 
@@ -125,6 +312,38 @@ fn main() {
     // formatting (nextjson uses `core::fmt::Display`; serde_json uses ryu).
     run_float_free_comparison();
 }
+
+/// Assert that a nextjson format round-trips `value` exactly.
+fn check_nextjson<T>(value: &T, format: impl nextjson::formats::Format)
+where
+    T: nextjson::NsonSerialize + for<'de> nextjson::NsonDeserialize<'de> + PartialEq + std::fmt::Debug,
+{
+    let bytes = nextjson::formats::encode_with(value, format).unwrap();
+    let back = nextjson::formats::decode_with::<T, _>(&bytes, format).unwrap();
+    assert_eq!(&back, value);
+}
+
+/// Assert that a serde format round-trips `value` exactly.
+fn check_serde<T, E>(
+    value: &T,
+    decode: impl Fn(&[u8]) -> Result<T, E>,
+    encode: impl Fn() -> Vec<u8>,
+) where
+    T: PartialEq + std::fmt::Debug,
+    E: std::fmt::Debug,
+{
+    let bytes = encode();
+    let back = decode(&bytes).unwrap();
+    assert_eq!(&back, value);
+}
+
+/// Serialize through ciborium's writer API (ciborium 0.2 has no `into_vec`).
+fn ciborium_serialize<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    let mut out = Vec::new();
+    ciborium::into_writer(value, &mut out).unwrap();
+    out
+}
+
 
 /// Float-free fixture: isolates the float-formatting cost. nextjson formats
 /// floats through `core::fmt::Display` (flt2dec); serde_json uses the ryu

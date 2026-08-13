@@ -68,6 +68,25 @@ pub(crate) fn simple_escape(esc: u8) -> Option<char> {
     }
 }
 
+/// Replace a bare structural token expectation (like `'{'`) with the type
+/// description installed via [`FormatDecoder::set_expecting`], when present.
+///
+/// Shared by [`crate::Decoder`] and [`crate::StreamDecoder`] so the
+/// type-mismatch-message behaviour cannot drift between the two decoders.
+/// Scalar expectations (`number`, `string`, ...) are never replaced.
+///
+/// [`FormatDecoder::set_expecting`]: crate::de::FormatDecoder::set_expecting
+#[inline]
+pub(crate) fn expecting_for(
+    expected: &'static str,
+    expecting: Option<&'static str>,
+) -> &'static str {
+    match expecting {
+        Some(e) if matches!(expected, "'{'" | "'}'" | "'['" | "']'") => e,
+        _ => expected,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

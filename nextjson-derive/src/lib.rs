@@ -865,6 +865,7 @@ pub(crate) fn generate_de_impl(input: &Input) -> TokenStream {
          \x20       __d: &mut __D,\n\
          \x20       __out: &mut {cp}::DecodeSlot<Self>,\n\
          \x20   ) -> ::core::result::Result<(), __D::Error> {{\n\
+         \x20       __d.set_expecting(Self::expecting());\n\
          {body}\n\
          \x20   }}\n\
          }}"

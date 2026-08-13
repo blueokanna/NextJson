@@ -229,8 +229,8 @@ assert_eq!(json2, json);
 | `json`     | null/bool/int/float/str                | array/object     | RFC 8259，完整模型 |
 | `json5`    | 同 JSON + `Infinity`/`NaN`             | + 注释、未加引号键、单引号、尾随逗号 | 编码器输出严格 JSON |
 | `hjson`    | 同 JSON                                | + 未加引号键/字符串、注释 | 编码器输出严格 JSON |
-| `yaml`     | null/bool/int/float/str                | 块式 + 流式子集   | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]`、块标量 `|`/`>`（含 `-`/`+` chomping 与缩进指示符） |
-| `toml`     | bool/int/float/str（无 null）          | 表、数组、内联表、多行字符串 | 文档形态：裸标量根被拒绝；`"""`/`'''` 多行字符串、`\` 续行 |
+| `yaml`     | null/bool/int/float/str                | 块式 + 流式子集   | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]`、块标量 `|`/`>`（含 `-`/`+` chomping 与缩进指示符）、锚点 `&name`/别名 `*name`（块上下文，复制解析 + 100 万节点展开预算）、标准 tag `!!str`/`!!int`/`!!float`/`!!bool`/`!!null`（自定义 tag 拒绝）、merge 键 `<<:`、文档结束标记 `...`、非有限浮点 `.inf`/`.nan` 拒绝；多文档流拒绝 |
+| `toml`     | bool/int/float/str（无 null）          | 表、数组、内联表、多行字符串 | 文档形态：裸标量根被拒绝；`"""`/`'''` 多行字符串、`\` 续行；十进制/十六进制（`0x`）/八进制（`0o`）/二进制（`0b`）整数（含 `_` 分隔）；日期时间严格校验（TOML 1.0 四种形态：offset/local date-time、date、time）后保留为字符串 |
 | `ron`      | bool/int/float/str/char                | map/seq/元组/结构体/枚举 | `Some(...)` 包装可往返 |
 | `sexpr`    | 原子、带引号字符串、数字、`#t`/`#f`、`nil` | 列表；map 编为 alist | 无模式 `Value` 解码嵌套 map 有歧义，请用类型化目标 |
 | `csv`      | int/float/bool/str                     | 行；带表头的对象行 | RFC 4180 |
@@ -258,7 +258,7 @@ MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 
 
 自有派生宏支持结构体、元组结构体、泛型、常量泛型和多种枚举表示。主要属性：
 
-- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`（覆写反序列化类型/长度不匹配错误消息中的类型描述；默认是类型的完整路径）；
+- 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`（覆写反序列化错误消息中的类型描述；派生实现自动把它安装到解码器，因此容器级类型不匹配如 `begin_object` 遇 `[` 会报告类型名而非裸 `'{'`；默认是类型的完整路径）；
 - 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`、`getter`；
 - 变体：`rename`、`rename_all`、`skip`、方向性 skip。
 
@@ -299,13 +299,20 @@ cargo bench --locked -p nextjson --bench format_comparison
 ```
 
 另有**独立于工作区之外的 crate**（`benchmarks/serde-comparison/`）在同一数据上
-对比 `serde`/`serde_json`；它持有自己的 Cargo.lock，工作区依赖审计不受影响。
+对比 nextjson 与 serde 生态的 **9 种格式**：JSON（serde_json）、YAML
+（serde_yaml）、RON（ron）、MessagePack（rmp-serde）、CBOR（ciborium）、
+TOML（toml）、BSON（bson）、postcard（postcard）与 bincode（bincode，nextjson
+无对应格式故标注 `na`）。`Vec<Record>` fixture 覆盖有符号/浮点/嵌套，
+文档形态或无符号格式（TOML、BSON、postcard）用 `Config` fixture；每种格式在
+编码前先做往返 self-check。它持有自己的 Cargo.lock，工作区依赖审计不受影响。
 
 ```text
 cd benchmarks/serde-comparison && cargo run --release
 ```
 
-复现方法和输出格式见[可复现基准测试](docs/BENCHMARKS_CN.md)。
+输出为 CSV（`case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps`），
+窗口时长用 `NEXTJSON_BENCH_MS` 调节（默认 2000 ms）。复现方法和输出格式见
+[可复现基准测试](docs/BENCHMARKS_CN.md)。
 
 ### 验证
 

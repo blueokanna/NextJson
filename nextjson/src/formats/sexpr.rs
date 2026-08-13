@@ -398,6 +398,12 @@ impl<'de> SexprDecoder<'de> {
             }
             self.pos += 1;
         }
+        // A stop character with zero bytes consumed would produce an empty
+        // atom and leave `pos` unchanged; callers that loop on `has_more`
+        // would then spin forever. Reject it instead.
+        if self.pos == start {
+            return Err(Error::custom("sexpr: empty atom"));
+        }
         let raw = &self.input[start..self.pos];
         let s = core::str::from_utf8(raw).map_err(|_| Error::custom("sexpr: invalid atom"))?;
         Ok(s.to_string())

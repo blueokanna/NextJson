@@ -214,8 +214,8 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | `json` | null/bool/int/float/str | array/object | RFC 8259; full model |
 | `json5` | as JSON + `Infinity`/`NaN` | + comments, unquoted keys, single quotes, trailing commas | encoder emits strict JSON |
 | `hjson` | as JSON | + unquoted keys/strings, comments | encoder emits strict JSON |
-| `yaml` | null/bool/int/float/str | block + flow subset | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]`, block scalars `|`/`>` (with `-`/`+` chomping and indentation indicator) |
-| `toml` | bool/int/float/str (no null) | tables, arrays, inline tables, multi-line strings | document-shaped: a bare scalar root is rejected; `"""`/`'''` multi-line strings with `\` continuation |
+| `yaml` | null/bool/int/float/str | block + flow subset | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]`, block scalars `|`/`>` (with `-`/`+` chomping and indentation indicator), anchors `&name` / aliases `*name` (block context; resolved by copying with a 1M-node expansion budget), standard tags `!!str`/`!!int`/`!!float`/`!!bool`/`!!null` (custom tags rejected), merge keys `<<:`, document-end marker `...`, non-finite `.inf`/`.nan` rejected; multi-document streams rejected |
+| `toml` | bool/int/float/str (no null) | tables, arrays, inline tables, multi-line strings | document-shaped: a bare scalar root is rejected; `"""`/`'''` multi-line strings with `\` continuation; decimal / hex (`0x`) / octal (`0o`) / binary (`0b`) integers (with `_` separators); date-times strictly validated (TOML 1.0: offset/local date-time, date, time) then preserved as strings |
 | `ron` | bool/int/float/str/char | map/seq/tuple/struct/enum | `Some(...)` wrappers round-trip |
 | `sexpr` | atoms, quoted strings, numbers, `#t`/`#f`, `nil` | lists; maps as alists | schema-less nested-map `Value` decoding is ambiguous; use typed targets |
 | `csv` | int/float/bool/str | rows; object rows with header | RFC 4180 |
@@ -258,8 +258,10 @@ Container attributes include `rename_all` (including the directional
 `deny_unknown_fields`, `default`, `transparent`, `crate`, `bound` (including
 directional `bound(serialize=…, deserialize=…)`), `into`, `from`, `try_from`,
 `remote`, and `expecting` (overrides the type description used in
-  deserialization type-mismatch / length-mismatch error messages; the default
-  is the type's fully qualified path). Field attributes include `rename`, `alias`,
+  deserialization error messages; derived implementations install it on the
+  decoder, so container-level type mismatches like `begin_object` hitting `[`
+  report the type name instead of a bare `'{'`; the default is the type's
+  fully qualified path). Field attributes include `rename`, `alias`,
 `default`, `skip`, directional skips, `skip_serializing_if`, `flatten`,
 `borrow`, `with`, `serialize_with`, `deserialize_with`, and `getter`. Variant
 attributes include `rename`, `rename_all`, `skip`, and directional skips.
@@ -305,14 +307,22 @@ cargo bench --locked -p nextjson --bench format_comparison
 ```
 
 An out-of-workspace crate (`benchmarks/serde-comparison/`) additionally
-benchmarks the same fixture against `serde`/`serde_json` on shared hardware;
-it keeps its own Cargo.lock so the workspace dependency audit stays intact.
+benchmarks the same data against **nine serde-ecosystem formats**: JSON
+(serde_json), YAML (serde_yaml), RON (ron), MessagePack (rmp-serde), CBOR
+(ciborium), TOML (toml), BSON (bson), postcard (postcard), and bincode
+(bincode; nextjson has no bincode codec, so that case is labelled `na`). The
+`Vec<Record>` fixture covers signed / float / nested values; document-shaped
+or unsigned-only formats (TOML, BSON, postcard) use a `Config` fixture. Every
+format runs a round-trip self-check before measurement. The crate keeps its
+own Cargo.lock so the workspace dependency audit stays intact.
 
 ```text
 cd benchmarks/serde-comparison && cargo run --release
 ```
 
-See the [Reproducible Benchmark](https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md) for the fixture, measurement method, output
+Output is CSV (`case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps`);
+the per-case window is tuned with `NEXTJSON_BENCH_MS` (default 2000 ms). See
+the [Reproducible Benchmark](https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md) for the fixture, measurement method, output
 format, and reporting requirements.
 
 ### Reproducibility

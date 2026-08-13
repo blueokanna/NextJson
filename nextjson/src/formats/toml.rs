@@ -1,14 +1,15 @@
-//! TOML codec (v1.0 core subset).
+//! TOML codec (v1.0 subset).
 //!
-//! The decoder parses a core TOML document into a [`Value`] and serves the
+//! The decoder parses a TOML document into a [`Value`] and serves the
 //! unified event interface from it: `key = value` pairs, dotted keys,
 //! `[table]` and `[[array-of-table]]` headers, basic and literal strings,
-//! decimal integers, floats, booleans, arrays and inline tables. Multi-line
-//! (`"""`/`'''`) strings, hex/octal/binary integers, `inf`/`nan` and
-//! date-time values are outside this subset and rejected or treated as
-//! strings. The encoder collects the event stream into a [`Value`] and emits
-//! TOML when the root closes, because TOML is document-shaped (tables must
-//! be emitted after their keys).
+//! multi-line (`"""`/`'''`) strings with `\` continuation, decimal / hex /
+//! octal / binary integers (with `_` separators), floats, booleans, arrays
+//! (multi-line, trailing commas), inline tables, and date-times (strictly
+//! validated, preserved as strings). `inf`/`nan` have no TOML literal form
+//! and are rejected. The encoder collects the event stream into a [`Value`]
+//! and emits TOML when the root closes, because TOML is document-shaped
+//! (tables must be emitted after their keys).
 
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -574,7 +575,10 @@ impl<'a> Parser<'a> {
         while self.pos < self.text.len() {
             let c = self.text.as_bytes()[self.pos];
             if c.is_ascii_alphanumeric()
-                || matches!(c, b'+' | b'-' | b'.' | b'_' | b':' | b'T' | b'Z' | b' ')
+                || matches!(
+                    c,
+                    b'+' | b'-' | b'.' | b'_' | b':' | b'T' | b't' | b'Z' | b'z' | b' '
+                )
             {
                 self.pos += 1;
             } else {
@@ -582,11 +586,34 @@ impl<'a> Parser<'a> {
             }
         }
         let raw = self.text[start..self.pos].trim_end();
-        // Date-time or date: keep as string.
-        if raw.contains('-') && (raw.contains(':') || raw.len() >= 10) && !is_number(raw) {
+        if is_toml_datetime(raw) {
             return Ok(Value::from(raw.to_string()));
         }
         let clean = raw.replace('_', "");
+        if let Some(digits) = clean
+            .strip_prefix("0x")
+            .or_else(|| clean.strip_prefix("0X"))
+        {
+            let v = u64::from_str_radix(digits, 16)
+                .map_err(|_| Error::custom("toml: invalid hexadecimal integer"))?;
+            return Ok(Value::from(v));
+        }
+        if let Some(digits) = clean
+            .strip_prefix("0o")
+            .or_else(|| clean.strip_prefix("0O"))
+        {
+            let v = u64::from_str_radix(digits, 8)
+                .map_err(|_| Error::custom("toml: invalid octal integer"))?;
+            return Ok(Value::from(v));
+        }
+        if let Some(digits) = clean
+            .strip_prefix("0b")
+            .or_else(|| clean.strip_prefix("0B"))
+        {
+            let v = u64::from_str_radix(digits, 2)
+                .map_err(|_| Error::custom("toml: invalid binary integer"))?;
+            return Ok(Value::from(v));
+        }
         if let Ok(v) = clean.parse::<i64>() {
             return Ok(Value::from(v));
         }
@@ -889,6 +916,117 @@ fn trim_whitespace_end(s: &str) -> &str {
     s.trim_end_matches([' ', '\t', '\n', '\r'])
 }
 
+/// Strict TOML 1.0 date-time grammar check.
+///
+/// Returns true when `raw` is one of the four supported forms (offset
+/// date-time, local date-time, local date, local time). The JSON data model
+/// has no native temporal type, so matching values are preserved verbatim as
+/// strings; anything that merely *looks* numeric-with-dashes is rejected by
+/// the number path instead of being silently misread.
+fn is_toml_datetime(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let b = raw.as_bytes();
+    // Local time: HH:MM:SS[.fraction].
+    if b.len() >= 8 && b[2] == b':' && b[5] == b':' && is_time_range(&raw[..8]) {
+        return raw.len() == 8 || fraction_only(&raw[8..]);
+    }
+    // Everything else must start with a date YYYY-MM-DD.
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' || !is_date(&raw[..10]) {
+        return false;
+    }
+    if raw.len() == 10 {
+        return true; // local date
+    }
+    // Date-time: the separator is 'T', 't' or a single space.
+    let sep = b[10];
+    if !(sep == b'T' || sep == b't' || sep == b' ') {
+        return false;
+    }
+    let rest = &raw[11..];
+    let rb = rest.as_bytes();
+    if rb.len() < 8 || rb[2] != b':' || rb[5] != b':' || !is_time_range(&rest[..8]) {
+        return false;
+    }
+    let tail = &rest[8..];
+    if tail.is_empty() {
+        return true; // local date-time
+    }
+    // Optional fractional seconds (digits after '.').
+    let tail = if let Some(frac) = tail.strip_prefix('.') {
+        let digits_end = frac
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(frac.len());
+        if digits_end == 0 {
+            return false; // '.' with no digits
+        }
+        &frac[digits_end..]
+    } else {
+        tail
+    };
+    if tail.is_empty() {
+        return true; // local date-time with fraction
+    }
+    // Offset: 'Z'/'z' or ±HH:MM (RFC 3339 hour/minute ranges enforced).
+    match tail.as_bytes()[0] {
+        b'Z' | b'z' => tail.len() == 1,
+        b'+' | b'-' => {
+            let b = tail.as_bytes();
+            if b.len() != 6 || b[3] != b':' {
+                return false;
+            }
+            let digits =
+                b[1..3].iter().all(u8::is_ascii_digit) && b[4..6].iter().all(u8::is_ascii_digit);
+            if !digits {
+                return false;
+            }
+            let h = (b[1] - b'0') as u32 * 10 + (b[2] - b'0') as u32;
+            let m = (b[4] - b'0') as u32 * 10 + (b[5] - b'0') as u32;
+            h <= 23 && m <= 59
+        }
+        _ => false,
+    }
+}
+
+/// `YYYY-MM-DD` with digits in the right slots and a plausible calendar range
+/// (leap years not enforced).
+fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let digits_ok = b.iter().enumerate().all(|(i, &c)| {
+        if i == 4 || i == 7 {
+            c == b'-'
+        } else {
+            c.is_ascii_digit()
+        }
+    });
+    if !digits_ok {
+        return false;
+    }
+    let y: u32 = s[0..4].parse().unwrap_or(0);
+    let m: u32 = s[5..7].parse().unwrap_or(0);
+    let d: u32 = s[8..10].parse().unwrap_or(0);
+    y >= 1 && (1..=12).contains(&m) && (1..=31).contains(&d)
+}
+
+/// `HH:MM:SS` with plausible ranges.
+fn is_time_range(s: &str) -> bool {
+    let b = s.as_bytes();
+    let h = (b[0] - b'0') as u32 * 10 + (b[1] - b'0') as u32;
+    let m = (b[3] - b'0') as u32 * 10 + (b[4] - b'0') as u32;
+    let sec = (b[6] - b'0') as u32 * 10 + (b[7] - b'0') as u32;
+    h <= 23 && m <= 59 && sec <= 59
+}
+
+/// `.digits` fractional-seconds suffix.
+fn fraction_only(s: &str) -> bool {
+    s.starts_with('.') && s[1..].bytes().all(|c| c.is_ascii_digit())
+}
+
 /// Insert a (possibly dotted) key into a map, creating intermediate tables.
 ///
 /// Duplicate keys are an error per the TOML spec, not a silent overwrite.
@@ -925,11 +1063,6 @@ fn insert_dotted(map: &mut Map, key: &[String], value: Value) -> Result<()> {
         };
     }
     Ok(())
-}
-
-fn is_number(raw: &str) -> bool {
-    raw.bytes()
-        .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.' | b'_' | b'e' | b'E'))
 }
 
 fn utf8_len(b: u8) -> Option<usize> {

@@ -353,6 +353,59 @@ unicode \u00e9
 }
 
 #[test]
+fn toml_datetime_preserved_as_string() {
+    let input = br#"
+odt = 1979-05-27T07:32:00Z
+ldt = 1979-05-27T07:32:00
+ld = 1979-05-27
+lt = 07:32:00
+odt2 = 1979-05-27 07:32:00.999-07:00
+"#;
+    let value: nextjson::Value = formats::Toml.decode(input).unwrap();
+    assert_eq!(value["odt"], nextjson::Value::from("1979-05-27T07:32:00Z"));
+    assert_eq!(value["ldt"], nextjson::Value::from("1979-05-27T07:32:00"));
+    assert_eq!(value["ld"], nextjson::Value::from("1979-05-27"));
+    assert_eq!(value["lt"], nextjson::Value::from("07:32:00"));
+    assert_eq!(
+        value["odt2"],
+        nextjson::Value::from("1979-05-27 07:32:00.999-07:00")
+    );
+}
+
+#[test]
+fn toml_invalid_datetime_is_not_silently_stringified() {
+    // Month 13 is not a plausible date: the value must not be kept as a
+    // date string (it fails the number path instead).
+    assert!(formats::Toml
+        .decode::<nextjson::Value>(b"d = 2020-13-99\n")
+        .is_err());
+}
+
+#[test]
+fn toml_hex_octal_binary_integers() {
+    let input = br#"
+hex = 0xDEADBEEF
+hexu = 0Xdead_beef
+oct = 0o755
+bin = 0b1101_0101
+neg = -42
+"#;
+    let value: nextjson::Value = formats::Toml.decode(input).unwrap();
+    assert_eq!(value["hex"], nextjson::Value::from(0xDEADBEEF_u64));
+    assert_eq!(value["hexu"], nextjson::Value::from(0xdead_beef_u64));
+    assert_eq!(value["oct"], nextjson::Value::from(0o755_u64));
+    assert_eq!(value["bin"], nextjson::Value::from(0b1101_0101_u64));
+    assert_eq!(value["neg"], nextjson::Value::from(-42_i64));
+}
+
+#[test]
+fn toml_invalid_radix_integer_is_error() {
+    assert!(formats::Toml
+        .decode::<nextjson::Value>(b"x = 0xZZ\n")
+        .is_err());
+}
+
+#[test]
 fn yaml_roundtrips() {
     let mut m = nextjson::Map::new();
     m.insert("name".to_string(), nextjson::Value::from("NextJson"));
@@ -1242,4 +1295,111 @@ fn yaml_block_scalar_header_comment() {
     let input = b"t: | # comment\n  content\n";
     let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
     assert_eq!(value["t"], nextjson::Value::from("content\n"));
+}
+
+#[test]
+fn yaml_anchors_and_aliases() {
+    let input = b"base: &b\n  x: 1\n  y: two\ncopy: *b\n";
+    let value: nextjson::Value = formats::Yaml.decode(&input[..]).unwrap();
+    assert_eq!(value["base"], value["copy"]);
+    assert_eq!(value["copy"]["x"], nextjson::Value::from(1_i64));
+    assert_eq!(value["copy"]["y"], nextjson::Value::from("two"));
+}
+
+#[test]
+fn yaml_alias_scalar_and_sequence() {
+    let input = b"a: &n 42\nb: *n\nlist:\n  - &s hello\n  - *s\n";
+    let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
+    assert_eq!(value["a"], nextjson::Value::from(42_i64));
+    assert_eq!(value["b"], nextjson::Value::from(42_i64));
+    assert_eq!(value["list"][0], nextjson::Value::from("hello"));
+    assert_eq!(value["list"][1], nextjson::Value::from("hello"));
+}
+
+#[test]
+fn yaml_anchor_on_block_scalar() {
+    let input = b"a: &t |\n  line\nb: *t\n";
+    let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
+    assert_eq!(value["a"], nextjson::Value::from("line\n"));
+    assert_eq!(value["b"], nextjson::Value::from("line\n"));
+}
+
+#[test]
+fn yaml_unknown_alias_errors() {
+    assert!(formats::Yaml
+        .decode::<nextjson::Value>(b"a: *missing\n")
+        .is_err());
+}
+
+#[test]
+fn yaml_multi_document_rejected() {
+    let input = b"a: 1\n---\nb: 2\n";
+    assert!(formats::Yaml.decode::<nextjson::Value>(&input[..]).is_err());
+}
+
+#[test]
+fn yaml_document_end_marker_accepted() {
+    let input = b"a: 1\n...\n";
+    let value: nextjson::Value = formats::Yaml.decode(&input[..]).unwrap();
+    assert_eq!(value["a"], nextjson::Value::from(1_i64));
+}
+
+#[test]
+fn yaml_standard_tags_force_types() {
+    let input = b"
+s: !!str 123
+i: !!int \"42\"
+f: !!float 2.5
+t: !!bool true
+n: !!null anything
+";
+    let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
+    assert_eq!(value["s"], nextjson::Value::from("123"));
+    assert_eq!(value["i"], nextjson::Value::from(42_i64));
+    assert_eq!(value["f"], nextjson::Value::from(2.5_f64));
+    assert_eq!(value["t"], nextjson::Value::from(true));
+    assert_eq!(value["n"], nextjson::Value::Null);
+}
+
+#[test]
+fn yaml_unsupported_tag_is_error() {
+    assert!(formats::Yaml
+        .decode::<nextjson::Value>(b"x: !custom value\n")
+        .is_err());
+}
+
+#[test]
+fn yaml_merge_key() {
+    let input = b"
+defaults: &defaults
+  host: localhost
+  port: 8080
+server:
+  <<: *defaults
+  port: 9000
+";
+    let value: nextjson::Value = formats::Yaml.decode(input).unwrap();
+    // `<<` merges the anchor mapping; explicit keys win.
+    assert_eq!(value["server"]["host"], nextjson::Value::from("localhost"));
+    assert_eq!(value["server"]["port"], nextjson::Value::from(9000_i64));
+}
+
+#[test]
+fn yaml_merge_must_be_mapping() {
+    assert!(formats::Yaml
+        .decode::<nextjson::Value>(b"a:\n  <<: 42\n")
+        .is_err());
+}
+
+#[test]
+fn yaml_non_finite_floats_rejected() {
+    for bad in [".inf", "-.inf", ".nan"] {
+        let input = format!("x: {bad}\n");
+        assert!(
+            formats::Yaml
+                .decode::<nextjson::Value>(input.as_bytes())
+                .is_err(),
+            "accepted non-finite {bad}"
+        );
+    }
 }

@@ -256,6 +256,22 @@ pub trait FormatDecoder<'de> {
     /// Restore a position saved with [`save`](FormatDecoder::save).
     fn restore(&mut self, mark: Mark);
 
+    /// Set the human-readable description of the type currently being
+    /// decoded, so container-level type-mismatch errors (`begin_object` /
+    /// `begin_array` hitting the wrong token) can name the expected type
+    /// instead of a bare structural token like `'{'`.
+    ///
+    /// Returns the previously installed description (or `None`) so callers
+    /// can restore it after decoding a nested value. The default is a no-op;
+    /// only decoders that track the description override this (the native
+    /// [`Decoder`] and [`StreamDecoder`](crate::stream::StreamDecoder) do).
+    /// Derived `NsonDeserialize` implementations call this with
+    /// [`NsonDeserialize::expecting`] automatically; hand-written
+    /// implementations may call it for the same richer error messages.
+    fn set_expecting(&mut self, _expecting: &'static str) -> Option<&'static str> {
+        None
+    }
+
     impl_signed_reads! {
         i8 => i8, i16 => i16, i32 => i32, i64 => i64, i128 => i128, isize => isize,
     }
@@ -399,6 +415,9 @@ impl<'de> FormatDecoder<'de> for Decoder<'de> {
     }
     fn restore(&mut self, mark: Mark) {
         Decoder::restore(self, mark)
+    }
+    fn set_expecting(&mut self, expecting: &'static str) -> Option<&'static str> {
+        self.expecting.replace(expecting)
     }
 }
 
@@ -1096,6 +1115,9 @@ pub struct Decoder<'de> {
     scratch: String,
     depth: u32,
     max_depth: u32,
+    /// Type description installed via [`set_expecting`](FormatDecoder::set_expecting),
+    /// used to enrich container-level type-mismatch errors.
+    expecting: Option<&'static str>,
 }
 
 impl<'de> Decoder<'de> {
@@ -1115,6 +1137,7 @@ impl<'de> Decoder<'de> {
             scratch: String::new(),
             depth: 0,
             max_depth: config.max_depth,
+            expecting: None,
         }
     }
 
@@ -1129,6 +1152,7 @@ impl<'de> Decoder<'de> {
             scratch: String::new(),
             depth: 0,
             max_depth: 128,
+            expecting: None,
         }
     }
 
@@ -1433,6 +1457,10 @@ impl<'de> Decoder<'de> {
             Token::BeginArray => "array",
             Token::EndArray => "end of array",
         };
+        // When a type description was installed via `set_expecting`, replace
+        // the bare structural token expectation (like `'{'`) with the type's
+        // name so the message says what the user actually tried to decode.
+        let expected = crate::lex::expecting_for(expected, self.expecting);
         self.err(ErrorKind::InvalidType {
             expected,
             found: found_name,
@@ -2003,7 +2031,12 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeFrom<T> {
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
+        decoder.begin_array()?;
         let start = T::nextdecode(decoder)?;
+        if decoder.array_entry_sep()? {
+            return Err(Error::invalid_length(1, "a range").into());
+        }
+        decoder.end_array()?;
         out.write(start..);
         Ok(())
     }
@@ -2014,7 +2047,12 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeTo<T> {
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
+        decoder.begin_array()?;
         let end = T::nextdecode(decoder)?;
+        if decoder.array_entry_sep()? {
+            return Err(Error::invalid_length(1, "a range").into());
+        }
+        decoder.end_array()?;
         out.write(..end);
         Ok(())
     }
@@ -2025,7 +2063,12 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for RangeToInclusive<T> 
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
+        decoder.begin_array()?;
         let end = T::nextdecode(decoder)?;
+        if decoder.array_entry_sep()? {
+            return Err(Error::invalid_length(1, "a range").into());
+        }
+        decoder.end_array()?;
         out.write(..=end);
         Ok(())
     }

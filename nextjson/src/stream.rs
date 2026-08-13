@@ -51,6 +51,10 @@ pub struct StreamDecoder<R> {
     scratch: String,
     depth: u32,
     max_depth: u32,
+    /// Type description installed via
+    /// [`set_expecting`](FormatDecoder::set_expecting), used to enrich
+    /// container-level type-mismatch errors.
+    expecting: Option<&'static str>,
 }
 
 impl<R> StreamDecoder<R> {
@@ -69,6 +73,7 @@ impl<R> StreamDecoder<R> {
             scratch: String::new(),
             depth: 0,
             max_depth: config.max_depth,
+            expecting: None,
         }
     }
 
@@ -104,6 +109,10 @@ impl<R> StreamDecoder<R> {
     }
 
     fn invalid_type(&self, expected: &'static str, found: &Token<'static>) -> Error {
+        // When a type description was installed via `set_expecting`, replace
+        // the bare structural token expectation (like `'{'`) with the type's
+        // name so the message says what the user actually tried to decode.
+        let expected = crate::lex::expecting_for(expected, self.expecting);
         self.err(ErrorKind::InvalidType {
             expected,
             found: crate::de::token_name(found),
@@ -755,6 +764,10 @@ impl<'de, R: std::io::Read> FormatDecoder<'de> for StreamDecoder<R> {
         self.pos = mark.pos;
         self.lookahead = None;
         self.depth = mark.depth;
+    }
+
+    fn set_expecting(&mut self, expecting: &'static str) -> Option<&'static str> {
+        self.expecting.replace(expecting)
     }
 
     fn option_tag(&mut self) -> Result<OptionTag> {
