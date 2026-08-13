@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::de::{DecodeConfig, FormatDecoder, Mark, NsonDeserialize, OptionTag, Token};
 use crate::error::{Error, ErrorKind, Result};
+use crate::lex::{hex_digit, line_col, simple_escape};
 use crate::number::Number;
 
 /// How many bytes are pulled from the reader in one fill.
@@ -103,19 +104,9 @@ impl<R> StreamDecoder<R> {
     }
 
     fn invalid_type(&self, expected: &'static str, found: &Token<'static>) -> Error {
-        let found_name = match found {
-            Token::Null => "null",
-            Token::Bool(_) => "bool",
-            Token::Number(_) => "number",
-            Token::Str(_) => "string",
-            Token::BeginObject => "object",
-            Token::EndObject => "end of object",
-            Token::BeginArray => "array",
-            Token::EndArray => "end of array",
-        };
         self.err(ErrorKind::InvalidType {
             expected,
-            found: found_name,
+            found: crate::de::token_name(found),
         })
     }
 
@@ -314,14 +305,6 @@ impl<R: std::io::Read> StreamDecoder<R> {
         let mut j = i + 1;
         let esc = self.byte(j)?;
         match esc {
-            b'"' => self.scratch.push('"'),
-            b'\\' => self.scratch.push('\\'),
-            b'/' => self.scratch.push('/'),
-            b'b' => self.scratch.push('\u{8}'),
-            b'f' => self.scratch.push('\u{c}'),
-            b'n' => self.scratch.push('\n'),
-            b'r' => self.scratch.push('\r'),
-            b't' => self.scratch.push('\t'),
             b'u' => {
                 let hi = self.hex4(j + 1)?;
                 if (0xD800..=0xDBFF).contains(&hi) {
@@ -347,7 +330,10 @@ impl<R: std::io::Read> StreamDecoder<R> {
                     j += 4;
                 }
             }
-            other => return Err(self.err_at(ErrorKind::InvalidEscape(other as char), j)),
+            other => match simple_escape(other) {
+                Some(c) => self.scratch.push(c),
+                None => return Err(self.err_at(ErrorKind::InvalidEscape(other as char), j)),
+            },
         }
         self.pos = j + 1;
         Ok(())
@@ -361,15 +347,9 @@ impl<R: std::io::Read> StreamDecoder<R> {
             let Some(&b) = self.buf.get(start + k) else {
                 return Err(self.err_at(ErrorKind::Eof, self.buf.len()));
             };
-            let d = match b {
-                b'0'..=b'9' => (b - b'0') as u16,
-                b'a'..=b'f' => (b - b'a' + 10) as u16,
-                b'A'..=b'F' => (b - b'A' + 10) as u16,
-                _ => {
-                    return Err(self.err_at(ErrorKind::InvalidEscape('u'), start + k));
-                }
-            };
-            v = v * 16 + d;
+            let d = hex_digit(b)
+                .ok_or_else(|| self.err_at(ErrorKind::InvalidEscape('u'), start + k))?;
+            v = v * 16 + d as u16;
         }
         Ok(v)
     }
@@ -800,20 +780,4 @@ impl<'de, R: std::io::Read> FormatDecoder<'de> for StreamDecoder<R> {
     fn is_human_readable(&self) -> bool {
         true
     }
-}
-
-/// Compute the 1-based line / column of a byte offset.
-fn line_col(input: &[u8], pos: usize) -> (u32, u32) {
-    let pos = pos.min(input.len());
-    let mut line = 1u32;
-    let mut col = 1u32;
-    for &b in &input[..pos] {
-        if b == b'\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
 }

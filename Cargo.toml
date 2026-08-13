@@ -3,7 +3,7 @@ members = ["nextjson", "nextjson-derive"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["blueokanna"]
 license = "Apache-2.0"
@@ -11,8 +11,8 @@ repository = "https://github.com/blueokanna/NextJson"
 description = "A dependency-free, no_std JSON and CBOR library with a schema-driven, visitor-free design."
 
 [workspace.dependencies]
-nextjson = { path = "nextjson", version = "0.1.2" }
-nextjson-derive = { path = "nextjson-derive", version = "0.1.2" }
+nextjson = { path = "nextjson", version = "0.1.3" }
+nextjson-derive = { path = "nextjson-derive", version = "0.1.3" }
 
 [profile.release]
 lto = "thin"

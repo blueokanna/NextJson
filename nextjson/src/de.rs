@@ -27,6 +27,7 @@ use core::ops::{Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive};
 use core::time::Duration;
 
 use crate::error::{Error, ErrorKind, FormatError, Result};
+use crate::lex::{line_col, parse_hex4, simple_escape};
 use crate::map::Map;
 use crate::number::Number;
 use crate::value::Value;
@@ -381,6 +382,12 @@ impl<'de> FormatDecoder<'de> for Decoder<'de> {
     fn skip_value(&mut self) -> Result<(), Self::Error> {
         Decoder::skip_value(self)
     }
+    fn option_tag(&mut self) -> Result<OptionTag, Self::Error> {
+        match &mut self.inner {
+            Inner::Bytes(r) => r.option_tag(&mut self.scratch),
+            Inner::Tree(r) => r.option_tag(),
+        }
+    }
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         Decoder::peek_token(self)
     }
@@ -424,14 +431,12 @@ pub trait NsonDeserialize<'de>: Sized {
 // Input sources
 // ---------------------------------------------------------------------------
 
-/// Byte-stream source: lazy lexing over `&[u8]`.
 struct BytesReader<'de> {
     input: &'de [u8],
     pos: usize,
     lookahead: Option<Token<'de>>,
 }
 
-/// Content-replay source: replay over an in-memory token vector.
 struct TreeReader<'de> {
     tokens: Vec<Token<'de>>,
     pos: usize,
@@ -464,6 +469,13 @@ impl<'de> BytesReader<'de> {
         self.err_at(kind, self.pos)
     }
 
+    fn invalid_type(&self, expected: &'static str, found: &Token<'_>) -> Error {
+        self.err(ErrorKind::InvalidType {
+            expected,
+            found: token_name(found),
+        })
+    }
+
     fn next_token(&mut self, scratch: &mut String) -> Result<Token<'de>> {
         if let Some(t) = self.lookahead.take() {
             return Ok(t);
@@ -476,6 +488,118 @@ impl<'de> BytesReader<'de> {
             self.lookahead = Some(self.lex(scratch)?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
+    }
+
+    fn number(&mut self, scratch: &mut String) -> Result<Number> {
+        if self.lookahead.is_some() {
+            return match self.next_token(scratch)? {
+                Token::Number(n) => Ok(n),
+                other => Err(self.invalid_type("number", &other)),
+            };
+        }
+        let pos = self.skip_ws();
+        if pos >= self.input.len() {
+            return Err(self.err_at(ErrorKind::Eof, pos));
+        }
+        match self.input[pos] {
+            b'-' | b'0'..=b'9' => self.lex_number_value(),
+            _ => {
+                let token = self.next_token(scratch)?;
+                Err(self.invalid_type("number", &token))
+            }
+        }
+    }
+
+    fn string(&mut self, scratch: &mut String) -> Result<Cow<'de, str>> {
+        if self.lookahead.is_some() {
+            return match self.next_token(scratch)? {
+                Token::Str(s) => Ok(s),
+                other => Err(self.invalid_type("string", &other)),
+            };
+        }
+        let pos = self.skip_ws();
+        if pos >= self.input.len() {
+            return Err(self.err_at(ErrorKind::Eof, pos));
+        }
+        match self.input[pos] {
+            b'"' => self.lex_string_str(scratch),
+            _ => {
+                let token = self.next_token(scratch)?;
+                Err(self.invalid_type("string", &token))
+            }
+        }
+    }
+
+    fn bool(&mut self, scratch: &mut String) -> Result<bool> {
+        if self.lookahead.is_some() {
+            return match self.next_token(scratch)? {
+                Token::Bool(b) => Ok(b),
+                other => Err(self.invalid_type("bool", &other)),
+            };
+        }
+        let pos = self.skip_ws();
+        if pos >= self.input.len() {
+            return Err(self.err_at(ErrorKind::Eof, pos));
+        }
+        match self.input[pos] {
+            b't' => {
+                self.lex_literal(pos, b"true", Token::Bool(true))?;
+                Ok(true)
+            }
+            b'f' => {
+                self.lex_literal(pos, b"false", Token::Bool(false))?;
+                Ok(false)
+            }
+            _ => {
+                let token = self.next_token(scratch)?;
+                Err(self.invalid_type("bool", &token))
+            }
+        }
+    }
+
+    fn unit(&mut self, scratch: &mut String) -> Result<()> {
+        if self.lookahead.is_some() {
+            return match self.next_token(scratch)? {
+                Token::Null => Ok(()),
+                other => Err(self.invalid_type("null", &other)),
+            };
+        }
+        let pos = self.skip_ws();
+        if pos >= self.input.len() {
+            return Err(self.err_at(ErrorKind::Eof, pos));
+        }
+        match self.input[pos] {
+            b'n' => {
+                self.lex_literal(pos, b"null", Token::Null)?;
+                Ok(())
+            }
+            _ => {
+                let token = self.next_token(scratch)?;
+                Err(self.invalid_type("null", &token))
+            }
+        }
+    }
+
+    /// `Option` dispatch without a peeked `Token`: `null` is consumed,
+    /// anything else leaves the input untouched for the payload reader.
+    fn option_tag(&mut self, scratch: &mut String) -> Result<OptionTag> {
+        if self.lookahead.is_some() {
+            return match self.peek_token(scratch)? {
+                Token::Null => {
+                    self.next_token(scratch)?;
+                    Ok(OptionTag::None)
+                }
+                _ => Ok(OptionTag::Some),
+            };
+        }
+        let pos = self.skip_ws();
+        if pos < self.input.len() && self.input[pos] == b'n' {
+            self.pos = pos;
+            self.lex_literal(pos, b"null", Token::Null)?;
+            Ok(OptionTag::None)
+        } else {
+            Ok(OptionTag::Some)
+        }
     }
 
     fn lex(&mut self, scratch: &mut String) -> Result<Token<'de>> {
@@ -502,11 +626,11 @@ impl<'de> BytesReader<'de> {
                 self.pos += 1;
                 Ok(Token::EndArray)
             }
-            b'"' => self.lex_string(scratch),
+            b'"' => Ok(Token::Str(self.lex_string_str(scratch)?)),
             b't' => self.lex_literal(pos, b"true", Token::Bool(true)),
             b'f' => self.lex_literal(pos, b"false", Token::Bool(false)),
             b'n' => self.lex_literal(pos, b"null", Token::Null),
-            b'-' | b'0'..=b'9' => self.lex_number(),
+            b'-' | b'0'..=b'9' => Ok(Token::Number(self.lex_number_value()?)),
             other => Err(self.err_at(
                 ErrorKind::Expected {
                     what: "a JSON value",
@@ -559,7 +683,9 @@ impl<'de> BytesReader<'de> {
         Ok(tok)
     }
 
-    fn lex_string(&mut self, scratch: &mut String) -> Result<Token<'de>> {
+    /// Lex a string, returning its content directly (callers that need the
+    /// token wrapper build it themselves).
+    fn lex_string_str(&mut self, scratch: &mut String) -> Result<Cow<'de, str>> {
         let input = self.input;
         let start = self.pos + 1;
         let tail = &input[start..];
@@ -579,13 +705,13 @@ impl<'de> BytesReader<'de> {
         let end = start + relative;
         if input[end] == b'\\' {
             let string = self.unescape(input, start, end, scratch)?;
-            return Ok(Token::Str(Cow::Owned(string)));
+            return Ok(Cow::Owned(string));
         }
         let raw = &input[start..end];
         let string = core::str::from_utf8(raw)
             .map_err(|error| self.err_at(ErrorKind::InvalidUtf8, start + error.valid_up_to()))?;
         self.pos = end + 1;
-        Ok(Token::Str(Cow::Borrowed(string)))
+        Ok(Cow::Borrowed(string))
     }
 
     /// Handle a string containing escapes; `start` is after the opening quote,
@@ -612,14 +738,6 @@ impl<'de> BytesReader<'de> {
                     return Err(self.err_at(ErrorKind::Eof, i));
                 }
                 match input[i] {
-                    b'"' => scratch.push('"'),
-                    b'\\' => scratch.push('\\'),
-                    b'/' => scratch.push('/'),
-                    b'b' => scratch.push('\u{8}'),
-                    b'f' => scratch.push('\u{c}'),
-                    b'n' => scratch.push('\n'),
-                    b'r' => scratch.push('\r'),
-                    b't' => scratch.push('\t'),
                     b'u' => {
                         let hi = parse_hex4(input, i + 1)
                             .ok_or_else(|| self.err_at(ErrorKind::InvalidEscape('u'), i))?;
@@ -651,7 +769,12 @@ impl<'de> BytesReader<'de> {
                             i += 4;
                         }
                     }
-                    other => return Err(self.err_at(ErrorKind::InvalidEscape(other as char), i)),
+                    other => match simple_escape(other) {
+                        Some(c) => scratch.push(c),
+                        None => {
+                            return Err(self.err_at(ErrorKind::InvalidEscape(other as char), i));
+                        }
+                    },
                 }
                 i += 1;
             } else if b < 0x20 {
@@ -669,7 +792,9 @@ impl<'de> BytesReader<'de> {
         Err(self.err_at(ErrorKind::Eof, input.len()))
     }
 
-    fn lex_number(&mut self) -> Result<Token<'de>> {
+    /// Lex a number, returning its value directly (callers that need the
+    /// token wrapper build it themselves).
+    fn lex_number_value(&mut self) -> Result<Number> {
         let input = self.input;
         let start = self.pos;
         let mut i = self.pos;
@@ -722,9 +847,7 @@ impl<'de> BytesReader<'de> {
         }
         let raw = &input[start..i];
         self.pos = i;
-        let n = Number::parse(raw, is_float)
-            .map_err(|_| self.err_at(ErrorKind::InvalidNumber, start))?;
-        Ok(Token::Number(n))
+        Number::parse(raw, is_float).map_err(|_| self.err_at(ErrorKind::InvalidNumber, start))
     }
 
     fn object_key(&mut self, scratch: &mut String) -> Result<Option<Cow<'de, str>>> {
@@ -747,7 +870,7 @@ impl<'de> BytesReader<'de> {
             }
         }
         self.pos = pos;
-        let key = self.lex_string(scratch)?;
+        let key = self.lex_string_str(scratch)?;
         let p2 = self.skip_ws();
         if p2 >= input.len() {
             return Err(self.err_at(ErrorKind::Eof, p2));
@@ -762,10 +885,7 @@ impl<'de> BytesReader<'de> {
             ));
         }
         self.pos = p2 + 1;
-        match key {
-            Token::Str(s) => Ok(Some(s)),
-            _ => Err(self.err_at(ErrorKind::Custom("invalid object key token".into()), pos)),
-        }
+        Ok(Some(key))
     }
 
     fn object_entry_sep(&mut self) -> Result<bool> {
@@ -847,6 +967,14 @@ impl<'de> TreeReader<'de> {
         Error::new(kind, None, None, self.pos)
     }
 
+    /// Type-mismatch error naming the token that was actually found.
+    fn invalid_type(&self, expected: &'static str, found: &Token<'_>) -> Error {
+        self.err(ErrorKind::InvalidType {
+            expected,
+            found: token_name(found),
+        })
+    }
+
     fn next_token(&mut self) -> Result<Token<'de>> {
         if let Some(t) = self.lookahead.take() {
             self.pos += 1;
@@ -868,6 +996,46 @@ impl<'de> TreeReader<'de> {
             self.lookahead = Some(self.tokens[self.pos].clone());
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
+    }
+
+    // Typed reads over the replayed token stream: same signatures as the
+    // byte-reader fast paths so `Decoder` can dispatch uniformly.
+    fn number(&mut self) -> Result<Number> {
+        match self.next_token()? {
+            Token::Number(n) => Ok(n),
+            other => Err(self.invalid_type("number", &other)),
+        }
+    }
+
+    fn string(&mut self) -> Result<Cow<'de, str>> {
+        match self.next_token()? {
+            Token::Str(s) => Ok(s),
+            other => Err(self.invalid_type("string", &other)),
+        }
+    }
+
+    fn bool(&mut self) -> Result<bool> {
+        match self.next_token()? {
+            Token::Bool(b) => Ok(b),
+            other => Err(self.invalid_type("bool", &other)),
+        }
+    }
+
+    fn unit(&mut self) -> Result<()> {
+        match self.next_token()? {
+            Token::Null => Ok(()),
+            other => Err(self.invalid_type("null", &other)),
+        }
+    }
+
+    fn option_tag(&mut self) -> Result<OptionTag> {
+        match self.peek_token()? {
+            Token::Null => {
+                self.next_token()?;
+                Ok(OptionTag::None)
+            }
+            _ => Ok(OptionTag::Some),
+        }
     }
 
     fn object_key(&mut self) -> Result<Option<Cow<'de, str>>> {
@@ -1101,33 +1269,33 @@ impl<'de> Decoder<'de> {
 
     /// Consume `null`.
     pub fn unit(&mut self) -> Result<()> {
-        match self.next_token()? {
-            Token::Null => Ok(()),
-            other => Err(self.invalid_type("null", &other)),
+        match &mut self.inner {
+            Inner::Bytes(r) => r.unit(&mut self.scratch),
+            Inner::Tree(r) => r.unit(),
         }
     }
 
     /// Read a boolean.
     pub fn bool(&mut self) -> Result<bool> {
-        match self.next_token()? {
-            Token::Bool(b) => Ok(b),
-            other => Err(self.invalid_type("bool", &other)),
+        match &mut self.inner {
+            Inner::Bytes(r) => r.bool(&mut self.scratch),
+            Inner::Tree(r) => r.bool(),
         }
     }
 
     /// Read a number.
     pub fn number(&mut self) -> Result<Number> {
-        match self.next_token()? {
-            Token::Number(n) => Ok(n),
-            other => Err(self.invalid_type("number", &other)),
+        match &mut self.inner {
+            Inner::Bytes(r) => r.number(&mut self.scratch),
+            Inner::Tree(r) => r.number(),
         }
     }
 
     /// Read a string (may borrow input).
     pub fn string(&mut self) -> Result<Cow<'de, str>> {
-        match self.next_token()? {
-            Token::Str(s) => Ok(s),
-            other => Err(self.invalid_type("string", &other)),
+        match &mut self.inner {
+            Inner::Bytes(r) => r.string(&mut self.scratch),
+            Inner::Tree(r) => r.string(),
         }
     }
 
@@ -1149,7 +1317,18 @@ impl<'de> Decoder<'de> {
     }
 
     /// Skip any one value (recursive, depth-limited).
+    ///
+    /// Byte inputs dispatch on the source byte directly (no `Token` is
+    /// materialized); replayed token streams use the token path.
     pub fn skip_value(&mut self) -> Result<()> {
+        match &self.inner {
+            Inner::Bytes(_) => self.skip_value_bytes(),
+            Inner::Tree(_) => self.skip_value_tokens(),
+        }
+    }
+
+    /// Token-based skip (tree replay and staged-lookahead byte sources).
+    fn skip_value_tokens(&mut self) -> Result<()> {
         match self.peek_token()? {
             Token::BeginObject => {
                 self.begin_object()?;
@@ -1178,6 +1357,60 @@ impl<'de> Decoder<'de> {
         Ok(())
     }
 
+    fn skip_value_bytes(&mut self) -> Result<()> {
+        if let Inner::Bytes(r) = &self.inner {
+            if r.lookahead.is_some() {
+                return self.skip_value_tokens();
+            }
+        }
+        let byte = match &mut self.inner {
+            Inner::Bytes(r) => {
+                let pos = r.skip_ws();
+                if pos >= r.input.len() {
+                    return Err(r.err_at(ErrorKind::Eof, pos));
+                }
+                r.pos = pos;
+                r.input[pos]
+            }
+            Inner::Tree(_) => unreachable!("dispatch checked above"),
+        };
+        match byte {
+            b'{' => {
+                self.begin_object()?;
+                while self.object_key()?.is_some() {
+                    self.skip_value()?;
+                    if !self.object_entry_sep()? {
+                        break;
+                    }
+                }
+                self.end_object()?;
+            }
+            b'[' => {
+                self.begin_array()?;
+                while self.array_has_more()? {
+                    self.skip_value()?;
+                    if !self.array_entry_sep()? {
+                        break;
+                    }
+                }
+                self.end_array()?;
+            }
+            b'"' => {
+                self.string()?;
+            }
+            b't' | b'f' | b'n' => {
+                self.next_token()?;
+            }
+            b'-' | b'0'..=b'9' => {
+                self.number()?;
+            }
+            _ => {
+                self.next_token()?;
+            }
+        }
+        Ok(())
+    }
+
     fn invalid_type(&self, expected: &'static str, found: &Token<'de>) -> Error {
         let found_name = match found {
             Token::Null => "null",
@@ -1194,40 +1427,6 @@ impl<'de> Decoder<'de> {
             found: found_name,
         })
     }
-}
-
-/// Compute the 1-based line / column of a byte offset.
-fn line_col(input: &[u8], pos: usize) -> (u32, u32) {
-    let pos = pos.min(input.len());
-    let mut line = 1u32;
-    let mut col = 1u32;
-    for &b in &input[..pos] {
-        if b == b'\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
-/// Parse a 4-digit hex value.
-fn parse_hex4(input: &[u8], start: usize) -> Option<u16> {
-    if start + 4 > input.len() {
-        return None;
-    }
-    let mut v: u16 = 0;
-    for &b in &input[start..start + 4] {
-        let d = match b {
-            b'0'..=b'9' => (b - b'0') as u16,
-            b'a'..=b'f' => (b - b'a' + 10) as u16,
-            b'A'..=b'F' => (b - b'A' + 10) as u16,
-            _ => return None,
-        };
-        v = v * 16 + d;
-    }
-    Some(v)
 }
 
 // ---------------------------------------------------------------------------

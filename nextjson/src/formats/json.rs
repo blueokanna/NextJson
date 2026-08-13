@@ -24,7 +24,7 @@ impl Format for Json {
     const BINARY: bool = false;
 
     fn encode<T: NsonSerialize + ?Sized>(self, value: &T) -> Result<Vec<u8>> {
-        let mut encoder = Encoder::for_vec(EncodeConfig::compact());
+        let mut encoder = Encoder::<Vec<u8>>::for_vec(EncodeConfig::compact());
         T::nextencode(value, &mut encoder)?;
         encoder.finish_vec()
     }

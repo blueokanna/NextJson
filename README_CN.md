@@ -63,6 +63,13 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 
 ### 原生 nextencode / nextdecode
 
+设计是 **data-model-first**（而非 AST-first）：类型化解码直接把字节流解码进
+你的字段，零中间树；`Value` 是同一解码器上的可选消费者。公开两种编码策略：
+`Encoder` 每次调用都校验事件协议；`FastEncoder`（`nextencode` / `to_vec` /
+`to_string` / writer 入口使用）信任派生验证过的调用序列，跳过每值检查以换取
+约 2x 编码吞吐。分水岭分析、借用模型（瞬态 / 自有 / 借用）与属性 / 策略分层
+见[设计文档](docs/DESIGN_CN.md)。
+
 ```rust
 use nextjson::{NsonDeserialize, NsonSerialize};
 
@@ -162,6 +169,10 @@ assert_eq!(left, right);
 `FormatDecoder` 之上；同一份实现可服务所有能够表示该值的线格式。多数编码器直接
 发射；TOML 和 YAML 因表顺序要求先收集为 `Value`。不兼容的类型/格式组合按下表
 返回错误。
+
+事件顺序校验是集中式的：格式编码器与跨格式 sink 共用同一个协议状态机，唯一
+参数是该线格式是否有显式数组分隔符（JSON 有，CBOR 没有）。解码侧字节词法器
+按源字节直接服务类型化标量读取，统一 token 流保留给内容重放而不拖累热路径。
 
 ```rust
 use nextjson::formats;

@@ -7,8 +7,8 @@ use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::de::{read_token_tree, Decoder, NsonDeserialize};
-use crate::error::Result;
+use crate::de::{read_token_tree, DecodeSlot, Decoder, NsonDeserialize};
+use crate::error::{FormatError, Result};
 use crate::ser::NsonSerialize;
 use crate::value::Value;
 
@@ -24,15 +24,22 @@ pub use crate::ser::NsonSerialize as NsonSerializeReexport;
 /// A successfully decoded value is dropped automatically unless it is moved
 /// into the completed parent value with [`take`](InitSlot::take). This gives
 /// partially decoded structs and duplicate fields normal Rust drop semantics.
+///
+/// The slot *is* a [`DecodeSlot`](crate::de::DecodeSlot): typed fields decode
+/// directly into their own storage via `nextdecode_into` instead of building
+/// an intermediate value and moving it, so the generic field path costs one
+/// `Option` (the slot) rather than two.
 #[doc(hidden)]
 pub struct InitSlot<T> {
-    value: Option<T>,
+    slot: DecodeSlot<T>,
 }
 
 impl<T> InitSlot<T> {
     /// Create an empty field slot.
     pub const fn new() -> Self {
-        InitSlot { value: None }
+        InitSlot {
+            slot: DecodeSlot::new(),
+        }
     }
 
     /// Next-decode a field directly into this slot.
@@ -43,13 +50,18 @@ impl<T> InitSlot<T> {
     where
         T: NsonDeserialize<'de>,
     {
-        self.value = Some(T::nextdecode(decoder)?);
+        T::nextdecode_into(decoder, &mut self.slot)?;
+        if !self.slot.is_initialized() {
+            return Err(FormatError::custom(
+                "NsonDeserialize::nextdecode_into returned success without writing a value",
+            ));
+        }
         Ok(())
     }
 
     /// Replace the slot with an already constructed value.
     pub fn write(&mut self, value: T) {
-        self.value = Some(value);
+        self.slot.write(value);
     }
 
     /// Move the initialized value out of the slot.
@@ -57,7 +69,7 @@ impl<T> InitSlot<T> {
     /// # Panics
     /// Panics if the generated decoder did not initialize this field.
     pub fn take(&mut self) -> T {
-        self.value
+        self.slot
             .take()
             .expect("nextjson derive: uninitialized field slot")
     }

@@ -27,7 +27,7 @@ impl Format for Cbor {
     const BINARY: bool = true;
 
     fn encode<T: NsonSerialize + ?Sized>(self, value: &T) -> Result<Vec<u8>> {
-        let mut encoder = Encoder::for_vec(EncodeConfig::compact());
+        let mut encoder = Encoder::<Vec<u8>>::for_vec(EncodeConfig::compact());
         T::nextencode(value, &mut encoder)?;
         let json = encoder.finish_vec()?;
         cross_format::json_to_cbor(&json)

@@ -2,8 +2,9 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::cross_format::{ContainerKind, EventSink, StructureState};
+use crate::cross_format::EventSink;
 use crate::error::{Error, ErrorKind, Result};
+use crate::event_state::{EventState, Kind};
 use crate::number::Number;
 use crate::write::Write;
 
@@ -18,7 +19,7 @@ const FLUSH_THRESHOLD: usize = 8192;
 pub struct CborSink<W: Write> {
     writer: W,
     buffer: Vec<u8>,
-    structure: StructureState,
+    structure: EventState,
 }
 
 impl<W: Write> CborSink<W> {
@@ -27,7 +28,7 @@ impl<W: Write> CborSink<W> {
         CborSink {
             writer,
             buffer: Vec::with_capacity(1024),
-            structure: StructureState::new(),
+            structure: EventState::new(false),
         }
     }
 
@@ -142,17 +143,17 @@ impl<W: Write> EventSink for CborSink<W> {
     }
 
     fn begin_array(&mut self) -> Result<()> {
-        self.structure.begin(ContainerKind::Array)?;
+        self.structure.begin(Kind::Array)?;
         self.push(0x9f)
     }
 
     fn end_array(&mut self) -> Result<()> {
-        self.structure.end(ContainerKind::Array)?;
+        self.structure.end(Kind::Array)?;
         self.push(0xff)
     }
 
     fn begin_object(&mut self) -> Result<()> {
-        self.structure.begin(ContainerKind::Object)?;
+        self.structure.begin(Kind::Object)?;
         self.push(0xbf)
     }
 
@@ -163,7 +164,7 @@ impl<W: Write> EventSink for CborSink<W> {
     }
 
     fn end_object(&mut self) -> Result<()> {
-        self.structure.end(ContainerKind::Object)?;
+        self.structure.end(Kind::Object)?;
         self.push(0xff)
     }
 }

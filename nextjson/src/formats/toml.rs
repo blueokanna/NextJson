@@ -729,13 +729,9 @@ impl<'a> Parser<'a> {
         for _ in 0..n {
             self.pos += 1;
             let b = self.text.as_bytes().get(self.pos).copied().unwrap_or(0);
-            let d = match b {
-                b'0'..=b'9' => (b - b'0') as u32,
-                b'a'..=b'f' => (b - b'a' + 10) as u32,
-                b'A'..=b'F' => (b - b'A' + 10) as u32,
-                _ => return Err(Error::custom("toml: invalid hex escape")),
-            };
-            v = v * 16 + d;
+            let d = crate::lex::hex_digit(b)
+                .ok_or_else(|| Error::custom("toml: invalid hex escape"))?;
+            v = v * 16 + d as u32;
         }
         Ok(v)
     }

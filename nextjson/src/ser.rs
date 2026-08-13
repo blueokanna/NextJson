@@ -20,6 +20,7 @@ use core::ops::{Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive};
 use core::time::Duration;
 
 use crate::error::{Error, ErrorKind, FormatError, Result};
+use crate::event_state::{EventState, Kind};
 use crate::map::Map;
 use crate::number::Number;
 use crate::schema::{NsonSchema, TypeSchema};
@@ -211,60 +212,31 @@ pub trait FormatEncoder {
     }
 }
 
-enum EventFrame {
-    Array { ready: bool },
-    Object { pending_value: bool },
-}
-
-/// Validates the format-neutral serialization event protocol before events
-/// reach a concrete codec.
-pub(crate) struct CheckedEncoder<'a, E: FormatEncoder + ?Sized> {
+/// The protocol state itself lives in
+/// The protocol state itself lives in `event_state::EventState` so it is
+/// shared with the cross-format sinks; this wrapper only maps
+/// `FormatEncoder` calls onto it and forwards them to the inner codec.
+pub struct CheckedEncoder<'a, E: FormatEncoder + ?Sized> {
     inner: &'a mut E,
-    frames: Vec<EventFrame>,
-    root_written: bool,
+    state: EventState,
 }
 
 impl<'a, E: FormatEncoder + ?Sized> CheckedEncoder<'a, E> {
     pub(crate) fn new(inner: &'a mut E) -> Self {
         CheckedEncoder {
             inner,
-            frames: Vec::new(),
-            root_written: false,
+            // Format encoders emit explicit separators between array
+            // elements, so arrays must alternate separator / value.
+            state: EventState::new(true),
         }
     }
 
     fn value(&mut self) -> Result<(), E::Error> {
-        match self.frames.last_mut() {
-            Some(EventFrame::Array { ready }) if *ready => {
-                *ready = false;
-                Ok(())
-            }
-            Some(EventFrame::Array { .. }) => {
-                Err(Error::custom("array separator required before value").into())
-            }
-            Some(EventFrame::Object { pending_value }) if *pending_value => {
-                *pending_value = false;
-                Ok(())
-            }
-            Some(EventFrame::Object { .. }) => {
-                Err(Error::custom("object key required before value").into())
-            }
-            None if self.root_written => Err(Error::custom("multiple root values").into()),
-            None => {
-                self.root_written = true;
-                Ok(())
-            }
-        }
+        self.state.value().map(drop).map_err(Into::into)
     }
 
-    pub(crate) fn finish(self) -> Result<(), E::Error> {
-        if !self.root_written {
-            return Err(Error::custom("encoder did not receive a root value").into());
-        }
-        if !self.frames.is_empty() {
-            return Err(Error::custom("encoder finished inside a container").into());
-        }
-        Ok(())
+    pub fn finish(self) -> Result<(), E::Error> {
+        self.state.finish().map_err(Into::into)
     }
 }
 
@@ -272,77 +244,33 @@ impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
     type Error = E::Error;
 
     fn begin_array(&mut self) -> Result<(), E::Error> {
-        self.value()?;
-        self.inner.begin_array()?;
-        self.frames.push(EventFrame::Array { ready: false });
-        Ok(())
+        self.state.begin(Kind::Array).map(drop)?;
+        self.inner.begin_array()
     }
 
     fn separator(&mut self) -> Result<(), E::Error> {
-        match self.frames.last_mut() {
-            Some(EventFrame::Array { ready }) if !*ready => *ready = true,
-            Some(EventFrame::Array { .. }) => {
-                return Err(Error::custom("array value required after separator").into());
-            }
-            _ => return Err(Error::custom("array separator outside array").into()),
-        }
+        self.state.separator()?;
         self.inner.separator()
     }
 
     fn end_array(&mut self) -> Result<(), E::Error> {
-        match self.frames.last() {
-            Some(EventFrame::Array { ready: false }) => {}
-            Some(EventFrame::Array { ready: true }) => {
-                return Err(Error::custom("array ended after separator without value").into());
-            }
-            Some(EventFrame::Object { .. }) => {
-                return Err(Error::custom("mismatched array end inside object").into());
-            }
-            None => return Err(Error::custom("array end without matching start").into()),
-        }
-        self.inner.end_array()?;
-        self.frames.pop();
-        Ok(())
+        self.state.end(Kind::Array)?;
+        self.inner.end_array()
     }
 
     fn begin_object(&mut self) -> Result<(), E::Error> {
-        self.value()?;
-        self.inner.begin_object()?;
-        self.frames.push(EventFrame::Object {
-            pending_value: false,
-        });
-        Ok(())
+        self.state.begin(Kind::Object).map(drop)?;
+        self.inner.begin_object()
     }
 
     fn key(&mut self, key: &str) -> Result<(), E::Error> {
-        match self.frames.last_mut() {
-            Some(EventFrame::Object { pending_value }) if !*pending_value => {
-                *pending_value = true;
-            }
-            Some(EventFrame::Object { .. }) => {
-                return Err(Error::custom("object value required after key").into());
-            }
-            _ => return Err(Error::custom("object key outside object").into()),
-        }
+        self.state.key()?;
         self.inner.key(key)
     }
 
     fn end_object(&mut self) -> Result<(), E::Error> {
-        match self.frames.last() {
-            Some(EventFrame::Object {
-                pending_value: false,
-            }) => {}
-            Some(EventFrame::Object {
-                pending_value: true,
-            }) => return Err(Error::custom("object ended before keyed value").into()),
-            Some(EventFrame::Array { .. }) => {
-                return Err(Error::custom("mismatched object end inside array").into());
-            }
-            None => return Err(Error::custom("object end without matching start").into()),
-        }
-        self.inner.end_object()?;
-        self.frames.pop();
-        Ok(())
+        self.state.end(Kind::Object)?;
+        self.inner.end_object()
     }
 
     fn write_null(&mut self) -> Result<(), E::Error> {
@@ -447,15 +375,7 @@ impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
     }
 
     fn map_key<K: NsonSerialize>(&mut self, key: &K) -> Result<(), E::Error> {
-        match self.frames.last_mut() {
-            Some(EventFrame::Object { pending_value }) if !*pending_value => {
-                *pending_value = true;
-            }
-            Some(EventFrame::Object { .. }) => {
-                return Err(Error::custom("object value required after key").into());
-            }
-            _ => return Err(Error::custom("object key outside object").into()),
-        }
+        self.state.key()?;
         self.inner.map_key(key)
     }
 
@@ -464,7 +384,7 @@ impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
     }
 }
 
-impl<W: Write> FormatEncoder for Encoder<W> {
+impl<W: Write, const VALIDATE: bool> FormatEncoder for Encoder<W, VALIDATE> {
     type Error = crate::error::Error;
 
     fn begin_array(&mut self) -> Result<(), Self::Error> {
@@ -554,11 +474,33 @@ pub trait NsonSerialize: NsonSchema {
     fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error>;
 }
 
+/// Trusted JSON encoder variant: skips per-value event-protocol validation.
+///
+/// Use this when the caller provably follows the serialization protocol —
+/// the repository-owned derive macros do — in exchange for ~2x encoding
+/// throughput. Misuse (a hand-written implementation emitting values out of
+/// order) silently produces malformed JSON instead of an error, so this is
+/// the wrong type for unverified callers. See [`Encoder`].
+pub type FastEncoder<W> = Encoder<W, false>;
+
 /// JSON encoder with internal buffering and indentation state.
 ///
 /// All bytes are buffered in an internal `Vec<u8>` and flushed to `W` once a
 /// threshold is crossed, keeping memory bounded.
-pub struct Encoder<W: Write> {
+///
+/// The `VALIDATE` const parameter selects the event-protocol policy:
+///
+/// - `Encoder<W>` (the default, `VALIDATE = true`) checks every call against
+///   the serialization event protocol and reports misuse as an error. This
+///   is the safe surface for hand-written `NsonSerialize` implementations.
+/// - `Encoder<W, false>` trusts the caller to follow the protocol (the
+///   repository-owned derive macros are verified to do so) and skips every
+///   per-value check. The top-level `nextencode` / `to_vec` / `to_string`
+///   entry points use this fast path.
+///
+/// Both emit byte-identical output for protocol-conforming callers; the
+/// fast path trades misuse diagnostics for ~2x encoding throughput.
+pub struct Encoder<W: Write, const VALIDATE: bool = true> {
     writer: W,
     buf: Vec<u8>,
     depth: usize,
@@ -577,7 +519,7 @@ enum EncodeFrame {
 
 const FLUSH_THRESHOLD: usize = 8192;
 
-impl<W: Write> Encoder<W> {
+impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     /// Create an encoder with the default (compact) config.
     pub fn new(writer: W) -> Self {
         Encoder::with_config(writer, EncodeConfig::default())
@@ -600,7 +542,9 @@ impl<W: Write> Encoder<W> {
 
     /// Flush the internal buffer and return the underlying writer.
     pub fn finish(mut self) -> Result<W> {
-        self.validate_finished()?;
+        if VALIDATE {
+            self.validate_finished()?;
+        }
         self.writer.write_all(&self.buf)?;
         self.buf.clear();
         self.writer.flush()?;
@@ -629,7 +573,9 @@ impl<W: Write> Encoder<W> {
 
     /// Open an object: write `{`.
     pub fn begin_object(&mut self) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         self.buf.push(b'{');
         self.frames.push(EncodeFrame::Object {
             first: true,
@@ -645,19 +591,21 @@ impl<W: Write> Encoder<W> {
 
     /// Close an object: write `}`.
     pub fn end_object(&mut self) -> Result<()> {
-        match self.frames.last() {
-            Some(EncodeFrame::Object {
-                pending_value: false,
-                ..
-            }) => {}
-            Some(EncodeFrame::Object {
-                pending_value: true,
-                ..
-            }) => return Err(Error::custom("object ended before keyed value")),
-            Some(EncodeFrame::Array { .. }) => {
-                return Err(Error::custom("mismatched object end inside array"));
+        if VALIDATE {
+            match self.frames.last() {
+                Some(EncodeFrame::Object {
+                    pending_value: false,
+                    ..
+                }) => {}
+                Some(EncodeFrame::Object {
+                    pending_value: true,
+                    ..
+                }) => return Err(Error::custom("object ended before keyed value")),
+                Some(EncodeFrame::Array { .. }) => {
+                    return Err(Error::custom("mismatched object end inside array"));
+                }
+                None => return Err(Error::custom("object end without matching start")),
             }
-            None => return Err(Error::custom("object end without matching start")),
         }
         self.frames.pop();
         self.depth -= 1;
@@ -671,7 +619,9 @@ impl<W: Write> Encoder<W> {
 
     /// Open an array: write `[`.
     pub fn begin_array(&mut self) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         self.buf.push(b'[');
         self.frames.push(EncodeFrame::Array {
             first: true,
@@ -687,15 +637,17 @@ impl<W: Write> Encoder<W> {
 
     /// Close an array: write `]`.
     pub fn end_array(&mut self) -> Result<()> {
-        match self.frames.last() {
-            Some(EncodeFrame::Array { ready: false, .. }) => {}
-            Some(EncodeFrame::Array { ready: true, .. }) => {
-                return Err(Error::custom("array ended after separator without value"));
+        if VALIDATE {
+            match self.frames.last() {
+                Some(EncodeFrame::Array { ready: false, .. }) => {}
+                Some(EncodeFrame::Array { ready: true, .. }) => {
+                    return Err(Error::custom("array ended after separator without value"));
+                }
+                Some(EncodeFrame::Object { .. }) => {
+                    return Err(Error::custom("mismatched array end inside object"));
+                }
+                None => return Err(Error::custom("array end without matching start")),
             }
-            Some(EncodeFrame::Object { .. }) => {
-                return Err(Error::custom("mismatched array end inside object"));
-            }
-            None => return Err(Error::custom("array end without matching start")),
         }
         self.frames.pop();
         self.depth -= 1;
@@ -709,21 +661,28 @@ impl<W: Write> Encoder<W> {
 
     /// Write an object key: separator + `"key":`.
     pub fn key(&mut self, key: &str) -> Result<()> {
-        let first = match self.frames.last_mut() {
-            Some(EncodeFrame::Object {
-                first,
-                pending_value,
-            }) if !*pending_value => {
-                *pending_value = true;
-                core::mem::replace(first, false)
+        let first = if VALIDATE {
+            match self.frames.last_mut() {
+                Some(EncodeFrame::Object {
+                    first,
+                    pending_value,
+                }) if !*pending_value => {
+                    *pending_value = true;
+                    core::mem::replace(first, false)
+                }
+                Some(EncodeFrame::Object { .. }) => {
+                    return Err(Error::custom("object value required after key"));
+                }
+                _ => return Err(Error::custom("object key outside object")),
             }
-            Some(EncodeFrame::Object { .. }) => {
-                return Err(Error::custom("object value required after key"));
+        } else {
+            match self.frames.last_mut() {
+                Some(EncodeFrame::Object { first, .. }) => core::mem::replace(first, false),
+                _ => return Err(Error::custom("fast encoder: object key outside object")),
             }
-            _ => return Err(Error::custom("object key outside object")),
         };
         self.write_separator(first);
-        self.write_str_inner(key)?;
+        write_escaped_str(&mut self.buf, key, self.escape_non_ascii);
         self.buf.push(b':');
         if self.pretty {
             self.buf.push(b' ');
@@ -736,15 +695,22 @@ impl<W: Write> Encoder<W> {
     /// The first entry of a container produces nothing; subsequent entries
     /// produce `,` (plus newline and indent in pretty mode).
     pub fn separator(&mut self) -> Result<()> {
-        let first = match self.frames.last_mut() {
-            Some(EncodeFrame::Array { first, ready }) if !*ready => {
-                *ready = true;
-                core::mem::replace(first, false)
+        let first = if VALIDATE {
+            match self.frames.last_mut() {
+                Some(EncodeFrame::Array { first, ready }) if !*ready => {
+                    *ready = true;
+                    core::mem::replace(first, false)
+                }
+                Some(EncodeFrame::Array { .. }) => {
+                    return Err(Error::custom("array value required after separator"));
+                }
+                _ => return Err(Error::custom("array separator outside array")),
             }
-            Some(EncodeFrame::Array { .. }) => {
-                return Err(Error::custom("array value required after separator"));
+        } else {
+            match self.frames.last_mut() {
+                Some(EncodeFrame::Array { first, .. }) => core::mem::replace(first, false),
+                _ => return Err(Error::custom("fast encoder: array separator outside array")),
             }
-            _ => return Err(Error::custom("array separator outside array")),
         };
         self.write_separator(first);
         Ok(())
@@ -760,6 +726,8 @@ impl<W: Write> Encoder<W> {
         }
     }
 
+    /// Validate that a value may be written now (validating policy only).
+    #[inline]
     fn start_value(&mut self) -> Result<()> {
         match self.frames.last_mut() {
             Some(EncodeFrame::Array { ready, .. }) if *ready => {
@@ -807,14 +775,18 @@ impl<W: Write> Encoder<W> {
 
     /// Write `null`.
     pub fn write_null(&mut self) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         self.buf.extend_from_slice(b"null");
         self.maybe_flush()
     }
 
     /// Write a boolean.
     pub fn write_bool(&mut self, v: bool) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         self.buf
             .extend_from_slice(if v { b"true" } else { b"false" });
         self.maybe_flush()
@@ -822,8 +794,10 @@ impl<W: Write> Encoder<W> {
 
     /// Write a string (auto-escaped).
     pub fn write_str(&mut self, s: &str) -> Result<()> {
-        self.start_value()?;
-        self.write_str_inner(s)?;
+        if VALIDATE {
+            self.start_value()?;
+        }
+        write_escaped_str(&mut self.buf, s, self.escape_non_ascii);
         self.maybe_flush()
     }
 
@@ -846,28 +820,36 @@ impl<W: Write> Encoder<W> {
 
     /// Write an `i64`.
     pub fn write_i64(&mut self, v: i64) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         write_i64_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u64`.
     pub fn write_u64(&mut self, v: u64) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         write_u64_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write an `i128`.
     pub fn write_i128(&mut self, v: i128) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         write_signed_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
 
     /// Write a `u128`.
     pub fn write_u128(&mut self, v: u128) -> Result<()> {
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         write_unsigned_integer_into(&mut self.buf, v);
         self.maybe_flush()
     }
@@ -880,7 +862,9 @@ impl<W: Write> Encoder<W> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         write_float_into(&mut self.buf, v)?;
         self.maybe_flush()
     }
@@ -890,54 +874,15 @@ impl<W: Write> Encoder<W> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
         }
-        self.start_value()?;
+        if VALIDATE {
+            self.start_value()?;
+        }
         write_float_into(&mut self.buf, v)?;
         self.maybe_flush()
     }
-
-    fn write_str_inner(&mut self, s: &str) -> Result<()> {
-        self.buf.push(b'"');
-        let bytes = s.as_bytes();
-        if bytes.iter().all(|&byte| {
-            byte >= 0x20 && byte != b'"' && byte != b'\\' && (!self.escape_non_ascii || byte < 0x80)
-        }) {
-            self.buf.extend_from_slice(bytes);
-            self.buf.push(b'"');
-            return Ok(());
-        }
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            match b {
-                b'"' => self.buf.extend_from_slice(b"\\\""),
-                b'\\' => self.buf.extend_from_slice(b"\\\\"),
-                0x08 => self.buf.extend_from_slice(b"\\b"),
-                0x0C => self.buf.extend_from_slice(b"\\f"),
-                b'\n' => self.buf.extend_from_slice(b"\\n"),
-                b'\r' => self.buf.extend_from_slice(b"\\r"),
-                b'\t' => self.buf.extend_from_slice(b"\\t"),
-                0x00..=0x1F => {
-                    self.buf.extend_from_slice(b"\\u00");
-                    const HEX: &[u8; 16] = b"0123456789abcdef";
-                    self.buf.push(HEX[(b >> 4) as usize]);
-                    self.buf.push(HEX[(b & 0xF) as usize]);
-                }
-                _ if self.escape_non_ascii && b >= 0x80 => {
-                    let ch = s[i..].chars().next().expect("valid utf-8");
-                    write_unicode_escape(&mut self.buf, ch);
-                    i += ch.len_utf8();
-                    continue;
-                }
-                _ => self.buf.push(b),
-            }
-            i += 1;
-        }
-        self.buf.push(b'"');
-        Ok(())
-    }
 }
 
-impl Encoder<Vec<u8>> {
+impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
     pub(crate) fn for_vec(config: EncodeConfig) -> Self {
         let mut encoder = Encoder::with_config(Vec::new(), config);
         encoder.flush_threshold = usize::MAX;
@@ -945,10 +890,57 @@ impl Encoder<Vec<u8>> {
     }
 
     pub(crate) fn finish_vec(mut self) -> Result<Vec<u8>> {
-        self.validate_finished()?;
+        if VALIDATE {
+            self.validate_finished()?;
+        }
         debug_assert!(self.writer.is_empty());
         Ok(core::mem::take(&mut self.buf))
     }
+}
+
+/// Write `"..."` with JSON escaping into `buf`.
+///
+/// Shared by the encoder (for values and object keys) and the cross-format
+/// JSON sink; kept infallible because escaping can only write valid UTF-8
+/// into an unbounded byte buffer.
+fn write_escaped_str(buf: &mut Vec<u8>, s: &str, escape_non_ascii: bool) {
+    buf.push(b'"');
+    let bytes = s.as_bytes();
+    if bytes.iter().all(|&byte| {
+        byte >= 0x20 && byte != b'"' && byte != b'\\' && (!escape_non_ascii || byte < 0x80)
+    }) {
+        buf.extend_from_slice(bytes);
+        buf.push(b'"');
+        return;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' => buf.extend_from_slice(b"\\\""),
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            0x08 => buf.extend_from_slice(b"\\b"),
+            0x0C => buf.extend_from_slice(b"\\f"),
+            b'\n' => buf.extend_from_slice(b"\\n"),
+            b'\r' => buf.extend_from_slice(b"\\r"),
+            b'\t' => buf.extend_from_slice(b"\\t"),
+            0x00..=0x1F => {
+                buf.extend_from_slice(b"\\u00");
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                buf.push(HEX[(b >> 4) as usize]);
+                buf.push(HEX[(b & 0xF) as usize]);
+            }
+            _ if escape_non_ascii && b >= 0x80 => {
+                let ch = s[i..].chars().next().expect("valid utf-8");
+                write_unicode_escape(buf, ch);
+                i += ch.len_utf8();
+                continue;
+            }
+            _ => buf.push(b),
+        }
+        i += 1;
+    }
+    buf.push(b'"');
 }
 
 /// Write a char as `\uXXXX` (surrogate pair when needed).
@@ -971,6 +963,12 @@ fn write_unicode_escape(buf: &mut Vec<u8>, ch: char) {
     }
 }
 
+/// Two decimal digits per slot: `DIGITS2[10 * a + b]` is the byte pair
+/// `"ab"`. Integer output consumes one 100-division (a single hardware
+/// `div` when LLVM pairs it with the `% 100`) per *two* digits instead of
+/// one `div` per digit, halving the division count on the hot path.
+static DIGITS2: &[u8; 200] = b"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+
 /// Integer output using a stack buffer (no allocation).
 ///
 /// The `u64` path is deliberately separate from the `u128` path: widening a
@@ -979,15 +977,30 @@ fn write_unicode_escape(buf: &mut Vec<u8>, ch: char) {
 /// instruction), several times slower than the native `u64` `div`. Integer
 /// values dominate JSON payloads, so the native-width path is the hot one.
 fn write_u64_into(buf: &mut Vec<u8>, mut value: u64) {
+    // Fast single-digit path for the most common small values: no table
+    // load, no pair-cleanup branch.
+    if value < 10 {
+        buf.push(b'0' + value as u8);
+        return;
+    }
     let mut digits = [0_u8; 20];
     let mut cursor = digits.len();
-    loop {
+    while value >= 100 {
+        let r = (value % 100) as usize;
+        value /= 100;
+        cursor -= 2;
+        digits[cursor] = DIGITS2[2 * r];
+        digits[cursor + 1] = DIGITS2[2 * r + 1];
+    }
+    // One full pair (10..=99) or a single leading digit remains.
+    if value >= 10 {
+        let r = value as usize;
+        cursor -= 2;
+        digits[cursor] = DIGITS2[2 * r];
+        digits[cursor + 1] = DIGITS2[2 * r + 1];
+    } else {
         cursor -= 1;
-        digits[cursor] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
+        digits[cursor] = b'0' + value as u8;
     }
     buf.extend_from_slice(&digits[cursor..]);
 }
@@ -1005,13 +1018,21 @@ fn write_i64_into(buf: &mut Vec<u8>, value: i64) {
 fn write_unsigned_integer_into(buf: &mut Vec<u8>, mut value: u128) {
     let mut digits = [0_u8; 39];
     let mut cursor = digits.len();
-    loop {
+    while value >= 100 {
+        let r = (value % 100) as usize;
+        value /= 100;
+        cursor -= 2;
+        digits[cursor] = DIGITS2[2 * r];
+        digits[cursor + 1] = DIGITS2[2 * r + 1];
+    }
+    if value >= 10 {
+        let r = value as usize;
+        cursor -= 2;
+        digits[cursor] = DIGITS2[2 * r];
+        digits[cursor + 1] = DIGITS2[2 * r + 1];
+    } else {
         cursor -= 1;
-        digits[cursor] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
+        digits[cursor] = b'0' + value as u8;
     }
     buf.extend_from_slice(&digits[cursor..]);
 }
@@ -1415,7 +1436,7 @@ impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSerialize for std::collection
 /// their JSON spelling as the key text (matching serde_json). The default
 /// [`FormatEncoder::map_key`] implementation routes through this.
 fn key_to_str<K: NsonSerialize>(k: &K) -> Result<String> {
-    let mut encoder = Encoder::new(Vec::new());
+    let mut encoder = Encoder::<Vec<u8>>::new(Vec::new());
     K::nextencode(k, &mut encoder)?;
     let bytes = encoder.finish()?;
     if bytes.first() == Some(&b'"') {
@@ -1731,8 +1752,15 @@ mod tests {
             1,
             9,
             10,
+            11,
             99,
             100,
+            101,
+            999,
+            1000,
+            1001,
+            9999,
+            10000,
             u64::MAX,
             u64::MAX - 1,
             123_456_789_012_345,
@@ -1743,18 +1771,39 @@ mod tests {
             write_unsigned_integer_into(&mut wide, value as u128);
             assert_eq!(native, wide, "u64 {value}");
         }
-        for value in [i64::MIN, i64::MIN + 1, -1_i64, -10, i64::MAX, 0_i64] {
+        for value in [
+            i64::MIN,
+            i64::MIN + 1,
+            -1_i64,
+            -10,
+            -11,
+            -99,
+            -100,
+            -999,
+            -1000,
+            i64::MAX,
+            0_i64,
+        ] {
             let mut native = Vec::new();
             write_i64_into(&mut native, value);
             let mut wide = Vec::new();
             write_signed_integer_into(&mut wide, value as i128);
             assert_eq!(native, wide, "i64 {value}");
         }
+        // The two-digit table itself must be exactly "00"..="99".
+        assert_eq!(DIGITS2.len(), 200);
+        for value in 0..100u8 {
+            assert_eq!(
+                &DIGITS2[2 * value as usize..2 * value as usize + 2],
+                &[b'0' + value / 10, b'0' + value % 10],
+                "DIGITS2[{value}]"
+            );
+        }
     }
 
     #[test]
     fn string_escaping() {
-        let mut e = Encoder::new(Vec::new());
+        let mut e = Encoder::<_, true>::new(Vec::new());
         e.write_str("\"\\\n\t\u{1}\u{1f4a9}").unwrap();
         let out = e.finish().unwrap();
         assert_eq!(out, b"\"\\\"\\\\\\n\\t\\u0001\xf0\x9f\x92\xa9\"");
@@ -1762,8 +1811,10 @@ mod tests {
 
     #[test]
     fn escape_non_ascii() {
-        let mut e =
-            Encoder::with_config(Vec::new(), EncodeConfig::default().escape_non_ascii(true));
+        let mut e = Encoder::<_, true>::with_config(
+            Vec::new(),
+            EncodeConfig::default().escape_non_ascii(true),
+        );
         e.write_str("\u{e9}\u{1f4a9}").unwrap();
         let out = e.finish().unwrap();
         assert_eq!(out, b"\"\\u00e9\\ud83d\\udca9\"");
@@ -1771,22 +1822,22 @@ mod tests {
 
     #[test]
     fn non_finite_errors() {
-        let mut e = Encoder::new(Vec::new());
+        let mut e = Encoder::<_, true>::new(Vec::new());
         assert!(e.write_f64(f64::NAN).is_err());
-        let mut e = Encoder::new(Vec::new());
+        let mut e = Encoder::<_, true>::new(Vec::new());
         assert!(e.write_f64(f64::INFINITY).is_err());
     }
 
     #[test]
     fn f32_uses_its_own_shortest_representation() {
-        let mut encoder = Encoder::new(Vec::new());
+        let mut encoder = Encoder::<_, true>::new(Vec::new());
         encoder.write_f32(1.2_f32).unwrap();
         assert_eq!(encoder.finish().unwrap(), b"1.2");
     }
 
     #[test]
     fn pretty_roundtrip() {
-        let mut e = Encoder::with_config(Vec::new(), EncodeConfig::pretty());
+        let mut e = Encoder::<_, true>::with_config(Vec::new(), EncodeConfig::pretty());
         e.begin_object().unwrap();
         e.key("a").unwrap();
         e.write_i64(1).unwrap();
@@ -1802,24 +1853,24 @@ mod tests {
 
     #[test]
     fn rejects_invalid_encoding_event_order() {
-        let mut encoder = Encoder::new(Vec::new());
+        let mut encoder = Encoder::<_, true>::new(Vec::new());
         assert!(encoder.end_array().is_err());
 
-        let mut encoder = Encoder::new(Vec::new());
+        let mut encoder = Encoder::<_, true>::new(Vec::new());
         encoder.begin_array().unwrap();
         assert!(encoder.write_null().is_err());
         assert!(encoder.end_object().is_err());
 
-        let mut encoder = Encoder::new(Vec::new());
+        let mut encoder = Encoder::<_, true>::new(Vec::new());
         encoder.begin_object().unwrap();
         encoder.key("pending").unwrap();
         assert!(encoder.end_object().is_err());
 
-        let mut encoder = Encoder::new(Vec::new());
+        let mut encoder = Encoder::<_, true>::new(Vec::new());
         encoder.write_null().unwrap();
         assert!(encoder.write_bool(true).is_err());
 
-        let encoder = Encoder::new(Vec::new());
+        let encoder = Encoder::<_, true>::new(Vec::new());
         assert!(encoder.finish().is_err());
     }
 }

@@ -29,7 +29,7 @@ impl Format for Json5 {
     const BINARY: bool = false;
 
     fn encode<T: NsonSerialize + ?Sized>(self, value: &T) -> Result<Vec<u8>> {
-        let mut encoder = Encoder::for_vec(EncodeConfig::compact());
+        let mut encoder = Encoder::<Vec<u8>>::for_vec(EncodeConfig::compact());
         T::nextencode(value, &mut encoder)?;
         encoder.finish_vec()
     }
@@ -229,13 +229,9 @@ impl<'de> Json5Decoder<'de> {
             if self.pos >= self.input.len() {
                 return Err(Error::custom("json5: truncated hex escape"));
             }
-            let d = match self.input[self.pos] {
-                b'0'..=b'9' => (self.input[self.pos] - b'0') as u16,
-                b'a'..=b'f' => (self.input[self.pos] - b'a' + 10) as u16,
-                b'A'..=b'F' => (self.input[self.pos] - b'A' + 10) as u16,
-                _ => return Err(Error::custom("json5: invalid hex escape")),
-            };
-            v = v * 16 + d;
+            let d = crate::lex::hex_digit(self.input[self.pos])
+                .ok_or_else(|| Error::custom("json5: invalid hex escape"))?;
+            v = v * 16 + d as u16;
             self.pos += 1;
         }
         Ok(v)

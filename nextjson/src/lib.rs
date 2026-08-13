@@ -77,6 +77,13 @@
 //! 6. **Streaming cross-format relay** - JSON and the JSON-compatible CBOR
 //!    profile exchange borrowed structural events without an intermediate
 //!    [`Value`].
+//! 7. **One validated event protocol** - every format encoder and both
+//!    cross-format sinks validate container / key / value ordering through a
+//!    single shared state machine, parameterized only by whether the wire
+//!    format has explicit array separators (JSON does, CBOR does not). The
+//!    byte lexer additionally serves typed scalar reads (`number`, `string`,
+//!    `bool`, `Option` dispatch) directly from the source byte, so the token
+//!    stream stays available for content replay without taxing the hot path.
 //!
 //! ## Safety and resource limits
 //!
@@ -109,7 +116,7 @@ pub use crate::bytes::Bytes;
 pub use crate::de::{
     DecodeConfig, DecodeSlot, Decoder, FormatDecoder, NsonDeserialize, OptionTag, Token,
 };
-pub use crate::encoding::{EncodeConfig, Encoder};
+pub use crate::encoding::{EncodeConfig, Encoder, FastEncoder};
 pub use crate::error::{Error, FormatError, Result};
 pub use crate::map::Map;
 pub use crate::number::Number;
@@ -127,8 +134,10 @@ pub mod cross_format;
 pub mod de;
 pub mod encoding;
 pub mod error;
+mod event_state;
 pub mod formats;
 mod json_schema;
+mod lex;
 pub mod map;
 mod number;
 #[doc(hidden)]
@@ -165,8 +174,15 @@ use alloc::vec::Vec;
 ///
 /// This is the canonical native encoding entry point. Unescaped string data is
 /// copied directly into the output buffer without an intermediate JSON value.
+///
+/// The top-level entry points use the trusted [`FastEncoder`] variant: the
+/// caller's `NsonSerialize` implementation (typically derived) is trusted to
+/// follow the event protocol, skipping per-value validation for throughput.
+/// Hand-written implementations that emit events out of order produce
+/// malformed JSON instead of an error; use the validated [`Encoder`] directly
+/// when that guarantee matters.
 pub fn nextencode<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::for_vec(EncodeConfig::compact());
+    let mut encoder = FastEncoder::for_vec(EncodeConfig::compact());
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish_vec()
 }
@@ -190,7 +206,7 @@ pub fn to_string_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<String> 
 
 /// Serialize a value into a pretty-printed JSON byte vector.
 pub fn to_vec_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut encoder = Encoder::for_vec(EncodeConfig::pretty());
+    let mut encoder = FastEncoder::for_vec(EncodeConfig::pretty());
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish_vec()
 }
@@ -201,7 +217,7 @@ where
     W: Write,
     T: NsonSerialize + ?Sized,
 {
-    let mut encoder = Encoder::new(writer);
+    let mut encoder = FastEncoder::new(writer);
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
@@ -213,7 +229,7 @@ where
     W: Write,
     T: NsonSerialize + ?Sized,
 {
-    let mut encoder = Encoder::with_config(writer, EncodeConfig::pretty());
+    let mut encoder = FastEncoder::with_config(writer, EncodeConfig::pretty());
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
@@ -226,7 +242,7 @@ where
     W: std::io::Write,
     T: NsonSerialize + ?Sized,
 {
-    let mut encoder = Encoder::new(crate::write::StdWriter(writer));
+    let mut encoder = FastEncoder::new(crate::write::StdWriter(writer));
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())

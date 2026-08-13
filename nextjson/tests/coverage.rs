@@ -239,7 +239,7 @@ fn write_impls_cover_all_sinks() {
 
     // &mut W forwards (written to Vec<u8> via Encoder). Encoder buffers until finish before writing to disk
     let mut sink = Vec::new();
-    let mut out = nextjson::Encoder::new(&mut sink);
+    let mut out = nextjson::Encoder::<&mut Vec<u8>>::new(&mut sink);
     nextjson::NsonSerialize::nextencode(&42_i32, &mut out).unwrap();
     out.finish().unwrap();
     assert_eq!(sink.as_slice(), b"42");

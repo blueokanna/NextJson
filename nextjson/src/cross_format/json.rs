@@ -1,16 +1,18 @@
-use crate::cross_format::{ContainerKind, EventSink, StructureState, ValuePosition};
+use crate::cross_format::EventSink;
 use crate::encoding::{EncodeConfig, Encoder};
 use crate::error::Result;
+use crate::event_state::{EventState, Kind};
 use crate::number::Number;
 use crate::write::Write;
 
 /// JSON destination for [`EventSink`] streams.
 ///
-/// The sink validates event order independently of the source and uses the
-/// native NextJson encoder for escaping and number formatting.
+/// The sink validates event order through the shared event-protocol state
+/// machine and uses the native NextJson encoder for escaping and number
+/// formatting.
 pub struct JsonSink<W: Write> {
     encoder: Encoder<W>,
-    structure: StructureState,
+    structure: EventState,
 }
 
 impl<W: Write> JsonSink<W> {
@@ -23,7 +25,7 @@ impl<W: Write> JsonSink<W> {
     pub fn with_config(writer: W, config: EncodeConfig) -> Self {
         JsonSink {
             encoder: Encoder::with_config(writer, config),
-            structure: StructureState::new(),
+            structure: EventState::new(true),
         }
     }
 
@@ -34,17 +36,24 @@ impl<W: Write> JsonSink<W> {
     }
 
     fn prepare_value(&mut self) -> Result<()> {
-        if matches!(self.structure.value()?, ValuePosition::Array) {
+        if self.structure.in_array() {
+            self.structure.separator()?;
             self.encoder.separator()?;
         }
+        self.structure.value()?;
         Ok(())
     }
 
-    fn prepare_container(&mut self, kind: ContainerKind) -> Result<()> {
-        if matches!(self.structure.begin(kind)?, ValuePosition::Array) {
+    fn prepare_container(&mut self, kind: Kind) -> Result<()> {
+        if self.structure.in_array() {
+            self.structure.separator()?;
             self.encoder.separator()?;
         }
-        Ok(())
+        self.structure.begin(kind)?;
+        match kind {
+            Kind::Array => self.encoder.begin_array(),
+            Kind::Object => self.encoder.begin_object(),
+        }
     }
 }
 
@@ -70,18 +79,18 @@ impl<W: Write> EventSink for JsonSink<W> {
     }
 
     fn begin_array(&mut self) -> Result<()> {
-        self.prepare_container(ContainerKind::Array)?;
-        self.encoder.begin_array()
+        self.prepare_container(Kind::Array)?;
+        Ok(())
     }
 
     fn end_array(&mut self) -> Result<()> {
-        self.structure.end(ContainerKind::Array)?;
+        self.structure.end(Kind::Array)?;
         self.encoder.end_array()
     }
 
     fn begin_object(&mut self) -> Result<()> {
-        self.prepare_container(ContainerKind::Object)?;
-        self.encoder.begin_object()
+        self.prepare_container(Kind::Object)?;
+        Ok(())
     }
 
     fn object_key(&mut self, key: &str) -> Result<()> {
@@ -90,7 +99,7 @@ impl<W: Write> EventSink for JsonSink<W> {
     }
 
     fn end_object(&mut self) -> Result<()> {
-        self.structure.end(ContainerKind::Object)?;
+        self.structure.end(Kind::Object)?;
         self.encoder.end_object()
     }
 }

@@ -100,12 +100,7 @@ fn percent_decode(out: &mut String, bytes: &[u8]) -> Result<()> {
 }
 
 fn hex_val(b: u8) -> Result<u8> {
-    match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
-        b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err(Error::custom("urlform: invalid percent escape")),
-    }
+    crate::lex::hex_digit(b).ok_or_else(|| Error::custom("urlform: invalid percent escape"))
 }
 
 // ---------------------------------------------------------------------------

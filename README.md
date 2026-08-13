@@ -70,6 +70,16 @@ complete JSON value and rejects trailing data. Writer, reader, pretty-print,
 dynamic `Value`, JSON macro, schema inspection, and JSON Schema APIs remain
 available as focused helpers.
 
+The design is **data-model-first** (not AST-first): typed decode streams
+directly into your fields with zero intermediate tree, and `Value` is an
+opt-in consumer of the same decoder. Two encoder policies are exposed:
+`Encoder` validates the event protocol on every call, while `FastEncoder`
+(the `nextencode` / `to_vec` / `to_string` / writer entry points) trusts the
+derive-verified call sequence and skips per-value checks for ~2x encoding
+throughput. See [Design](docs/DESIGN.md) for the fork analysis, the
+borrowing model (transient / owned / borrowed), and the attribute / policy
+layers.
+
 ```rust
 use nextjson::{NsonDeserialize, NsonSerialize};
 
@@ -140,6 +150,13 @@ crate's own `NsonSerialize` / `NsonDeserialize` contracts are generic over
 whose wire model can represent that value. Most encoders emit directly;
 document-shaped TOML and YAML collect a `Value` first so tables can be ordered
 correctly. Unsupported combinations return errors listed in the matrix below.
+
+Event-order validation is centralized: the format encoders and the
+cross-format sinks drive one shared protocol state machine, parameterized
+only by whether the wire format has explicit array separators (JSON does,
+CBOR does not). On the decode side, the byte lexer serves typed scalar reads
+directly from the source byte, so the unified token stream stays available
+for content replay without taxing the hot path.
 
 ```rust
 use nextjson::formats;
