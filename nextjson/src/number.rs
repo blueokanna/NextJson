@@ -188,6 +188,19 @@ impl Number {
     }
 }
 
+/// Decode a single decimal digit byte (`0`-`9`) as a `u64`.
+///
+/// Uses `wrapping_sub` so a byte below `'0'` cannot underflow (which would
+/// panic in debug builds); the range check turns any non-digit byte into
+/// `None`. Callers that already validated the slice (the lexers) pay one
+/// perfectly-predicted compare per digit; direct callers get a hard error
+/// instead of a silently wrong value.
+#[inline]
+fn dec_digit(byte: u8) -> Option<u64> {
+    let digit = byte.wrapping_sub(b'0');
+    (digit < 10).then_some(digit as u64)
+}
+
 /// Native-width signed parsing fast path: returns `None` when the magnitude
 /// does not fit in `i64`, in which case the caller falls back to the 128-bit
 /// parser.
@@ -206,14 +219,17 @@ fn parse_i64_fast(raw: &[u8]) -> Option<i64> {
     }
 }
 
-/// Native-width unsigned parsing fast path: returns `None` on overflow, in
-/// which case the caller falls back to the 128-bit parser. `u64` multiply /
-/// add is a single hardware instruction pair on x86-64, unlike the widened
-/// `u128` arithmetic used by the fallback.
+/// Native-width unsigned parsing fast path: returns `None` on overflow or
+/// invalid input, in which case the caller falls back to the 128-bit parser.
+/// `u64` multiply / add is a single hardware instruction pair on x86-64,
+/// unlike the widened `u128` arithmetic used by the fallback.
 fn parse_u64_fast(raw: &[u8]) -> Option<u64> {
+    if raw.is_empty() {
+        return None;
+    }
     let mut value = 0_u64;
     for &byte in raw {
-        let digit = (byte.wrapping_sub(b'0')) as u64;
+        let digit = dec_digit(byte)?;
         value = value.checked_mul(10)?.checked_add(digit)?;
     }
     Some(value)
@@ -222,9 +238,12 @@ fn parse_u64_fast(raw: &[u8]) -> Option<u64> {
 /// Hand-rolled overflow-checked signed integer parsing (`i128`).
 fn parse_i128(raw: &[u8]) -> Option<i128> {
     debug_assert_eq!(raw[0], b'-');
+    if raw.len() <= 1 {
+        return None; // a bare `-` is not a number
+    }
     let mut magnitude = 0_u128;
     for &byte in &raw[1..] {
-        let digit = (byte - b'0') as u128;
+        let digit = dec_digit(byte)? as u128;
         magnitude = magnitude.checked_mul(10)?.checked_add(digit)?;
     }
     let min_magnitude = (i128::MAX as u128) + 1;
@@ -239,9 +258,12 @@ fn parse_i128(raw: &[u8]) -> Option<i128> {
 
 /// Hand-rolled overflow-checked unsigned integer parsing (`u128`).
 fn parse_u128(raw: &[u8]) -> Option<u128> {
+    if raw.is_empty() {
+        return None;
+    }
     let mut value = 0_u128;
     for &byte in raw {
-        let digit = (byte - b'0') as u128;
+        let digit = dec_digit(byte)? as u128;
         value = value.checked_mul(10)?.checked_add(digit)?;
     }
     Some(value)
@@ -410,6 +432,37 @@ mod tests {
             Number::U128(u128::MAX)
         );
         assert!(Number::parse(b"340282366920938463463374607431768211456", false).is_err());
+    }
+
+    #[test]
+    fn rejects_non_digit_input_instead_of_fabricating_values() {
+        // The fast integer parsers used to derive a digit with `wrapping_sub`
+        // (or a plain `- b'0'`), so a non-digit byte either produced a silent
+        // wrong value (`b"a"` -> 49) or panicked in debug builds. The parsers
+        // must reject garbage outright.
+        for bad in [
+            &b"a"[..],
+            b"-a",
+            b"1a",
+            b"12x",
+            b" ",
+            b"-",
+            b"",
+            b"0x1F",
+            b"1.5", // float shape without the float flag
+        ] {
+            assert!(
+                Number::parse(bad, false).is_err(),
+                "accepted non-integer input {bad:?}"
+            );
+        }
+        // `dec_digit` itself never panics on any byte.
+        for b in 0_u8..=255 {
+            let _ = dec_digit(b);
+        }
+        // The wide fallback is equally strict.
+        assert!(Number::parse(b"-9a223372036854775809", false).is_err());
+        assert!(Number::parse(b"18a446744073709551616", false).is_err());
     }
 
     #[test]

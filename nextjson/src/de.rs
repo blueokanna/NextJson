@@ -713,8 +713,6 @@ impl<'de> BytesReader<'de> {
         Ok(tok)
     }
 
-    /// Lex a string, returning its content directly (callers that need the
-    /// token wrapper build it themselves).
     fn lex_string_str(&mut self, scratch: &mut String) -> Result<Cow<'de, str>> {
         let input = self.input;
         let start = self.pos + 1;
@@ -744,8 +742,6 @@ impl<'de> BytesReader<'de> {
         Ok(Cow::Borrowed(string))
     }
 
-    /// Handle a string containing escapes; `start` is after the opening quote,
-    /// `i` points at the first `\`.
     fn unescape(
         &mut self,
         input: &[u8],
@@ -822,18 +818,24 @@ impl<'de> BytesReader<'de> {
         Err(self.err_at(ErrorKind::Eof, input.len()))
     }
 
-    /// Lex a number, returning its value directly (callers that need the
-    /// token wrapper build it themselves).
+    /// The integer magnitude is accumulated in the same pass that locates the
+    /// digit run, so a plain integer is fully computed here and only floats /
+    /// wide integers (or magnitudes overflowing `u64`) fall back to
+    /// [`Number::parse`], which re-scans the slice.
     fn lex_number_value(&mut self) -> Result<Number> {
         let input = self.input;
         let start = self.pos;
         let mut i = self.pos;
-        if input[i] == b'-' {
+        let negative = if input[i] == b'-' {
             i += 1;
             if i >= input.len() {
                 return Err(self.err_at(ErrorKind::InvalidNumber, i));
             }
-        }
+            true
+        } else {
+            false
+        };
+        let mut magnitude: Option<u64> = Some(0);
         match input[i] {
             b'0' => {
                 i += 1;
@@ -842,8 +844,14 @@ impl<'de> BytesReader<'de> {
                 }
             }
             b'1'..=b'9' => {
+                magnitude = Some((input[i] - b'0') as u64);
                 i += 1;
                 while i < input.len() && input[i].is_ascii_digit() {
+                    // cannot underflow.
+                    if let Some(mag) = magnitude {
+                        let digit = (input[i] - b'0') as u64;
+                        magnitude = mag.checked_mul(10).and_then(|v| v.checked_add(digit));
+                    }
                     i += 1;
                 }
             }
@@ -877,6 +885,26 @@ impl<'de> BytesReader<'de> {
         }
         let raw = &input[start..i];
         self.pos = i;
+
+        if !is_float {
+            if let Some(mag) = magnitude {
+                let value = if negative {
+                    let min_magnitude = 1_u64 << 63; // |i64::MIN|
+                    if mag <= min_magnitude {
+                        Number::I64(if mag == min_magnitude {
+                            i64::MIN
+                        } else {
+                            -(mag as i64)
+                        })
+                    } else {
+                        Number::I128(-(mag as i128))
+                    }
+                } else {
+                    Number::U64(mag)
+                };
+                return Ok(value);
+            }
+        }
         Number::parse(raw, is_float).map_err(|_| self.err_at(ErrorKind::InvalidNumber, start))
     }
 
@@ -997,7 +1025,6 @@ impl<'de> TreeReader<'de> {
         Error::new(kind, None, None, self.pos)
     }
 
-    /// Type-mismatch error naming the token that was actually found.
     fn invalid_type(&self, expected: &'static str, found: &Token<'_>) -> Error {
         self.err(ErrorKind::InvalidType {
             expected,
@@ -1028,8 +1055,6 @@ impl<'de> TreeReader<'de> {
         Ok(self.lookahead.as_ref().expect("just set").clone())
     }
 
-    // Typed reads over the replayed token stream: same signatures as the
-    // byte-reader fast paths so `Decoder` can dispatch uniformly.
     fn number(&mut self) -> Result<Number> {
         match self.next_token()? {
             Token::Number(n) => Ok(n),
@@ -1115,8 +1140,6 @@ pub struct Decoder<'de> {
     scratch: String,
     depth: u32,
     max_depth: u32,
-    /// Type description installed via [`set_expecting`](FormatDecoder::set_expecting),
-    /// used to enrich container-level type-mismatch errors.
     expecting: Option<&'static str>,
 }
 

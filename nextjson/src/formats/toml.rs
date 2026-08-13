@@ -1014,8 +1014,24 @@ fn is_date(s: &str) -> bool {
 }
 
 /// `HH:MM:SS` with plausible ranges.
+///
+/// The caller guarantees the slice is at least 8 bytes with `:` at offsets
+/// 2 and 5, but NOT that the remaining offsets are digits — a crafted value
+/// like `+:2:345` reaches here with `+` at offset 0. Digit-check first so
+/// the arithmetic below can never underflow (a plain `- b'0'` on a byte
+/// below `'0'` panics in debug builds).
 fn is_time_range(s: &str) -> bool {
     let b = s.as_bytes();
+    if b.len() < 8 {
+        return false;
+    }
+    let digits_ok = b[..8]
+        .iter()
+        .enumerate()
+        .all(|(i, &c)| i == 2 || i == 5 || c.is_ascii_digit());
+    if !digits_ok {
+        return false;
+    }
     let h = (b[0] - b'0') as u32 * 10 + (b[1] - b'0') as u32;
     let m = (b[3] - b'0') as u32 * 10 + (b[4] - b'0') as u32;
     let sec = (b[6] - b'0') as u32 * 10 + (b[7] - b'0') as u32;

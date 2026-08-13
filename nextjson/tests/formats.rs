@@ -382,6 +382,46 @@ fn toml_invalid_datetime_is_not_silently_stringified() {
 }
 
 #[test]
+fn toml_time_shape_with_non_digit_bytes_errors_not_panics() {
+    // `+:2:345` has the `??:??:??` shape (len >= 8, `:` at offsets 2 and 5)
+    // but a byte below `'0'` at offset 0. The time-range validator used to
+    // subtract `b'0'` before checking digits, which underflowed (panic in
+    // debug builds) instead of rejecting the value.
+    for bad in [
+        "d = +:2:345\n",
+        "d = -:2:345\n",
+        "d = .:2:345\n",
+        "d = 1:2:34\n",
+        "d = 1 :2:345\n",
+    ] {
+        let out = formats::Toml.decode::<nextjson::Value>(bad.as_bytes());
+        // Must not panic; either a clear error or (never) a value.
+        if let Ok(value) = out {
+            // If it did parse, it must not be the malformed time kept as a
+            // datetime string.
+            let s = value["d"].as_str().unwrap_or("");
+            assert!(
+                !is_malformed_time(s),
+                "malformed time survived as a string: {s:?}"
+            );
+        }
+    }
+}
+
+/// Whether `s` looks like the rejected `??:??:??` shape with a non-digit in a
+/// digit slot (used to assert the bug did not silently stringify it).
+fn is_malformed_time(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 8
+        && b[2] == b':'
+        && b[5] == b':'
+        && b[..8]
+            .iter()
+            .enumerate()
+            .any(|(i, &c)| i != 2 && i != 5 && !c.is_ascii_digit())
+}
+
+#[test]
 fn toml_hex_octal_binary_integers() {
     let input = br#"
 hex = 0xDEADBEEF
