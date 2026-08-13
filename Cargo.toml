@@ -8,6 +8,7 @@ edition = "2021"
 authors = ["blueokanna"]
 license = "Apache-2.0"
 repository = "https://github.com/blueokanna/NextJson"
+rust-version = "1.78"
 description = "A dependency-free, no_std JSON and CBOR library with a schema-driven, visitor-free design."
 
 [workspace.dependencies]

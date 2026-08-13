@@ -13,6 +13,34 @@
 | 生成 | quote! 拼接 token | 生成字符串再 `TokenStream::from_str` |
 | 风险 | 无（syn 社区维护） | 必须自己跟上 Rust 语法变化 |
 
+## 先看标准 `proc_macro` API 长什么样
+
+`syn` 帮你把 `TokenStream` 变成一棵可读的 AST。不用 syn 意味着你要自己处理
+`TokenStream` 里的原始 token——而它比你想的更"原始"：
+
+```rust
+// 输入 `struct Foo<'a> { x: u64 }` 的 token 序列大概是：
+// Ident("struct") Ident("Foo")
+// Punct('<', Joint)  Punct('\'', Joint) Ident("a") Punct('>', Alone)   ← 泛型参数
+// Punct('{', Alone)
+// Ident("x") Punct(':', Alone) Ident("u64")
+// Punct('}', Alone)
+```
+
+注意几个细节（都是踩过的坑）：
+
+- **`<` 和 `>` 是普通 `Punct`**，没有 `Delimiter::Angle` 分组——所以按 `,` 切分
+  泛型参数时，必须自己跟踪 `<>` 深度，否则 `BTreeMap<String, i32>` 会被切成
+  两个"字段"；
+- **`'a` 是 `[Punct('\'', Joint), Ident("a")]`**——`Joint` 表示"紧贴下一个
+  token"。把 token 拼回字符串时，`Joint` 的 token 后面**不能加空格**，否则
+  `' a` 会被当成字符字面量（编译期直接 panic）；
+- 同理 `std::x` 是 `[Ident("std"), Punct(':', Joint), Punct(':', Alone), ...]`，
+  丢 Joint 间距会拼出 `: :`（路径分隔符错误）。
+
+这就是"手写解析器"的真实工作环境：一个带 `peek`/`next` 的 token 游标，加上
+递归下降。
+
 ## 架构
 
 ```text
@@ -23,6 +51,21 @@ proc_macro::TokenStream 输入
              + attr.rs：ContainerAttrs / FieldAttrs / VariantAttrs / Meta
         └─ codegen（ser.rs / de.rs / schema.rs）→ 文本 → TokenStream::from_str
 ```
+
+## 一个具体解析例子：字段类型怎么读
+
+假设要解析字段 `x: BTreeMap<String, i32>`：
+
+1. 游标读到 `Ident("x")`，记录为字段名；
+2. 读到 `Punct(':')`，确认是命名字段；
+3. 开始读字段类型：`Ident("BTreeMap")` → `Punct('<')`（深度 1）→
+   `Ident("String")` → `Punct(',')`（**深度 1，不切分**）→ `Ident("i32")` →
+   `Punct('>')`（深度 0，类型结束）；
+4. 字段类型被**原样保留**（不透明 token 序列），只在生成代码时拼回字符串。
+
+关键：**类型位置内部的一切都是"不透明携带"**——解析器不需要理解 `BTreeMap` 是
+什么。它只关心结构（几个字段、泛型参数表、where 子句），类型本体原样往返。
+这就是"类型位置上出现的新 Rust 语法不需要改解析器"的原因。
 
 ## 前向兼容契约（关键巧思）
 
@@ -67,3 +110,4 @@ item 级语法而解析器不认识，宏会以 `compile_error!` 报出剩余 to
   保留（否则泛型+where 结构体 E0277）。
 
 完整属性清单见 [[Derive Macros]]。
+

@@ -76,10 +76,7 @@ fn stream_decoder_typed_scalars_across_chunks() {
         nextjson::from_reader::<_, f64>(OneByte(&b"3.25"[..])).unwrap(),
         3.25
     );
-    assert_eq!(
-        nextjson::from_reader::<_, bool>(OneByte(&b"true"[..])).unwrap(),
-        true
-    );
+    assert!(nextjson::from_reader::<_, bool>(OneByte(&b"true"[..])).unwrap());
     assert_eq!(
         nextjson::from_reader::<_, char>(OneByte(&br#""z""#[..])).unwrap(),
         'z'

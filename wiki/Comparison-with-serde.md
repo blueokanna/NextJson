@@ -19,6 +19,15 @@ flowchart LR
     end
 ```
 
+## 一句话本质区别
+
+**serde 是"类型向解码器索取"（Visitor），NextJson 是"类型直接告诉解码器往哪写"
+（就地解码）**。这个方向差异向下推翻了整套 API 形状：
+
+- serde 的 `Deserialize` 需要 `Visitor` 状态机来回调；
+- NextJson 的 `nextdecode_into` 直接把结果写进调用方给的 `DecodeSlot<T>`，
+  不需要 Visitor，也因此不需要 unsafe（见 [[Decode Slot]]）。
+
 ## 维度对比
 
 | 维度 | serde | nextjson |
@@ -37,7 +46,8 @@ flowchart LR
 
 ## NextJson 的差异化优势（都有实现证据）
 
-1. **零依赖可审计构建图**：`cargo tree` 只有两个本地 crate。
+1. **零依赖可审计构建图**：`cargo tree` 只有两个本地 crate，CI 有
+   `dependency-audit` 门禁守着。
 2. **编译期 schema**：`const SCHEMA` 零运行时开销、类型自描述、可生成 JSON
    Schema，实现与 schema 同源不漂移。
 3. **解码内存复用**：`DecodeSlot` 由调用方提供，无需 `T: Default`/占位值。
@@ -51,7 +61,7 @@ flowchart LR
 1. **生态隔离**：无法直接使用 serde 生态的三方类型（chrono/uuid/框架等），
    必须手写 impl 或 `remote`。
 2. **JSON 热路径慢 ~2.17x**：通用 `FormatEncoder` 契约 + 非 Ryū 浮点 + 无十年
-   单态化优化。
+   单态化优化。**这个差距是设计目标换来的**——同一份实现驱动 13+ 种格式。
 3. **格式不完整**：yaml/toml/json5 是子集；无 serde 各 crate 的完整功能。
 4. **`Value` API 面窄**：无 JSON Pointer、无 `json!` 宏等（见
    [[Value and Map]]）。
@@ -79,3 +89,4 @@ flowchart LR
 - 安全对比细节：[[Safety Model]]
 - 性能数据：[[Performance]]
 - 格式能力：[[Format Matrix]]
+

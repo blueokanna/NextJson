@@ -1,7 +1,18 @@
 # Cross-Format Relay
 
 `cross_format::EventSink` 是仓库自有的**格式中立事件协议**，让 JSON 与 CBOR
-**流式互转**，不构造中间 `Value` 树，内存不随文档树增长。
+**流式互转**，不构造中间 `Value` 树，内存不随文档树增长。本页用一个具体转换
+把机制走一遍。
+
+## 它解决什么问题
+
+常规的多格式引擎是"类型驱动"的：`encode_with(&value, formats::Json)` 需要
+`value` 有类型。但有些场景你**只想把字节转成字节**——代理、日志、网关收到
+JSON 要转发成 CBOR，中间谁都不想解析语义。硬要建一棵 `Value` 树再编码，大文档
+的内存开销就是白付的。
+
+`EventSink` 是"数据驱动"的答案：不需要类型、不建树，**逐事件**从源格式流到
+目标格式。
 
 ## EventSink 契约
 
@@ -21,6 +32,35 @@ pub trait EventSink {
 
 **设计巧思**：`object_key` 与 `string` **分离**——防止目标格式意外接受 JSON 无法
 表示的**非字符串键**。实现必须对非法事件顺序返回错误。
+
+## 一个具体例子：JSON → CBOR
+
+```rust
+let json = br#"{"name":"NextJson","values":[1,2,3]}"#;
+let cbor = cross_format::json_to_cbor(json)?;
+```
+
+内部发生的事（`json_into` 逐事件喂给 `CborSink`）：
+
+```text
+json_into 读到        喂给 CborSink 的事件        CborSink 写出的 CBOR 字节
+--------------------------------------------------------------
+{                      begin_object               0xA2        (map, 2 对)
+"name"                 object_key("name")         0x64 'n' 'a' 'm' 'e'
+"NextJson"             string("NextJson")         0x69 "NextJson"
+"values"               object_key("values")       0x66 'v' 'a' 'l' 'u' 'e' 's'
+[                      begin_array                0x83        (array, 3 个)
+1                      number(1)                  0x01
+2                      number(2)                  0x02
+3                      number(3)                  0x03
+]                      end_array                  (无额外字节)
+}                      end_object                 (无额外字节)
+```
+
+整个过程不出现任何中间 `Value`。`CborSink` 内部维护一个小状态机（"现在在对象里
+还是数组里、下一个该写键还是写值"），`begin_object` 时先数后续有多少个
+`object_key` 才知道 map 长度前缀——所以 `CborSink` 也依赖"每个条目调用一次
+`object_key`"这个契约。
 
 ## 内置 Sink
 
@@ -63,3 +103,4 @@ assert_eq!(json_again, json);
 - CBOR 侧只接受 **JSON 兼容 profile**：原始 byte string、非字符串 map key、
   非有限浮点、未知语义 tag 明确报错——防止 CBOR→JSON 时静默语义损失；
 - 每条路径都有深度上限（默认 128）。
+

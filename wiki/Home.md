@@ -1,28 +1,72 @@
 # NextJson
 
-> A dependency-free, `no_std + alloc` JSON / CBOR library for Rust, with a
-> **schema-driven, visitor-free** design and a built-in 16-format engine.
+> 一个零第三方依赖、核心 `no_std + alloc` 的 Rust 序列化库。
+> 它用 **编译期 schema + 统一 Token 流 + 就地解码** 三套机制取代 serde 的
+> Visitor 模式，并把 **16 种线格式**（JSON / YAML / TOML / CBOR / MessagePack /
+> BSON / …）收进同一个 crate。
 
-NextJson 是一个**零第三方依赖**、核心 `no_std + alloc` 的 Rust 序列化库。它不是
-serde 的复刻，而是一套独立的契约设计：用 **编译期 schema + 统一 Token 流 + 就地
-解码** 取代 serde 的 Visitor 模式，并把 **16 种线格式**（JSON / YAML / TOML /
-CBOR / MessagePack / BSON / …）收进同一个 crate。
+## 这个库在解决什么问题
 
-## 核心亮点（每一条都在仓库里有实现与测试）
+序列化解决两件事：把内存里的数据变成一串字节（编码），再把字节还原成数据
+（解码）。Rust 生态里这件事的事实标准是 serde——它极其强大，但也带来了三个
+代价：
 
-- **零第三方依赖**：整个工作区只有 `nextjson` 与 `nextjson-derive` 两个本地
-  crate；derive 用标准 `proc_macro` API 手写递归下降解析器，不用 `syn` /
-  `quote` / `proc-macro2`。
-- **无 Visitor 的就地解码**：`NsonDeserialize::nextdecode_into` 直接写入调用方
-  提供的 `DecodeSlot<T>`，支持内存复用，不需要 `T: Default` 或占位值。
-- **编译期 schema**：每个类型携带 `const SCHEMA: TypeSchema`，运行时零开销内省，
-  可直接生成 JSON Schema。
-- **统一 Token 流**：字节流惰性词法（`Bytes`）与内容重放（`Tree`）共用同一套
-  解码原语——内部/邻接/untagged 枚举与 `Value` 往返只维护一份引擎。
-- **安全边界**：`#![deny(unsafe_code)]`、所有解码器默认 128 层递归上限、检查式
-  数字、拒绝非有限浮点（无静默有损回退）。
-- **单 crate 多格式**：一套 `NsonSerialize` 实现驱动 16 种格式；JSON ↔ CBOR 可
-  通过 `cross_format::EventSink` 流式互转，不构造中间 `Value` 树。
+1. **依赖链很长**。一个 `serde + serde_json` 的最小项目，构建图里躺着
+   `serde_derive`、`syn`、`quote`、`proc-macro2`、`unicode-ident` 一串 crate。
+   对嵌入式 / 固件 / 审计严格的场景，这是实打实的风险面。
+2. **类型不自述**。serde 只告诉你"怎么编码 / 怎么解码"，不告诉你"类型长什么样"。
+   想生成 JSON Schema 得再引入 `schemars`，于是"实现"和"文档"可能漂移。
+3. **每加一种格式就要接一个 crate**。JSON 一个、YAML 一个、CBOR 又一个……它们
+   之间对同一类型的行为还可能不一致。
+
+NextJson 对这三个问题各给了一个不同的答案，而且每个答案都有对应源码：
+
+- 整个工作区只有两个本地 crate，`cargo tree` 的输出短到能一眼看完；
+- 每个可序列化类型都携带 `const SCHEMA`（编译期构造、运行时读取），schema 和
+  序列化实现**同一份定义**，不会漂移；
+- 一套 `NsonSerialize` 实现直接驱动 16 种格式，加新格式不用改你的类型。
+
+## 三个核心机制（读懂了它们就读懂了整个库）
+
+serde 的解码靠 `Visitor` 状态机：类型向 `Deserializer` 逐个"索取"原语。NextJson
+把方向整个反过来，用三套机制替代：
+
+**1. 就地解码（`nextdecode_into` + `DecodeSlot<T>`）**
+
+```rust
+fn nextdecode_into<D: FormatDecoder<'de>>(
+    decoder: &mut D,
+    out: &mut DecodeSlot<Self>,   // 调用方提供的"槽"
+) -> Result<(), D::Error>;
+```
+
+解码结果不是"返回"出来的，而是写进调用方给的一块存储。这块存储能反复使用
+（解码下一帧不用重新分配），而且不需要 `T: Default`。内部就是一个普通
+`Option<T>`，所以"没写之前读不到值"由类型系统保证——这也是全库能
+`#![deny(unsafe_code)]` 的原因。详见 [[Decode Slot]]。
+
+**2. 编译期 schema（`NsonSchema` 超 trait）**
+
+```rust
+pub trait NsonSchema {
+    const SCHEMA: TypeSchema;   // 编译期构造、运行时零开销读取
+}
+pub trait NsonSerialize: NsonSchema { ... }
+```
+
+每个类型自述结构，`schema_of::<T>()` 直接读这份数据，`to_json_schema::<T>()`
+把它变成标准 JSON Schema。schema 与序列化实现同源，天然一致。详见
+[[Compile-Time Schema]]。
+
+**3. 统一 Token 流（`Bytes` / `Tree` 双输入源）**
+
+解码器 `Decoder` 背后有两种输入：对 `&[u8]` 做惰性词法的 `Bytes` 源，和把内存中
+`Vec<Token>` 重放出来的 `Tree` 源。两者暴露**完全相同**的解码原语——于是内部
+标签 / 邻接标签 / untagged 枚举、`Value` 往返、文档式格式（TOML / YAML）全部
+复用同一套引擎，不会出现"第二套实现"。详见 [[Unified Token Stream]]。
+
+一句话：**serde 是"类型去驱动解码器"，NextJson 是"类型直接告诉解码器往哪写、
+写什么"**。完整对比见 [[Comparison with serde]]。
 
 ## 快速开始
 
@@ -55,7 +99,7 @@ assert_eq!(actual, expected);
 # Ok::<(), nextjson::Error>(())
 ```
 
-多格式（同一类型、同一份 impl）：
+同样的类型，换一种格式只是换个"终点"（同一份 impl 零改动）：
 
 ```rust
 use nextjson::formats;
@@ -67,6 +111,25 @@ let msgpack  = formats::encode_with(&value, formats::MsgPack)?;
 let yaml     = formats::encode_with(&value, formats::Yaml)?;
 # Ok::<(), nextjson::Error>(())
 ```
+
+`formats` 里的 `Json`、`MsgPack`、`Yaml` 都是**零尺寸标记类型**——格式本身是
+一个可传递、可存储、可动态选择的值（`by_name` / `by_extension` / `detect`）。
+机制见 [[Multi-Format Engine]]。
+
+## 怎么读这套 Wiki
+
+如果你想先看整体怎么运转，按这个顺序读：
+
+1. [[Architecture]] —— 一个值从内存到字节、再从字节回内存，全程经过哪些层；
+2. [[Core Contracts]] —— 那几个 trait 到底是什么、每个方法为什么存在；
+3. [[Compile-Time Schema]] → [[Unified Token Stream]] → [[Decode Slot]] ——
+   三大机制的内部实现；
+4. [[Multi-Format Engine]] → [[Format Matrix]] —— 16 种格式怎么收进一个 crate、
+   每种格式能做什么、不能做什么；
+5. [[Safety Model]] / [[Error Model]] / [[Performance]] —— 边界与代价。
+
+每条都带源码位置或可直接运行的最小示例；涉及"诚实局限"的条目是**功能边界
+声明**而不是缺陷掩盖。
 
 ## Wiki 导航
 
@@ -92,6 +155,3 @@ let yaml     = formats::encode_with(&value, formats::Yaml)?;
 | 与 serde 的对比 | [[Comparison with serde]] |
 | 设计决策记录（ADR） | [[Design Decisions]] |
 | 术语表 | [[Glossary]] |
-
-> 本 Wiki 的所有表述均以仓库源码、测试与文档为准；涉及"诚实局限"的条目是
-> **功能边界声明**而非缺陷掩盖，详见 [[Format Matrix]] 与 [[Comparison with serde]]。

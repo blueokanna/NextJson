@@ -2,6 +2,21 @@
 
 NextJson 的错误设计目标是：**精确定位 + 粗分类 + 可被格式错误包装**。
 
+## 一个错误长什么样
+
+```rust
+let err = nextjson::nextdecode::<MyType>(br#"{"a": 1, "b": ]}"#).unwrap_err();
+
+err.line();    // Some(1)
+err.column();  // Some(14)
+err.offset();  // 14
+err.classification();  // 粗分类：解析/类型/字段...
+```
+
+每个解析错误都记录**触发位置**；字节流输入还带精确的 1-based 行/列。`Error` 是
+`#[derive(Debug, Clone)]`，不是不透明句柄——用户可以看、可以 clone、可以跨线程
+传。
+
 ## `Error` 结构
 
 ```rust
@@ -13,9 +28,8 @@ pub struct Error {
 }
 ```
 
-- 每个解析错误都记录**触发位置**；字节流输入还带精确的 1-based 行/列；
 - `kind` 是私有的 `ErrorKind`，提供语义化分类（见下）；
-- `Error` 是 `#[derive(Debug, Clone)]`，不是不透明句柄——用户可以看、可以 clone。
+- 行/列只在**字节流输入**上精确（`from_reader` 的流式输入也能定位）。
 
 ## `ErrorKind` 变体（错误语义的真相来源）
 
@@ -50,6 +64,24 @@ Error::unknown_variant(variant)
 Error::invalid_length(len, "expected ...")
 Error::invalid_type("expected ...", "found ...")
 ```
+
+这些辅助函数同时也是**给手写 `NsonDeserialize` 实现**用的工具——你的类型在解码
+时可以用它们产生与派生代码一致的错误。
+
+## 容器级类型错误的"类型名"注入（Phase 13）
+
+一个细节值得单独说：结构体/枚举解码时遇到类型不匹配（比如 JSON 里是个数组，
+但类型期望对象），错误里的 `expected` 会带上**类型名**：
+
+```rust
+// 解码 {"a": 1} 到 struct User { b: u64 }
+// 错误消息里会包含 "User"，而不是泛泛的 "a struct"
+```
+
+机制是 `FormatDecoder::set_expecting(&'static str)`——`Decoder` 把它存在字段里，
+`invalid_type` 对结构性 token 期望（`'{'`/`'['` 等）用它替换描述。派生宏在
+`nextdecode_into` 入口自动设置，所以嵌套时自然覆盖；标量描述（number/string/
+bool 等）不受污染。
 
 ## `FormatError`：格式自己的错误
 
@@ -100,3 +132,4 @@ let parsed: MyType = nextjson::nextdecode(&bytes)
 - 契约中的错误类型：[[Core Contracts]]
 - 安全语义：[[Safety Model]]
 - 各格式的错误行为：[[Format Matrix]]
+

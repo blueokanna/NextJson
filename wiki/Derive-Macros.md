@@ -2,7 +2,112 @@
 
 `#[derive(NsonSerialize, NsonDeserialize)]` 生成序列化、反序列化与 schema 三份
 实现。属性接受 `#[njson(...)]`、`#[nextjson(...)]` 与 `#[serde(...)]` 三种写法
-（后者为生态迁移兼容）。
+（后者为生态迁移兼容）。本页先看宏到底生成了什么，再列属性清单。
+
+## 宏生成了什么：一个具体例子
+
+```rust
+#[derive(NsonSerialize, NsonDeserialize)]
+struct Point { x: u64, y: u64 }
+```
+
+这三个 derive 各生成一份实现。以下是**结构还原**（与宏实际输出的模式一致，
+简化了无关细节）。
+
+**`NsonSerialize`（序列化）**——把字段逐个发射成事件：
+
+```rust
+impl ::nextjson::NsonSerialize for Point {
+    fn nextencode<E: ::nextjson::FormatEncoder>(
+        &self, __e: &mut E,
+    ) -> ::core::result::Result<(), E::Error> {
+        __e.begin_object()?;
+        __e.key("x")?;
+        ::nextjson::NsonSerialize::nextencode(&self.x, __e)?;
+        __e.key("y")?;
+        ::nextjson::NsonSerialize::nextencode(&self.y, __e)?;
+        __e.end_object()?;
+        ::core::result::Result::Ok(())
+    }
+}
+```
+
+注意它**没有**把 `Point` 转成 `Value` 再编码——是直接向 `FormatEncoder` 发射
+事件。这就是"没有中间表示"的字面含义。
+
+**`NsonDeserialize`（反序列化）**——字段级槽逐字段解码，`__seen` 位图跟踪
+"哪个字段出现过了"：
+
+```rust
+impl<'de> ::nextjson::NsonDeserialize<'de> for Point {
+    fn nextdecode_into<__D: ::nextjson::FormatDecoder<'de>>(
+        __d: &mut __D,
+        __out: &mut ::nextjson::DecodeSlot<Self>,
+    ) -> ::core::result::Result<(), __D::Error> {
+        __d.set_expecting(Self::expecting());
+        let mut __slot0: ::nextjson::private::InitSlot<u64> =
+            ::nextjson::private::InitSlot::new();
+        let mut __slot1: ::nextjson::private::InitSlot<u64> =
+            ::nextjson::private::InitSlot::new();
+        let mut __seen: u64 = 0;
+        __d.begin_object()?;
+        while let ::core::option::Option::Some(__key) = __d.object_key()? {
+            match __key.as_ref() {
+                "x" => { __seen |= 1u64 << 0; __slot0.nextdecode(__d)?; }
+                "y" => { __seen |= 1u64 << 1; __slot1.nextdecode(__d)?; }
+                _ => { __d.skip_value()?; }
+            }
+            if !__d.object_entry_sep()? { break; }
+        }
+        __d.end_object()?;
+        if !(__seen & (1u64 << 0) != 0) {
+            return Err(::nextjson::Error::missing_field("x").into());
+        }
+        if !(__seen & (1u64 << 1) != 0) {
+            return Err(::nextjson::Error::missing_field("y").into());
+        }
+        // 全部成功，组装并写入调用方的槽
+        __out.write(Self { x: __slot0.take(), y: __slot1.take() });
+        ::core::result::Result::Ok(())
+    }
+}
+```
+
+几个机制细节：
+
+- 字段级槽是 `InitSlot`（内部就是 `DecodeSlot`，见 [[Decode Slot]]）——`nextdecode`
+  直接把值解码进槽，省掉一层中间 `Option`；
+- `__seen` 位图（字段 ≤64 用 `u64` 位图，>64 用 `Vec<bool>`）用于必填字段检查：
+  解码结束时没见过的必填字段 → `missing_field` 报错；
+- 未知字段默认 `skip_value()` 跳过；`deny_unknown_fields` 时改为
+  `unknown_field` 报错；
+- 重复字段用 `write` 覆盖旧值，旧值正常 drop；
+- `set_expecting` 让类型不匹配错误带上类型名（见 [[Error Model]]）。
+
+**`NsonSchema`（schema）**——一份编译期常量：
+
+```rust
+impl ::nextjson::NsonSchema for Point {
+    const SCHEMA: ::nextjson::TypeSchema =
+        ::nextjson::TypeSchema::Struct(&::nextjson::StructSchema {
+            name: "Point",
+            transparent: false,
+            fields: &[
+                ::nextjson::FieldSchema {
+                    name: "x", orig: "x", required: true, flattened: false,
+                    ty: ::nextjson::TypeSchema::U64,
+                },
+                // ... y 同理
+            ],
+        });
+}
+```
+
+三个 derive 是**从同一份输入**（你的类型定义）生成的，所以字段名、重命名、
+skip 规则天然一致——这就是"schema 与实现同源"的机制。
+
+> 宏对 `rename_all`、`skip`、`flatten`、枚举的四种表示（外部/内部/邻接/untagged）
+> 等属性会生成对应的分支代码。属性清单见下。
 
 ## 容器级属性（写在类型上）
 
@@ -83,3 +188,4 @@
 
 - 零依赖实现细节与坑：[[Zero-Dependency Macros]]
 - 生成代码背后的契约：[[Core Contracts]] / [[Compile-Time Schema]]
+

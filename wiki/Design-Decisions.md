@@ -3,6 +3,10 @@
 本页以 ADR（Architecture Decision Record）风格记录每个关键设计选择的**背景 /
 选择 / 后果 / 踩坑**。全部基于仓库源码、提交与测试事实。
 
+> 阅读建议：每条 ADR 是独立的。想快速理解全库骨架，先看
+> [[Design Philosophy]] 和 [[Core Contracts]]；这里记录的是"为什么是这一步"
+> 的具体决策与踩坑。
+
 ## ADR-01：无 Visitor 的就地解码
 
 - **背景**：serde 用 `Visitor` 状态机让 Deserializer 驱动类型；需要"解码到调用方
@@ -138,3 +142,26 @@
   Value 树**，而非能力。安全对比不做"全面更安全"断言。
 - **后果**：Wiki 与 README 的所有对比表述均为此纪律（见
   [[Comparison with serde]]）。
+
+## ADR-18：`FastEncoder` 信任策略（校验 vs 免校验）
+
+- **背景**：同进程 A/B 证明 `Encoder` 的每值协议校验 = **2.0x 编码开销**
+  （校验型 440 MB/s vs 免校验发射器 877 MB/s）——这是编码差距的真正大头。
+- **选择**：`Encoder<W, const VALIDATE: bool = true>` 泛型化；顶层
+  `nextencode`/`to_vec`/`to_string`/writer 入口走 `FastEncoder = Encoder<W, false>`
+  （信任派生代码，serde 同款信任模型）；校验型保持为公开默认。
+- **后果**：编码约 2x；`const` 折叠裁掉校验分支；key/separator 快路径仍取
+  first 标志（输出正确性必需）。
+- **踩坑**：裸 `Encoder::new(...)` 调用处必须显式标注
+  `Encoder::<_, true>::new(...)`（const 泛型无法从用法推断）。
+
+## ADR-19：SWAR 字符串转义快路径
+
+- **背景**：JSON 字符串转义逐字节扫描是编码热路径的一部分。
+- **选择**：`write_escaped_str` 快路径用 **8 字节块 SWAR 检测**（hasless<0x20 +
+  has_zero('"') + has_zero('\\') + 高位检测），纯 safe 无 unsafe、no_std 兼容；
+  `frames: Vec::with_capacity(32)` 预分配。
+- **后果**：长字符串负载收益最大；短字符串/键走尾部逐字节等价路径。
+- **踩坑**：`u64::from_le_bytes(try_into().unwrap())` 的 `unwrap` 由编译器消掉
+  边界检查（切片长度是编译期常量 8）。
+
