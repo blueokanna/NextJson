@@ -7,7 +7,25 @@
 仓库的 GitHub Wiki 由 `/wiki` 目录内容发布而来：
 [GitHub Wiki](https://github.com/blueokanna/NextJson/wiki)
 
-面向生产环境、零第三方 crate、支持 `no_std + alloc` 的 Rust JSON / CBOR 库。
+NextJson 是面向 Rust 的**数据契约引擎**：零依赖、`no_std + alloc`，为受控协议
+和资源约束环境而设计。它不是"另一个 serde"，也不声称替代面向设备间高频链路的
+Postcard。它把三个性质做成了一等能力：
+
+1. **schema-first**——类型不只负责编解码，还负责*描述契约*。每个派生类型携带
+   `const SCHEMA: TypeSchema`：一个在 `const` 上下文构建的编译期元数据树，可
+   在运行时内省、渲染为 JSON Schema、用于校验进入系统的数据，并与上一版本
+   diff 以检测协议破坏。
+2. **multi-format**——同一类型切换线格式是一等操作，而不是适配器。16 种格式
+   通过格式中立的 `FormatEncoder` / `FormatDecoder` 契约共享同一份
+   `NsonSerialize` / `NsonDeserialize` 实现；经由统一事件流的格式间中继被验证
+   与直接编码字节完全一致。
+3. **reuse-first**——持续解码优先考虑内存与分配复用。类型化解码通过带检查的
+   `DecodeSlot` 状态直接写入字段（无中间树、无占位值），未转义字符串借用输入
+   缓冲区，统一 token 流在不拖累热路径的前提下支持内容重放。
+
+诚实的边界：对高频设备间通信，真正重要的是字节数、确定性、版本兼容和延迟——
+统一 API 不会自动赢得这些指标。NextJson 的价值在线的契约层：描述它、校验什么
+能进入、以及当改动破坏对端时把它检测出来。
 
 ### 当前保证
 
@@ -95,6 +113,113 @@ assert_eq!(actual, expected);
 ```
 
 `nextdecode` 会验证整个输入已经消费完毕，因此第二个顶层值和尾随垃圾都会报错。
+
+### 契约三支柱
+
+#### 支柱一：schema 作为编译期契约
+
+每个派生类型暴露 `const SCHEMA: TypeSchema`——在 `const` 上下文构建的 `Copy`
+元数据树。它不是会漂移的文档：它与驱动编解码的属性解析来自同一来源，因此
+描述与线上行为不可能不一致。
+
+```rust
+# use nextjson::{NsonDeserialize, NsonSerialize};
+#[derive(NsonSerialize, NsonDeserialize)]
+struct Point { x: i32, y: i32 }
+
+let schema = nextjson::schema_of::<Point>();
+let json_schema = nextjson::to_json_schema::<Point>(); // draft-07 风格
+# let _ = (schema, json_schema);
+```
+
+schema 树是另外两根支柱的输入：校验与版本兼容性检查。
+
+#### 支柱二：安全策略进入 schema
+
+schema 不只描述"数据长什么样"，还声明"数据允许怎样进入系统"。限制通过派生
+属性声明并携带在 `SCHEMA` 内；`nextjson::validate` 将解码出的 `Value` 对照
+schema 逐节点校验，报告所有违规，以及敏感字段的路径供日志脱敏。
+
+```rust
+use nextjson::{NsonDeserialize, NsonSerialize};
+
+#[derive(NsonSerialize, NsonDeserialize)]
+#[njson(max_depth = 4, deny_unknown_fields)]
+struct Request {
+    #[njson(max_str_len = 64)]
+    name: String,
+    #[njson(max_items = 100, min = 0, max = 1000)]
+    samples: Vec<i32>,
+    #[njson(sensitive)]
+    token: String,
+}
+
+let input = br#"{"name":"NextJson","samples":[1,2,3],"token":"secret"}"#;
+let decoded: nextjson::Value = nextjson::nextdecode(input)?;
+let report = nextjson::validate_value::<Request>(&decoded);
+assert!(report.is_ok());          // 策略通过
+for v in &report.violations {     // 或逐条检查违规
+    // 例如 path "name" 上的 ViolationKind::StringTooLong { max: 64 }
+}
+// report.sensitive == ["token"] — 日志前先脱敏
+```
+
+已声明的限制（全部可选、全部 const 可构造）：
+
+| 属性 | 作用域 | 生效对象 |
+| ---- | ------ | -------- |
+| `max_str_len = N` | 字段 / newtype 变体 | 字符串长度（Unicode 标量数） |
+| `max_items = N`   | 字段 / newtype 变体 | 数组元素数 / 对象条目数 |
+| `min = N` / `max = N` | 字段 / newtype 变体 | 数字（闭区间，`i128`/`u128` 精确） |
+| `sensitive` | 字段 / newtype 变体 | 仅报告、永不拒绝（脱敏） |
+| `max_depth = N` | 容器 | 该类型以下的容器嵌套 |
+| `deny_unknown_fields` | 容器 | 结构体与带 tag 枚举的未知键 |
+
+运行时调节走 `ValidateConfig`：全局嵌套上限（`max_depth`）与消息大小上限
+（`max_message_size` + 实际 `message_len`）——后者是字节层关切，Value 遍历器
+自身无法测量。
+
+校验是解码后的闸门：作用于已物化的 `Value`，不触碰热路径。它一趟收集全部违规
+（收集式而非快速失败式），生产闸门可以一次性记录所有违规路径。
+
+#### 支柱三：把版本兼容变成 schema diff
+
+因为 schema 是值，协议演进就变成了纯函数：`nextjson::check(旧_schema, 新_schema)`
+报告所有可能破坏"旧读者消费新数据"（前向）或"新读者消费旧数据"（后向）的改动，
+并给出逐条严重级别。
+
+```rust
+use nextjson::{check_between, Severity, NsonDeserialize, NsonSerialize};
+
+#[derive(NsonSerialize, NsonDeserialize)] struct V1 { id: u64, name: String }
+#[derive(NsonSerialize, NsonDeserialize)] struct V2 { id: u64, name: String, email: String }
+
+let report = check_between::<V1, V2>();
+assert!(!report.backward_compatible); // 旧数据缺少新必填字段
+assert!(report.forward_compatible);
+assert_eq!(report.worst_severity(), Some(Severity::Critical));
+```
+
+可检测的类别：
+
+| 改动 | 级别 | 受影响方向 |
+| ---- | ---- | ---------- |
+| 新增必填字段 | Critical | 后向 |
+| 删除必填字段 | Critical | 前向 |
+| 字段 / 变体改名 | Critical | 双向 |
+| 类型族改变（string→number、struct→seq、……） | Critical | 双向 |
+| 新增 / 删除枚举变体 | Critical | 前向 / 后向 |
+| tag 表示改变（`tag` / `content` / `untagged`） | Critical | 双向 |
+| 可选字段变必填 | Critical | 后向 |
+| 浮点变整数 | Critical | 后向 |
+| 整数范围收窄 | Warning | 后向 |
+| 整数变浮点 | Warning | 前向 |
+| 必填字段变可选 | Warning | 前向 |
+| 默认值改变 | Note | —（语义） |
+| 安全策略改变 | Note | —（不影响线上字节） |
+
+这是*静态*报告：它不知道线上的实际数据。`Warning`（例如 `i32` → `u8`）只有在
+真实数据永不超出新范围时才安全。建议在每次发布候选的 CI 中运行它。
 
 ### 零拷贝字符串
 
@@ -236,7 +361,7 @@ assert_eq!(json2, json);
 | `csv`      | int/float/bool/str                     | 行；带表头的对象行 | RFC 4180 |
 | `urlform`  | int/float/bool/str                     | 仅扁平 key/value map | RFC 3986 百分号编码 |
 | `cbor`     | null/bool/int/float/str                | array/map         | RFC 8949 JSON 兼容 profile，经事件流中继 |
-| `msgpack`  | nil/bool/int/float/str                 | array/map         | JSON 兼容标量/容器族；不支持 bin/ext；128 位整数放不进 64 位时拒绝 |
+| `msgpack`  | nil/bool/int/float/str                 | array/map         | JSON 兼容标量/容器族；不支持 bin/ext；128 位整数放不进 64 位时拒绝；非有限浮点在线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
 | `bson`     | null/bool/int32/int64/double/str       | document/array    | 文档形态：裸标量根被拒绝 |
 | `bencode`  | 整数、UTF-8 字符串                     | list/dict         | key 规范排序；无 null/float；bool 映射为 1/0 |
 | `postcard` | null/bool/无符号整数/str               | seq/map           | **非自描述**：拒绝有符号整数、float、`Option`、`Value` 和 peek |
@@ -254,15 +379,40 @@ BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名
 MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 输入。
 精确字节见 `formats` 集成测试。
 
+### 格式等价性验证
+
+“一个数据模型、多种线格式、不做有损回退”这个主张由 `tests/equivalence.rs`
+中的自动化等价矩阵验证：
+
+- **中继与直接编码字节一致**——对 JSON 兼容家族（JSON、JSON5、Hjson、YAML、
+  RON、CBOR、MessagePack）的每一对格式，把值经事件流从一个格式中继到另一个，
+  产物必须与目标编码器直接编码的字节完全相同。
+- **随机差分**——确定性 LCG 生成 200 个嵌套值；每个值在整个家族内中继并保持
+  字节一致。
+- **边界值**——精确 `i128`/`u128`、`f64` 极值、`-0.0`、Unicode 标量边界与
+  控制字符，穿过每种能表示它们的线格式。
+- **歧义语义**——重复键处处以最后一次出现为准；未知字段被无模式 `Value` 消费者
+  保留。
+
+这个平台抓到过真实的 codec bug（JSON5/Hjson 的 `\u` 转义与代理对、YAML 单引号
+标量折叠换行、文本编解码器丢整值浮点的浮点性、YAML 根空容器不输出字节），并防止
+它们回归。
+
 ### 派生与 Schema
 
 自有派生宏支持结构体、元组结构体、泛型、常量泛型和多种枚举表示。主要属性：
 
 - 容器：`rename_all`（含 `serialize`/`deserialize` 方向性写法）、`tag`、`content`、`untagged`、`deny_unknown_fields`、`default`、`transparent`、`crate`、`bound`（含方向性 `bound(serialize=…, deserialize=…)`）、`into`、`from`、`try_from`、`remote`、`expecting`（覆写反序列化错误消息中的类型描述；派生实现自动把它安装到解码器，因此容器级类型不匹配如 `begin_object` 遇 `[` 会报告类型名而非裸 `'{'`；默认是类型的完整路径）；
-- 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`、`getter`；
-- 变体：`rename`、`rename_all`、`skip`、方向性 skip。
+- 字段：`rename`、`alias`、`default`、`skip`、`skip_serializing`、`skip_deserializing`、`skip_serializing_if`、`flatten`、`borrow`、`with`、`serialize_with`、`deserialize_with`、`getter`，以及安全策略属性 `max_str_len`、`max_items`、`min`、`max`、`sensitive`；
+- 变体：`rename`、`rename_all`、`skip`、方向性 skip，以及（newtype 变体上）同一组安全策略属性，作用于其内层字段。
 
 属性同时接受 `#[njson(...)]`、`#[nextjson(...)]` 与 `#[serde(...)]` 三种写法，迁移既有 serde 类型时无需改写属性。
+
+派生宏完全用标准 `proc_macro` API 实现（无 `syn`、`quote`、`proc-macro2`）。
+取舍说得很直白：手写解析器无法提供与完整 `syn` 移植同等的 span 级诊断，因此当它
+不理解某个 item（包括未来它没见过的 Rust 语法）时，会以指名消息大声失败，而不是
+从误解析的子集生成 impl。泛型、`where` 子句、生命周期、路径、`PhantomData` 与
+全部四种枚举表示都有支持并被集成测试覆盖。
 
 每个派生类型同时提供 `const SCHEMA: TypeSchema`：
 
@@ -321,6 +471,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo check -p nextjson --no-default-features --locked
+cargo check -p nextjson --all-features --locked   # 再用固定工具链验证 MSRV
 cargo doc --workspace --all-features --no-deps --locked
 cargo tree --workspace --all-features --edges normal,build,dev
 ```

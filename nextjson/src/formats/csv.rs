@@ -428,7 +428,7 @@ impl<W: Write> FormatEncoder for CsvEncoder<W> {
     }
 
     fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
-        self.push_cell(tree::number_string(value))
+        self.push_cell(tree::number_string(value)?)
     }
 
     fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
@@ -715,7 +715,7 @@ impl CsvDecoder {
         if let Some(t) = self.lookahead.take() {
             return Ok(match t {
                 Token::Str(s) => s.into_owned(),
-                Token::Number(n) => tree::number_string(&n),
+                Token::Number(n) => tree::number_string(&n)?,
                 Token::Bool(b) => b.to_string(),
                 Token::Null => "null".to_string(),
                 _ => return Err(Error::custom("csv: unexpected token in cell")),
@@ -733,7 +733,10 @@ fn classify_cell(cell: &str) -> Token<'static> {
     if let Ok(v) = cell.parse::<u64>() {
         return Token::Number(Number::from(v));
     }
-    if let Ok(v) = cell.parse::<f64>() {
+    // Non-finite floats (`inf`, `1e999`) are outside the JSON data model;
+    // the lossy cell classifier leaves them as strings rather than
+    // fabricating a number that cannot round-trip.
+    if let Some(v) = tree::parse_float(cell) {
         return Token::Number(Number::F64(v));
     }
     match cell {
@@ -752,6 +755,9 @@ fn parse_number(s: &str) -> Result<Number> {
         return Ok(Number::from(v));
     }
     if let Ok(v) = s.parse::<f64>() {
+        if !v.is_finite() {
+            return Err(Error::custom("csv: non-finite float"));
+        }
         return Ok(Number::F64(v));
     }
     Err(Error::custom(alloc::format!("csv: invalid number {s:?}")))

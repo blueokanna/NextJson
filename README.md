@@ -7,8 +7,34 @@
 The repository Wiki is published from the `/wiki` directory:
 [GitHub Wiki](https://github.com/blueokanna/NextJson/wiki)
 
-A production-oriented, zero-third-party-crate Rust JSON/CBOR library with
-`no_std + alloc` support.
+NextJson is a **data-contract engine** for Rust: a dependency-free,
+`no_std + alloc` library built for controlled protocols and
+resource-constrained environments. It is not "another serde" and it does not
+claim to replace Postcard for device-to-device links. What it does is make
+three properties first-class:
+
+1. **schema-first** — a type does not only encode and decode, it *describes
+   the contract*. Every derived type carries `const SCHEMA: TypeSchema`, a
+   compile-time metadata tree that can be introspected at runtime, rendered
+   as JSON Schema, used to validate incoming data, and diffed against a
+   previous release to detect protocol breakage.
+2. **multi-format** — switching wire formats for the same type is a
+   first-class operation, not an adapter. Sixteen formats share one
+   `NsonSerialize` / `NsonDeserialize` implementation through the
+   format-neutral `FormatEncoder` / `FormatDecoder` contracts, and
+   format-to-format relay through the shared event stream is verified to be
+   byte-identical to direct encoding.
+3. **reuse-first** — sustained decoding prioritizes memory and allocation
+   reuse. Typed decode streams straight into your fields through checked
+   `DecodeSlot` state (no intermediate tree, no placeholder value), unescaped
+   strings borrow the input buffer, and the unified token stream lets content
+   be replayed without taxing the hot path.
+
+The honest scope: for high-frequency device-to-device communication, what
+matters is byte count, determinism, version compatibility and latency — a
+unified API does not win those by itself. NextJson's job is the contract
+layer around the wire: describe it, validate what enters, and detect when a
+change breaks the other side.
 
 ### Guarantees
 
@@ -103,6 +129,122 @@ let actual: User = nextjson::nextdecode(&bytes)?;
 assert_eq!(actual, expected);
 # Ok::<(), nextjson::Error>(())
 ```
+
+### The contract pillars
+
+#### Pillar 1 — schema as a compile-time contract
+
+Every derived type exposes `const SCHEMA: TypeSchema`, a `Copy` metadata tree
+built in `const` context. It is not documentation that can drift: it is
+generated from the same attribute parse that drives encode and decode, so the
+description and the wire behavior cannot disagree.
+
+```rust
+# use nextjson::{NsonDeserialize, NsonSerialize};
+#[derive(NsonSerialize, NsonDeserialize)]
+struct Point { x: i32, y: i32 }
+
+let schema = nextjson::schema_of::<Point>();
+let json_schema = nextjson::to_json_schema::<Point>(); // draft-07 style
+# let _ = (schema, json_schema);
+```
+
+The schema tree is the input to the two other pillars: validation and
+version-compatibility checking.
+
+#### Pillar 2 — safety policy as part of the schema
+
+A schema can declare what the type *allows to enter the system*, not just what
+it looks like. Limits are declared with derive attributes and carried inside
+`SCHEMA`; a validator (`nextjson::validate`) walks a decoded `Value` against
+the schema and reports every violation, plus the paths of sensitive values for
+redaction.
+
+```rust
+use nextjson::{NsonDeserialize, NsonSerialize};
+
+#[derive(NsonSerialize, NsonDeserialize)]
+#[njson(max_depth = 4, deny_unknown_fields)]
+struct Request {
+    #[njson(max_str_len = 64)]
+    name: String,
+    #[njson(max_items = 100, min = 0, max = 1000)]
+    samples: Vec<i32>,
+    #[njson(sensitive)]
+    token: String,
+}
+
+let input = br#"{"name":"NextJson","samples":[1,2,3],"token":"secret"}"#;
+let decoded: nextjson::Value = nextjson::nextdecode(input)?;
+let report = nextjson::validate_value::<Request>(&decoded);
+assert!(report.is_ok());          // policy passed
+for v in &report.violations {     // or inspect every violation
+    // e.g. ViolationKind::StringTooLong { max: 64 } at path "name"
+}
+// report.sensitive == ["token"] — redact before logging
+```
+
+Declared limits (all optional, all const-constructible):
+
+| Attribute | Scope | Enforced on |
+| --------- | ----- | ----------- |
+| `max_str_len = N` | field / newtype variant | string length in Unicode scalar values |
+| `max_items = N`   | field / newtype variant | array elements / object entries |
+| `min = N` / `max = N` | field / newtype variant | numbers (inclusive, exact for `i128`/`u128`) |
+| `sensitive` | field / newtype variant | reported, never rejected (redaction) |
+| `max_depth = N` | container | container nesting below this type |
+| `deny_unknown_fields` | container | unknown keys on structs and tagged enums |
+
+Runtime tuning goes through `ValidateConfig`: a global nesting cap
+(`max_depth`) and a message-size bound (`max_message_size` + the actual
+`message_len`), which is a byte-layer concern the value walker cannot measure
+itself.
+
+Validation is a post-decode gate: it runs on an already-materialized `Value`
+and never touches the hot decode path. It collects all violations in one pass
+(fail-collect, not fail-fast) so a production gate can log every offending
+path at once.
+
+#### Pillar 3 — version compatibility as a schema diff
+
+Because the schema is a value, protocol evolution becomes a pure function:
+`nextjson::check(old_schema, new_schema)` reports every change that can break
+an old reader consuming new data (forward) or a new reader consuming old data
+(backward), with per-issue severity.
+
+```rust
+use nextjson::{check_between, Severity, NsonDeserialize, NsonSerialize};
+
+#[derive(NsonSerialize, NsonDeserialize)] struct V1 { id: u64, name: String }
+#[derive(NsonSerialize, NsonDeserialize)] struct V2 { id: u64, name: String, email: String }
+
+let report = check_between::<V1, V2>();
+assert!(!report.backward_compatible); // old data lacks the new required field
+assert!(report.forward_compatible);
+assert_eq!(report.worst_severity(), Some(Severity::Critical));
+```
+
+Detected classes:
+
+| Change | Severity | Direction affected |
+| ------ | -------- | ------------------ |
+| Added required field | Critical | backward |
+| Removed required field | Critical | forward |
+| Field / variant renamed | Critical | both |
+| Type-family change (string→number, struct→seq, ...) | Critical | both |
+| Added / removed enum variant | Critical | forward / backward |
+| Tag representation change (`tag` / `content` / `untagged`) | Critical | both |
+| Optional field became required | Critical | backward |
+| Float became integer | Critical | backward |
+| Integer range narrowed | Warning | backward |
+| Integer became float | Warning | forward |
+| Required field became optional | Warning | forward |
+| Default value changed | Note | — (semantic) |
+| Safety policy changed | Note | — (not wire-breaking) |
+
+This is a *static* report: it cannot know the actual values in the field. A
+`Warning` (e.g. `i32` → `u8`) is safe only if the real data never exceeds the
+new range. Run it in CI on every release candidate.
 
 ### Cross-format architecture
 
@@ -221,7 +363,7 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | `csv` | int/float/bool/str | rows; object rows with header | RFC 4180 |
 | `urlform` | int/float/bool/str | flat key/value map only | RFC 3986 percent-encoding |
 | `cbor` | null/bool/int/float/str | array/map | RFC 8949 JSON-compatible profile via event relay |
-| `msgpack` | nil/bool/int/float/str | array/map | JSON-compatible scalar/container families; no bin/ext; 128-bit integers rejected when they do not fit 64-bit |
+| `msgpack` | nil/bool/int/float/str | array/map | JSON-compatible scalar/container families; no bin/ext; 128-bit integers rejected when they do not fit 64-bit; non-finite floats pass through losslessly on the wire but error when relayed to formats that cannot represent them (JSON, CBOR) |
 | `bson` | null/bool/int32/int64/double/str | document/array | document-shaped: a bare scalar root is rejected |
 | `bencode` | int, UTF-8 strings | list/dict | canonical sorted keys; no null/float; bool maps to 1/0 |
 | `postcard` | null/bool/unsigned int/str | seq/map | **non-self-describing**: signed integers, floats, `Option`, `Value`, and peek are rejected |
@@ -240,6 +382,28 @@ self-round-trips: MessagePack bytes matching Python `msgpack`, CBOR bytes
 matching Python `cbor2`, CPython 3 protocol-2 pickle bytes, canonical bencode,
 MongoDB-style BSON documents, and hand-written TOML/YAML/RON/S-expression/
 JSON5/Hjson inputs. See the `formats` integration tests for the exact bytes.
+
+### Format-equivalence verification
+
+The claim "one data model, many wire formats, no lossy fallback" is verified
+as an automated equivalence matrix in `tests/equivalence.rs`:
+
+- **Transcode is byte-identical to direct encoding** — for every pair of the
+  JSON-compatible family (JSON, JSON5, Hjson, YAML, RON, CBOR, MessagePack),
+  relaying a value from one format into another through the event stream
+  produces exactly the bytes the destination encoder would produce directly.
+- **Randomized differential** — a deterministic LCG generates 200 nested
+  values; each is relayed across the whole family and must stay byte-identical.
+- **Boundary values** — exact `i128`/`u128`, `f64` extremes, `-0.0`, Unicode
+  scalar boundaries and control characters travel through every wire format
+  that can represent them.
+- **Ambiguity semantics** — duplicate keys resolve to the last occurrence
+  everywhere; unknown fields are preserved by the schema-less `Value` consumer.
+
+This platform has caught real codec bugs (JSON5/Hjson `\u` escapes and
+surrogate pairs, YAML single-quoted scalars folding line breaks, integral
+floats losing their float-ness in text codecs, YAML root empty containers
+emitting no bytes) and keeps them from regressing.
 
 ### Zero-copy scope
 
@@ -263,11 +427,22 @@ directional `bound(serialize=…, deserialize=…)`), `into`, `from`, `try_from`
   report the type name instead of a bare `'{'`; the default is the type's
   fully qualified path). Field attributes include `rename`, `alias`,
 `default`, `skip`, directional skips, `skip_serializing_if`, `flatten`,
-`borrow`, `with`, `serialize_with`, `deserialize_with`, and `getter`. Variant
-attributes include `rename`, `rename_all`, `skip`, and directional skips.
-Attributes are accepted in `#[njson(...)]`, `#[nextjson(...)]`, or
-`#[serde(...)]` form, so existing serde types migrate without rewriting their
-attributes.
+`borrow`, `with`, `serialize_with`, `deserialize_with`, `getter`, and the
+safety-policy attributes `max_str_len`, `max_items`, `min`, `max`,
+`sensitive`. Variant attributes include `rename`, `rename_all`, `skip`,
+directional skips, and (on newtype variants) the same safety-policy
+attributes, which apply to the contained field. Attributes are accepted in
+`#[njson(...)]`, `#[nextjson(...)]`, or `#[serde(...)]` form, so existing
+serde types migrate without rewriting their attributes.
+
+The derive macro is implemented entirely with the standard `proc_macro` API
+(no `syn`, `quote`, or `proc-macro2`). The trade-off is stated plainly: a
+hand-written parser cannot offer the same span-precise diagnostics as a full
+`syn` port, so the macro fails loudly with a named message when it does not
+understand an item (including any future Rust syntax it has not seen), rather
+than emitting impls from a mis-parsed subset. Generics, `where` clauses,
+lifetimes, paths, `PhantomData`, and all four enum representations are
+supported and covered by integration tests.
 
 Every derived type also exposes a `const SCHEMA: TypeSchema`:
 
@@ -334,6 +509,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo check -p nextjson --no-default-features --locked
+cargo check -p nextjson --all-features --locked   # then verify MSRV with the pinned toolchain
 cargo doc --workspace --all-features --no-deps --locked
 cargo tree --workspace --all-features --edges normal,build,dev
 ```

@@ -133,20 +133,28 @@ pub fn token_to_string<'de>(tokens: &[Token<'de>]) -> Result<String> {
 
 /// Decode any type from a [`Value`] (owned, any lifetime).
 pub fn nextdecode_value<T: for<'de> NsonDeserialize<'de>>(value: Value) -> Result<T> {
-    let tokens = value_to_tokens(&value);
+    let tokens = value_to_tokens(&value)?;
     let mut decoder = Decoder::from_tokens(tokens);
     let decoded = T::nextdecode(&mut decoder)?;
     decoder.end()?;
     Ok(decoded)
 }
 
-fn value_to_tokens(v: &Value) -> Vec<Token<'static>> {
+/// Convert a [`Value`] into an owned token stream, bounded to the same
+/// nesting limit the decoders enforce so a hand-built deep tree cannot
+/// overflow the stack.
+fn value_to_tokens(v: &Value) -> Result<Vec<Token<'static>>> {
     let mut out = Vec::new();
-    value_to_tokens_inner(v, &mut out);
-    out
+    value_to_tokens_inner(v, &mut out, 0)?;
+    Ok(out)
 }
 
-fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
+fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>, depth: u32) -> Result<()> {
+    if depth > 128 {
+        return Err(crate::error::Error::custom(
+            "value nesting exceeds the maximum depth (128)",
+        ));
+    }
     match v {
         Value::Null => out.push(Token::Null),
         Value::Bool(b) => out.push(Token::Bool(*b)),
@@ -155,7 +163,7 @@ fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
         Value::Array(a) => {
             out.push(Token::BeginArray);
             for x in a {
-                value_to_tokens_inner(x, out);
+                value_to_tokens_inner(x, out, depth + 1)?;
             }
             out.push(Token::EndArray);
         }
@@ -163,11 +171,12 @@ fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
             out.push(Token::BeginObject);
             for (k, val) in m.iter() {
                 out.push(Token::Str(Cow::Owned(k.to_string())));
-                value_to_tokens_inner(val, out);
+                value_to_tokens_inner(val, out, depth + 1)?;
             }
             out.push(Token::EndObject);
         }
     }
+    Ok(())
 }
 
 /// Internal-tag serialize: write `{ "<tag>": "<variant>", ...content }`.
@@ -271,7 +280,7 @@ mod tests {
             ),
             ("b".to_string(), Value::Bool(true)),
         ]));
-        let tokens = value_to_tokens(&v);
+        let tokens = value_to_tokens(&v).unwrap();
         let mut d = Decoder::from_tokens(tokens);
         let back: Map = NsonDeserialize::nextdecode(&mut d).unwrap();
         assert_eq!(

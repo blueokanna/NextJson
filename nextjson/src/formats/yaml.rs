@@ -41,7 +41,7 @@ impl Format for Yaml {
 
     fn decode<'de, T: NsonDeserialize<'de>>(self, input: &'de [u8]) -> Result<T> {
         let value = parse_yaml(input)?;
-        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value));
+        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value)?);
         let out = T::nextdecode(&mut decoder)?;
         decoder.end()?;
         Ok(out)
@@ -85,12 +85,20 @@ tree::impl_collecting_format_encoder!(YamlEncoder);
 fn emit_yaml(value: &Value, out: &mut Vec<u8>, indent: usize) -> Result<()> {
     match value {
         Value::Object(map) => {
+            if map.is_empty() {
+                out.extend_from_slice(b"{}\n");
+                return Ok(());
+            }
             for (k, v) in map.iter() {
                 emit_mapping_entry(k, v, out, indent)?;
             }
             Ok(())
         }
         Value::Array(items) => {
+            if items.is_empty() {
+                out.extend_from_slice(b"[]\n");
+                return Ok(());
+            }
             for item in items {
                 write_indent(out, indent);
                 out.extend_from_slice(b"-");
@@ -235,6 +243,9 @@ fn yaml_key(key: &str) -> String {
             )
         })
     {
+        if key.bytes().any(|b| b < 0x20) {
+            return yaml_double_quote(key);
+        }
         let mut out = String::with_capacity(key.len() + 2);
         out.push('\'');
         out.push_str(&key.replace('\'', "''"));
@@ -249,7 +260,7 @@ fn emit_scalar_yaml(value: &Value, out: &mut Vec<u8>) -> Result<()> {
     match value {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
-        Value::Number(n) => out.extend_from_slice(tree::number_string(n).as_bytes()),
+        Value::Number(n) => out.extend_from_slice(tree::number_string(n)?.as_bytes()),
         Value::String(s) => {
             if s.is_empty() {
                 out.extend_from_slice(b"\"\"");
@@ -259,6 +270,11 @@ fn emit_scalar_yaml(value: &Value, out: &mut Vec<u8>) -> Result<()> {
                 && !is_yaml_special(s)
             {
                 out.extend_from_slice(s.as_bytes());
+            } else if s.bytes().any(|b| b < 0x20) {
+                // Single-quoted scalars fold line breaks and forbid control
+                // characters, so strings containing them must use a
+                // double-quoted scalar with escapes.
+                out.extend_from_slice(yaml_double_quote(s).as_bytes());
             } else {
                 out.push(b'\'');
                 out.extend_from_slice(s.replace('\'', "''").as_bytes());
@@ -272,6 +288,35 @@ fn emit_scalar_yaml(value: &Value, out: &mut Vec<u8>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Render `s` as a YAML double-quoted scalar whose escapes the decoder's
+/// `unescape_double` understands: `\"`, `\\`, `\n`, `\r`, `\t`, `\0`, and
+/// `\uXXXX` for the remaining control characters. Non-ASCII characters stay
+/// as raw UTF-8 (valid inside YAML double-quoted scalars).
+fn yaml_double_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0}' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let cp = c as u32;
+                out.push_str("\\u00");
+                out.push(HEX[((cp >> 4) & 0xF) as usize] as char);
+                out.push(HEX[(cp & 0xF) as usize] as char);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn is_yaml_special(s: &str) -> bool {
@@ -1098,6 +1143,9 @@ fn parse_scalar_at_depth(raw: &str, depth: u32) -> Result<Value> {
         return Ok(Value::from(v));
     }
     if let Ok(v) = raw.parse::<f64>() {
+        if !v.is_finite() {
+            return Err(Error::custom("yaml: non-finite float"));
+        }
         return Ok(Value::from(v));
     }
     Ok(Value::from(raw.to_string()))
@@ -1142,11 +1190,54 @@ fn unescape_double(s: &str) -> Result<String> {
             Some('"') => out.push('"'),
             Some('\\') => out.push('\\'),
             Some('0') => out.push('\0'),
+            Some('u') => {
+                let hi = read_hex_escape(&mut chars)?;
+                if (0xD800..=0xDBFF).contains(&hi) {
+                    // High surrogate: combine with a following `\uXXXX` low.
+                    if chars.clone().next() == Some('\\') {
+                        chars.next();
+                        if chars.clone().next() == Some('u') {
+                            chars.next();
+                            let lo = read_hex_escape(&mut chars)?;
+                            if (0xDC00..=0xDFFF).contains(&lo) {
+                                let cp =
+                                    0x10000 + ((hi as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00);
+                                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                            } else {
+                                out.push('\u{FFFD}');
+                            }
+                        } else {
+                            out.push('\u{FFFD}');
+                        }
+                    } else {
+                        out.push('\u{FFFD}');
+                    }
+                } else if (0xDC00..=0xDFFF).contains(&hi) {
+                    out.push('\u{FFFD}');
+                } else {
+                    out.push(char::from_u32(hi as u32).unwrap_or('\u{FFFD}'));
+                }
+            }
             Some(other) => out.push(other),
             None => return Err(Error::custom("yaml: unterminated escape")),
         }
     }
     Ok(out)
+}
+
+/// Read four hexadecimal digits from a char iterator into a `u16`.
+fn read_hex_escape(chars: &mut core::str::Chars<'_>) -> Result<u16> {
+    let mut v: u16 = 0;
+    for _ in 0..4 {
+        let c = chars
+            .next()
+            .ok_or_else(|| Error::custom("yaml: truncated hex escape"))?;
+        let d = c
+            .to_digit(16)
+            .ok_or_else(|| Error::custom("yaml: invalid hex escape"))?;
+        v = v * 16 + d as u16;
+    }
+    Ok(v)
 }
 
 fn parse_flow_map(raw: &str, depth: u32) -> Result<Value> {
@@ -1217,7 +1308,9 @@ impl Value {
     fn as_string_lossy(&self) -> String {
         match self {
             Value::String(s) => s.clone(),
-            Value::Number(n) => tree::number_string(n),
+            // A Number key can only be finite after the decoder rejects
+            // non-finite floats; the fallback is defensive only.
+            Value::Number(n) => tree::number_string(n).unwrap_or_default(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             _ => alloc::format!("{self}"),

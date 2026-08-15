@@ -44,7 +44,7 @@ impl Format for Toml {
 
     fn decode<'de, T: NsonDeserialize<'de>>(self, input: &'de [u8]) -> Result<T> {
         let value = parse_toml(input)?;
-        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value));
+        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value)?);
         let out = T::nextdecode(&mut decoder)?;
         decoder.end()?;
         Ok(out)
@@ -191,7 +191,7 @@ fn emit_scalar(value: &Value, out: &mut Vec<u8>) -> Result<()> {
             Ok(())
         }
         Value::Number(n) => {
-            out.extend_from_slice(tree::number_string(n).as_bytes());
+            out.extend_from_slice(tree::number_string(n)?.as_bytes());
             Ok(())
         }
         Value::String(s) => {
@@ -621,6 +621,9 @@ impl<'a> Parser<'a> {
             return Ok(Value::from(v));
         }
         if let Ok(v) = clean.parse::<f64>() {
+            if !v.is_finite() {
+                return Err(Error::custom("toml: non-finite float"));
+            }
             return Ok(Value::from(v));
         }
         Err(Error::custom(alloc::format!(

@@ -40,7 +40,7 @@ impl Format for Envy {
                 map.insert(k, coerce_env_value(&v));
             }
             let value = Value::Object(map);
-            let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value));
+            let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value)?);
             let out = T::nextdecode(&mut decoder)?;
             decoder.end()?;
             Ok(out)
@@ -62,7 +62,8 @@ fn coerce_env_value(v: &str) -> Value {
     if let Ok(n) = v.parse::<u64>() {
         return Value::from(n);
     }
-    if let Ok(f) = v.parse::<f64>() {
+    // Non-finite floats stay strings; the JSON data model has no NaN / inf.
+    if let Some(f) = crate::formats::tree::parse_float(v) {
         return Value::from(f);
     }
     match v {

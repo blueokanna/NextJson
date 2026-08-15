@@ -110,6 +110,9 @@ pub(crate) struct ContainerAttrs {
     /// `#[serde(expecting = "...")]`: overrides the default type-description
     /// used in deserialization type-mismatch / length-mismatch messages.
     pub expecting: Option<String>,
+    /// `#[njson(max_depth = N)]`: maximum container nesting allowed below
+    /// this type (schema safety policy).
+    pub max_depth: Option<u64>,
 }
 
 impl ContainerAttrs {
@@ -142,6 +145,7 @@ impl ContainerAttrs {
             try_from: None,
             remote: None,
             expecting: None,
+            max_depth: None,
         };
         for m in metas {
             match m.name() {
@@ -209,6 +213,7 @@ impl ContainerAttrs {
                         }
                     }
                 }
+                "max_depth" => c.max_depth = parse_u64(m.value()),
                 _ => {}
             }
         }
@@ -292,6 +297,16 @@ pub(crate) struct FieldAttrs {
     pub borrow: bool,
     /// `#[serde(getter = "path")]`: read the field through this accessor.
     pub getter: Option<String>,
+    /// `#[njson(max_str_len = N)]`: maximum string length (safety policy).
+    pub max_str_len: Option<u64>,
+    /// `#[njson(max_items = N)]`: maximum elements / entries (safety policy).
+    pub max_items: Option<u64>,
+    /// `#[njson(min = N)]`: inclusive numeric lower bound (safety policy).
+    pub min: Option<i128>,
+    /// `#[njson(max = N)]`: inclusive numeric upper bound (safety policy).
+    pub max: Option<i128>,
+    /// `#[njson(sensitive)]`: mark the value as sensitive (safety policy).
+    pub sensitive: bool,
 }
 
 impl FieldAttrs {
@@ -329,10 +344,27 @@ pub(crate) fn field_attrs(metas: &[Meta]) -> FieldAttrs {
             "deserialize_with" => f.deserialize_with = path_of(m),
             "with" => f.with = path_of(m),
             "getter" => f.getter = path_of(m),
+            "max_str_len" => f.max_str_len = parse_u64(m.value()),
+            "max_items" => f.max_items = parse_u64(m.value()),
+            "min" => f.min = parse_i128(m.value()),
+            "max" => f.max = parse_i128(m.value()),
+            "sensitive" => f.sensitive = true,
             _ => {}
         }
     }
     f
+}
+
+/// Parse an optional quoted-or-bare unsigned integer attribute value.
+fn parse_u64(v: Option<&str>) -> Option<u64> {
+    let s = v.map(|s| s.trim().trim_matches('"').trim()).unwrap_or("");
+    s.parse().ok()
+}
+
+/// Parse an optional quoted-or-bare signed integer attribute value.
+fn parse_i128(v: Option<&str>) -> Option<i128> {
+    let s = v.map(|s| s.trim().trim_matches('"').trim()).unwrap_or("");
+    s.parse().ok()
 }
 
 fn path_of(m: &Meta) -> Option<String> {
@@ -356,6 +388,17 @@ pub(crate) struct VariantAttrs {
     pub deserialize_with: Option<String>,
     /// `#[serde(with = "module")]` on a newtype variant.
     pub with: Option<String>,
+    /// `#[njson(max_str_len = N)]` on a newtype variant: applies to the
+    /// single contained field (serde semantics).
+    pub max_str_len: Option<u64>,
+    /// `#[njson(max_items = N)]` on a newtype variant.
+    pub max_items: Option<u64>,
+    /// `#[njson(min = N)]` on a newtype variant.
+    pub min: Option<i128>,
+    /// `#[njson(max = N)]` on a newtype variant.
+    pub max: Option<i128>,
+    /// `#[njson(sensitive)]` on a newtype variant.
+    pub sensitive: bool,
 }
 
 pub(crate) fn variant_attrs(metas: &[Meta]) -> VariantAttrs {
@@ -379,6 +422,11 @@ pub(crate) fn variant_attrs(metas: &[Meta]) -> VariantAttrs {
             "serialize_with" => v.serialize_with = path_of(m),
             "deserialize_with" => v.deserialize_with = path_of(m),
             "with" => v.with = path_of(m),
+            "max_str_len" => v.max_str_len = parse_u64(m.value()),
+            "max_items" => v.max_items = parse_u64(m.value()),
+            "min" => v.min = parse_i128(m.value()),
+            "max" => v.max = parse_i128(m.value()),
+            "sensitive" => v.sensitive = true,
             _ => {}
         }
     }
@@ -389,7 +437,7 @@ pub(crate) fn variant_attrs(metas: &[Meta]) -> VariantAttrs {
 ///
 /// serde applies variant-level `serialize_with` / `deserialize_with` / `with`
 /// to the contained field of a newtype variant. A field-level attribute wins
-/// when both are present.
+/// when both are present. Safety-policy attributes follow the same rule.
 pub(crate) fn newtype_field_attrs(fa: &FieldAttrs, va: &VariantAttrs) -> FieldAttrs {
     let mut out = fa.clone();
     if out.serialize_with.is_none() && out.deserialize_with.is_none() && out.with.is_none() {
@@ -402,6 +450,22 @@ pub(crate) fn newtype_field_attrs(fa: &FieldAttrs, va: &VariantAttrs) -> FieldAt
         if let Some(d) = &va.deserialize_with {
             out.deserialize_with = Some(d.clone());
         }
+    }
+    // Safety-policy attributes: field-level wins, variant-level fills gaps.
+    if out.max_str_len.is_none() {
+        out.max_str_len = va.max_str_len;
+    }
+    if out.max_items.is_none() {
+        out.max_items = va.max_items;
+    }
+    if out.min.is_none() {
+        out.min = va.min;
+    }
+    if out.max.is_none() {
+        out.max = va.max;
+    }
+    if !out.sensitive {
+        out.sensitive = va.sensitive;
     }
     out
 }

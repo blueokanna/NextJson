@@ -150,18 +150,69 @@ impl<'de> HjsonDecoder<'de> {
                     if self.pos >= self.input.len() {
                         return Err(Error::custom("hjson: unterminated escape"));
                     }
-                    let c = match self.input[self.pos] {
-                        b'n' => '\n',
-                        b't' => '\t',
-                        b'r' => '\r',
-                        b'"' => '"',
-                        b'\\' => '\\',
-                        b'b' => '\u{8}',
-                        b'f' => '\u{c}',
-                        other => other as char,
-                    };
-                    self.scratch.push(c);
-                    self.pos += 1;
+                    match self.input[self.pos] {
+                        b'n' => {
+                            self.scratch.push('\n');
+                            self.pos += 1;
+                        }
+                        b't' => {
+                            self.scratch.push('\t');
+                            self.pos += 1;
+                        }
+                        b'r' => {
+                            self.scratch.push('\r');
+                            self.pos += 1;
+                        }
+                        b'b' => {
+                            self.scratch.push('\u{8}');
+                            self.pos += 1;
+                        }
+                        b'f' => {
+                            self.scratch.push('\u{c}');
+                            self.pos += 1;
+                        }
+                        b'"' => {
+                            self.scratch.push('"');
+                            self.pos += 1;
+                        }
+                        b'\\' => {
+                            self.scratch.push('\\');
+                            self.pos += 1;
+                        }
+                        b'u' => {
+                            self.pos += 1;
+                            let hi = self.read_hex(4)?;
+                            if (0xD800..=0xDBFF).contains(&hi) {
+                                // High surrogate: must be followed by `\uXXXX`
+                                // low surrogate to form one scalar.
+                                if self.input.get(self.pos) == Some(&b'\\')
+                                    && self.input.get(self.pos + 1) == Some(&b'u')
+                                {
+                                    self.pos += 2;
+                                    let lo = self.read_hex(4)?;
+                                    if (0xDC00..=0xDFFF).contains(&lo) {
+                                        let cp = 0x10000
+                                            + ((hi as u32 - 0xD800) << 10)
+                                            + (lo as u32 - 0xDC00);
+                                        self.scratch.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                                    } else {
+                                        self.scratch.push('\u{FFFD}');
+                                    }
+                                } else {
+                                    self.scratch.push('\u{FFFD}');
+                                }
+                            } else if (0xDC00..=0xDFFF).contains(&hi) {
+                                self.scratch.push('\u{FFFD}');
+                            } else {
+                                self.scratch
+                                    .push(char::from_u32(hi as u32).unwrap_or('\u{FFFD}'));
+                            }
+                        }
+                        other => {
+                            self.scratch.push(other as char);
+                            self.pos += 1;
+                        }
+                    }
                 }
                 b => {
                     let len = utf8_len(b).ok_or_else(|| Error::custom("hjson: invalid utf-8"))?;
@@ -176,6 +227,21 @@ impl<'de> HjsonDecoder<'de> {
                 }
             }
         }
+    }
+
+    /// Read `n` hexadecimal digits at the current position into a `u16`.
+    fn read_hex(&mut self, n: usize) -> Result<u16> {
+        let mut v: u16 = 0;
+        for _ in 0..n {
+            if self.pos >= self.input.len() {
+                return Err(Error::custom("hjson: truncated hex escape"));
+            }
+            let d = crate::lex::hex_digit(self.input[self.pos])
+                .ok_or_else(|| Error::custom("hjson: invalid hex escape"))?;
+            v = v * 16 + d as u16;
+            self.pos += 1;
+        }
+        Ok(v)
     }
 
     /// Read an unquoted string until a structural character, `#` comment, or
@@ -227,6 +293,9 @@ impl<'de> HjsonDecoder<'de> {
             return Ok(Number::from(v));
         }
         if let Ok(v) = text.parse::<f64>() {
+            if !v.is_finite() {
+                return Err(Error::custom("hjson: non-finite float"));
+            }
             return Ok(Number::F64(v));
         }
         Err(Error::custom(alloc::format!(
@@ -495,8 +564,17 @@ impl<'de> HjsonDecoder<'de> {
             if matches!(b, b':' | b'\n' | b'\r' | b'\t') {
                 break;
             }
-            self.scratch.push(b as char);
-            self.pos += 1;
+            // Multi-byte UTF-8 keys must be accumulated as scalars, not one
+            // `char` per byte (matching `read_unquoted`).
+            let len = utf8_len(b).ok_or_else(|| Error::custom("hjson: invalid utf-8"))?;
+            let chunk = self
+                .input
+                .get(self.pos..self.pos + len)
+                .ok_or_else(|| Error::custom("hjson: truncated utf-8"))?;
+            let s =
+                core::str::from_utf8(chunk).map_err(|_| Error::custom("hjson: invalid utf-8"))?;
+            self.scratch.push_str(s);
+            self.pos += len;
         }
         Ok(core::mem::take(&mut self.scratch).trim().to_string())
     }

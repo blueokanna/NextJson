@@ -19,15 +19,49 @@ use crate::number::Number;
 use crate::ser::FormatEncoder;
 use crate::value::Value;
 
+/// Format an `f64` as a decimal string, appending `.0` for integral values so
+/// float-ness survives round-trips (matches the main JSON encoder).
+///
+/// Non-finite values are rejected: the JSON data model has no NaN or
+/// infinity, and silently emitting `NaN` / `inf` text would corrupt the wire.
+pub(crate) fn float_string(v: f64) -> Result<String> {
+    if !v.is_finite() {
+        return Err(Error::custom("non-finite float cannot be represented"));
+    }
+    let s = v.to_string();
+    if s.contains(['.', 'e', 'E']) {
+        Ok(s)
+    } else {
+        Ok(alloc::format!("{s}.0"))
+    }
+}
+
 /// Format a [`Number`] as a plain decimal string (the shared scalar
 /// representation used by the text-emitting codecs).
-pub(crate) fn number_string(n: &Number) -> String {
+///
+/// Integral floats are written as `77.0` rather than `77` so float-ness
+/// survives round-trips, matching the main JSON encoder's `write_float_into`.
+pub(crate) fn number_string(n: &Number) -> Result<String> {
     match n {
-        Number::I64(v) => v.to_string(),
-        Number::U64(v) => v.to_string(),
-        Number::I128(v) => v.to_string(),
-        Number::U128(v) => v.to_string(),
-        Number::F64(v) => v.to_string(),
+        Number::I64(v) => Ok(v.to_string()),
+        Number::U64(v) => Ok(v.to_string()),
+        Number::I128(v) => Ok(v.to_string()),
+        Number::U128(v) => Ok(v.to_string()),
+        Number::F64(v) => float_string(*v),
+    }
+}
+
+/// Parse a decimal `f64`, returning `None` for non-finite results.
+///
+/// `str::parse::<f64>()` accepts `1e999` (overflowing to infinity) and
+/// `NaN`; the JSON data model rejects those, so callers use this instead of
+/// a bare parse when the result must stay within the data model.
+pub(crate) fn parse_float(s: &str) -> Option<f64> {
+    let v: f64 = s.parse().ok()?;
+    if v.is_finite() {
+        Some(v)
+    } else {
+        None
     }
 }
 
@@ -254,14 +288,29 @@ macro_rules! impl_collecting_format_encoder {
 
 pub(crate) use impl_collecting_format_encoder;
 
+/// Maximum container nesting accepted when replaying a [`Value`] tree into
+/// the token stream. Every decoder that builds a tree bounds its own parse
+/// at 128; this is the shared backstop for programmatically constructed
+/// trees (and any parser that forgets its own bound), so the recursion can
+/// never overflow the stack.
+pub(crate) const MAX_VALUE_DEPTH: u32 = 128;
+
 /// Convert a [`Value`] into an owned token stream (the unified replay path).
-pub(crate) fn value_to_tokens(v: &Value) -> Vec<Token<'static>> {
+///
+/// Rejects trees nested deeper than [`MAX_VALUE_DEPTH`] instead of recursing
+/// without bound.
+pub(crate) fn value_to_tokens(v: &Value) -> Result<Vec<Token<'static>>> {
     let mut out = Vec::new();
-    value_to_tokens_inner(v, &mut out);
-    out
+    value_to_tokens_inner(v, &mut out, 0)?;
+    Ok(out)
 }
 
-fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
+fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>, depth: u32) -> Result<()> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(Error::custom(
+            "value nesting exceeds the maximum depth (128)",
+        ));
+    }
     match v {
         Value::Null => out.push(Token::Null),
         Value::Bool(b) => out.push(Token::Bool(*b)),
@@ -270,7 +319,7 @@ fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
         Value::Array(a) => {
             out.push(Token::BeginArray);
             for x in a {
-                value_to_tokens_inner(x, out);
+                value_to_tokens_inner(x, out, depth + 1)?;
             }
             out.push(Token::EndArray);
         }
@@ -278,11 +327,12 @@ fn value_to_tokens_inner(v: &Value, out: &mut Vec<Token<'static>>) {
             out.push(Token::BeginObject);
             for (k, val) in m.iter() {
                 out.push(Token::Str(Cow::Owned(k.to_string())));
-                value_to_tokens_inner(val, out);
+                value_to_tokens_inner(val, out, depth + 1)?;
             }
             out.push(Token::EndObject);
         }
     }
+    Ok(())
 }
 
 /// A [`FormatDecoder`] that replays an owned token stream produced from a

@@ -20,6 +20,13 @@ fields, and duplicate-field replacement.
 - Checked integer parsing covers the complete Rust `i128`/`u128` domain.
 - CBOR tag 2/tag 3 values wider than 128 bits are errors.
 - Non-finite JSON and CBOR floats are errors.
+- Text decoders (YAML, TOML, RON, Hjson, S-expression, CSV, urlform) reject
+  non-finite floats, including overflow spellings such as `1e999` that
+  `str::parse::<f64>()` would accept as infinity.
+- MessagePack is the one deliberate exception: its wire format can represent
+  NaN / infinity losslessly, so non-finite floats pass through on the wire
+  (matching the format's own semantics) and error only when relayed to a
+  format that cannot represent them. Typed `f64` decode rejects them.
 - Decoders reject nesting deeper than 128 levels by default.
 
 ## Multi-format guarantees

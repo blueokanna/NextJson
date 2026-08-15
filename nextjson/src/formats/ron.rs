@@ -189,7 +189,7 @@ impl<W: Write> FormatEncoder for RonEncoder<W> {
 
     fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
         self.value_sep()?;
-        self.buf.extend_from_slice(number_bytes(value).as_bytes());
+        self.buf.extend_from_slice(number_bytes(value)?.as_bytes());
         Ok(())
     }
 
@@ -219,7 +219,8 @@ impl<W: Write> FormatEncoder for RonEncoder<W> {
 
     fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
         self.value_sep()?;
-        self.buf.extend_from_slice(value.to_string().as_bytes());
+        self.buf
+            .extend_from_slice(crate::formats::tree::float_string(value)?.as_bytes());
         Ok(())
     }
 
@@ -228,13 +229,13 @@ impl<W: Write> FormatEncoder for RonEncoder<W> {
     }
 }
 
-fn number_bytes(n: &Number) -> String {
+fn number_bytes(n: &Number) -> Result<String> {
     match n {
-        Number::I64(v) => v.to_string(),
-        Number::U64(v) => v.to_string(),
-        Number::I128(v) => v.to_string(),
-        Number::U128(v) => v.to_string(),
-        Number::F64(v) => v.to_string(),
+        Number::I64(v) => Ok(v.to_string()),
+        Number::U64(v) => Ok(v.to_string()),
+        Number::I128(v) => Ok(v.to_string()),
+        Number::U128(v) => Ok(v.to_string()),
+        Number::F64(v) => crate::formats::tree::float_string(*v),
     }
 }
 
@@ -523,6 +524,9 @@ fn parse_ron_number(text: &str) -> Result<Number> {
         return Ok(Number::from(v));
     }
     if let Ok(v) = text.parse::<f64>() {
+        if !v.is_finite() {
+            return Err(Error::custom("ron: non-finite float"));
+        }
         return Ok(Number::F64(v));
     }
     Err(Error::custom(alloc::format!(

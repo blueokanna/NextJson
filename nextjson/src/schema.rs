@@ -102,6 +102,59 @@ impl TypeSchema {
     }
 }
 
+/// Inclusive integer range of an integer schema (`(min, max)`), if it is an
+/// integer type. Shared by the validator and the compatibility checker.
+pub(crate) fn integer_range(schema: TypeSchema) -> Option<(i128, i128)> {
+    match schema {
+        TypeSchema::I8 => Some((i8::MIN as i128, i8::MAX as i128)),
+        TypeSchema::I16 => Some((i16::MIN as i128, i16::MAX as i128)),
+        TypeSchema::I32 => Some((i32::MIN as i128, i32::MAX as i128)),
+        TypeSchema::I64 => Some((i64::MIN as i128, i64::MAX as i128)),
+        TypeSchema::I128 => Some((i128::MIN, i128::MAX)),
+        TypeSchema::Isize => Some((isize::MIN as i128, isize::MAX as i128)),
+        TypeSchema::U8 => Some((0, u8::MAX as i128)),
+        TypeSchema::U16 => Some((0, u16::MAX as i128)),
+        TypeSchema::U32 => Some((0, u32::MAX as i128)),
+        TypeSchema::U64 => Some((0, u64::MAX as i128)),
+        // `u128` can exceed `i128::MAX`; callers handle that special case.
+        TypeSchema::U128 => Some((0, i128::MAX)),
+        TypeSchema::Usize => Some((0, usize::MAX as i128)),
+        _ => None,
+    }
+}
+
+/// Whether the schema is a floating-point type.
+pub(crate) fn is_float_type(schema: TypeSchema) -> bool {
+    matches!(schema, TypeSchema::F32 | TypeSchema::F64)
+}
+
+/// A declared safety policy attached to a schema node.
+///
+/// Policies are compile-time declarations (const-constructible) that turn the
+/// schema from "what data looks like" into "what data is allowed to enter the
+/// system". They are declared through derive attributes such as
+/// `#[njson(max_str_len = 32)]` / `#[njson(sensitive)]` and enforced at runtime
+/// by [`crate::validate`](crate::validate).
+///
+/// The limits are shape-driven: when validating a value, `max_str_len` applies
+/// to strings, `max_items` to arrays and objects, `min` / `max` to numbers.
+/// A policy on a field whose value does not have the matching shape is simply
+/// not triggered. `sensitive` is metadata: the validator reports the path but
+/// never fails on it, so logging and monitoring code can redact the value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Policy {
+    /// Maximum string length in Unicode scalar values.
+    pub max_str_len: Option<u64>,
+    /// Maximum number of elements (arrays) or entries (objects).
+    pub max_items: Option<u64>,
+    /// Inclusive numeric lower bound.
+    pub min: Option<i128>,
+    /// Inclusive numeric upper bound.
+    pub max: Option<i128>,
+    /// Whether the value is sensitive (must not be logged or exposed).
+    pub sensitive: bool,
+}
+
 /// Compile-time description of a struct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StructSchema {
@@ -109,6 +162,12 @@ pub struct StructSchema {
     pub name: &'static str,
     /// Whether `#[njson(transparent)]`.
     pub transparent: bool,
+    /// Maximum container nesting allowed below this struct
+    /// (`#[njson(max_depth = N)]`).
+    pub max_depth: Option<u64>,
+    /// Whether unknown fields are rejected
+    /// (`#[njson(deny_unknown_fields)]`).
+    pub deny_unknown_fields: bool,
     /// Field list.
     pub fields: &'static [FieldSchema],
 }
@@ -124,6 +183,8 @@ pub struct FieldSchema {
     pub required: bool,
     /// Whether `#[njson(flatten)]`.
     pub flattened: bool,
+    /// Declared safety policy for this field.
+    pub policy: Policy,
     /// Field type.
     pub ty: TypeSchema,
 }
@@ -139,6 +200,12 @@ pub struct EnumSchema {
     pub content: Option<&'static str>,
     /// Whether `#[njson(untagged)]`.
     pub untagged: bool,
+    /// Maximum container nesting allowed below this enum
+    /// (`#[njson(max_depth = N)]`).
+    pub max_depth: Option<u64>,
+    /// Whether unknown fields are rejected
+    /// (`#[njson(deny_unknown_fields)]`).
+    pub deny_unknown_fields: bool,
     /// Default tag field name for internal / adjacent tagging.
     pub default_tag: &'static str,
     /// Variant list.
@@ -152,6 +219,10 @@ pub struct VariantSchema {
     pub name: &'static str,
     /// Original Rust variant name.
     pub orig: &'static str,
+    /// Declared safety policy for a newtype variant's contained field
+    /// (empty for unit / tuple / struct variants, whose fields carry their
+    /// own policies).
+    pub policy: Policy,
     /// Variant content type.
     pub ty: TypeSchema,
 }
@@ -174,11 +245,20 @@ mod tests {
         const S: TypeSchema = TypeSchema::Struct(&StructSchema {
             name: "Foo",
             transparent: false,
+            max_depth: Some(4),
+            deny_unknown_fields: true,
             fields: &[FieldSchema {
                 name: "x",
                 orig: "x",
                 required: true,
                 flattened: false,
+                policy: Policy {
+                    min: Some(0),
+                    max: Some(100),
+                    max_str_len: None,
+                    max_items: None,
+                    sensitive: false,
+                },
                 ty: TypeSchema::F64,
             }],
         });

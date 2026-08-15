@@ -32,7 +32,10 @@ fn struct_schema(fields: &Fields, ca: &ContainerAttrs, cp: &str, name: &str) -> 
                 .collect();
             format!(
                 "{cp}::TypeSchema::Struct(&{cp}::StructSchema {{ \
-                 name: {name:?}, transparent: {transparent}, fields: &[{}] }})",
+                 name: {name:?}, transparent: {transparent}, \
+                 max_depth: {}, deny_unknown_fields: {}, fields: &[{}] }})",
+                max_depth_expr(ca),
+                ca.deny_unknown_fields,
                 items.join(", ")
             )
         }
@@ -56,8 +59,25 @@ fn enum_schema(variants: &[crate::Variant], ca: &ContainerAttrs, cp: &str, name:
             let va = attr::variant_attrs(&v.attrs);
             let serialized = renamed_variant(v, &va, ca, true);
             let ty = variant_type_schema(v, &va, &serialized, ca, cp);
+            // A newtype variant's single field can carry its own policy; the
+            // schema records it on the variant so the validator can enforce
+            // it on the variant content.
+            let policy = match &v.fields {
+                Fields::Unnamed(f) if f.len() == 1 => {
+                    let fa = attr::newtype_field_attrs(&attr::field_attrs(&f[0].attrs), &va);
+                    policy_expr(&fa, cp)
+                }
+                _ => {
+                    format!(
+                        "{cp}::Policy {{ max_str_len: ::core::option::Option::None, \
+                         max_items: ::core::option::Option::None, \
+                         min: ::core::option::Option::None, \
+                         max: ::core::option::Option::None, sensitive: false }}"
+                    )
+                }
+            };
             format!(
-                "{cp}::VariantSchema {{ name: {serialized:?}, orig: {:?}, ty: {ty} }}",
+                "{cp}::VariantSchema {{ name: {serialized:?}, orig: {:?}, policy: {policy}, ty: {ty} }}",
                 v.ident
             )
         })
@@ -75,10 +95,21 @@ fn enum_schema(variants: &[crate::Variant], ca: &ContainerAttrs, cp: &str, name:
     format!(
         "{cp}::TypeSchema::Enum(&{cp}::EnumSchema {{ \
          name: {name:?}, tag: {tag}, content: {content}, \
-         untagged: {}, default_tag: \"type\", variants: &[{}] }})",
+         untagged: {}, max_depth: {}, deny_unknown_fields: {}, \
+         default_tag: \"type\", variants: &[{}] }})",
         ca.untagged,
+        max_depth_expr(ca),
+        ca.deny_unknown_fields,
         items.join(", ")
     )
+}
+
+/// Emit the `Option<u64>` `max_depth` expression for a container.
+fn max_depth_expr(ca: &ContainerAttrs) -> String {
+    match ca.max_depth {
+        Some(v) => format!("::core::option::Option::Some({v})"),
+        None => "::core::option::Option::None".to_string(),
+    }
 }
 
 fn variant_type_schema(
@@ -114,7 +145,9 @@ fn variant_type_schema(
                 .collect();
             format!(
                 "{cp}::TypeSchema::Struct(&{cp}::StructSchema {{ \
-                 name: {serialized_name:?}, transparent: false, fields: &[{}] }})",
+                 name: {serialized_name:?}, transparent: false, \
+                 max_depth: ::core::option::Option::None, \
+                 deny_unknown_fields: false, fields: &[{}] }})",
                 items.join(", ")
             )
         }
@@ -138,7 +171,8 @@ fn field_schema_tokens(
     let ty = field_wire_schema(field, fa, cp);
     format!(
         "{cp}::FieldSchema {{ name: {serialized:?}, orig: {orig:?}, \
-         required: {required}, flattened: {flattened}, ty: {ty} }}"
+         required: {required}, flattened: {flattened}, policy: {}, ty: {ty} }}",
+        policy_expr(fa, cp)
     )
 }
 
@@ -163,7 +197,29 @@ fn variant_field_schema_tokens(
     let ty = field_wire_schema(field, fa, cp);
     format!(
         "{cp}::FieldSchema {{ name: {serialized:?}, orig: {orig:?}, \
-         required: {required}, flattened: {flattened}, ty: {ty} }}"
+         required: {required}, flattened: {flattened}, policy: {}, ty: {ty} }}",
+        policy_expr(fa, cp)
+    )
+}
+
+/// Emit a `Policy` expression from field attributes.
+fn policy_expr(fa: &FieldAttrs, cp: &str) -> String {
+    let opt = |v: Option<u64>| match v {
+        Some(n) => format!("::core::option::Option::Some({n})"),
+        None => "::core::option::Option::None".to_string(),
+    };
+    let opt_i = |v: Option<i128>| match v {
+        Some(n) => format!("::core::option::Option::Some({n})"),
+        None => "::core::option::Option::None".to_string(),
+    };
+    format!(
+        "{cp}::Policy {{ max_str_len: {}, max_items: {}, \
+         min: {}, max: {}, sensitive: {} }}",
+        opt(fa.max_str_len),
+        opt(fa.max_items),
+        opt_i(fa.min),
+        opt_i(fa.max),
+        fa.sensitive
     )
 }
 

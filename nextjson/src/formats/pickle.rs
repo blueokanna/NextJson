@@ -49,7 +49,7 @@ impl Format for Pickle {
 
     fn decode<'de, T: NsonDeserialize<'de>>(self, input: &'de [u8]) -> Result<T> {
         let value = execute_pickle(input)?;
-        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value));
+        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value)?);
         let out = T::nextdecode(&mut decoder)?;
         decoder.end()?;
         Ok(out)
@@ -319,21 +319,32 @@ const LIST: u8 = 0x6C;
 const DICT: u8 = 0x64;
 
 enum StackItem {
-    Value(Value),
+    Value(Value, u32),
     Mark,
+}
+
+const MAX_DEPTH: u32 = 128;
+
+/// Push a value with an explicit nesting depth, rejecting values nested
+/// deeper than [`MAX_DEPTH`].
+fn push_checked(stack: &mut Vec<StackItem>, value: Value, depth: u32) -> Result<()> {
+    if depth > MAX_DEPTH {
+        return Err(Error::custom("pickle: recursion limit exceeded"));
+    }
+    stack.push(StackItem::Value(value, depth));
+    Ok(())
 }
 
 /// Execute a protocol-2 pickle byte stream into a [`Value`].
 ///
-/// Every nested container is delimited by a `MARK`, so `mark_depth` tracks
-/// the current nesting depth and caps it (like every other codec) before the
-/// resulting tree can drive unbounded recursion in the shared token relay or
-/// `Value` decoding.
+/// Every container push is depth-checked at construction time, so the
+/// resulting tree can never be nested deeper than [`MAX_DEPTH`] — even via
+/// `TUPLE1/2/3`, which do not use a `MARK` delimiter. This keeps both the
+/// shared token relay and `Value`'s recursive drop bounded.
 pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
     let mut cur = Cursor::new(input);
     let mut stack: Vec<StackItem> = Vec::new();
     let mut mark_depth = 0u32;
-    const MAX_DEPTH: u32 = 128;
     loop {
         let op = cur
             .byte()
@@ -347,7 +358,7 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
             }
             STOP => {
                 let value = match stack.pop() {
-                    Some(StackItem::Value(v)) => v,
+                    Some(StackItem::Value(v, _)) => v,
                     _ => return Err(Error::custom("pickle: STOP with empty stack")),
                 };
                 if !cur.at_end() {
@@ -359,9 +370,9 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                 }
                 return Ok(value);
             }
-            NONE => stack.push(StackItem::Value(Value::Null)),
-            NEWTRUE => stack.push(StackItem::Value(Value::Bool(true))),
-            NEWFALSE => stack.push(StackItem::Value(Value::Bool(false))),
+            NONE => stack.push(StackItem::Value(Value::Null, 0)),
+            NEWTRUE => stack.push(StackItem::Value(Value::Bool(true), 0)),
+            NEWFALSE => stack.push(StackItem::Value(Value::Bool(false), 0)),
             INT => {
                 let line = cur.until_inclusive(b'\n')?;
                 let text = core::str::from_utf8(&line[..line.len() - 1])
@@ -370,29 +381,29 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                     .trim()
                     .parse()
                     .map_err(|_| Error::custom("pickle: invalid INT value"))?;
-                stack.push(StackItem::Value(Value::from(n)));
+                stack.push(StackItem::Value(Value::from(n), 0));
             }
             BININT => {
                 let b = cur.take(4)?;
                 let mut a = [0u8; 4];
                 a.copy_from_slice(b);
-                stack.push(StackItem::Value(Value::from(i32::from_le_bytes(a))));
+                stack.push(StackItem::Value(Value::from(i32::from_le_bytes(a)), 0));
             }
             BININT1 => {
                 let n = cur.byte()?;
-                stack.push(StackItem::Value(Value::from(n)));
+                stack.push(StackItem::Value(Value::from(n), 0));
             }
             BININT2 => {
                 let b = cur.take(2)?;
                 let mut a = [0u8; 2];
                 a.copy_from_slice(b);
-                stack.push(StackItem::Value(Value::from(u16::from_le_bytes(a))));
+                stack.push(StackItem::Value(Value::from(u16::from_le_bytes(a)), 0));
             }
             LONG1 => {
                 let len = cur.byte()? as usize;
                 let bytes = cur.take(len)?;
                 let n = decode_long(bytes)?;
-                stack.push(StackItem::Value(Value::from(n)));
+                stack.push(StackItem::Value(Value::from(n), 0));
             }
             FLOAT => {
                 let line = cur.until_inclusive(b'\n')?;
@@ -405,7 +416,7 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                 if !f.is_finite() {
                     return Err(Error::custom("pickle: non-finite FLOAT value"));
                 }
-                stack.push(StackItem::Value(Value::from(f)));
+                stack.push(StackItem::Value(Value::from(f), 0));
             }
             BINFLOAT => {
                 let b = cur.take(8)?;
@@ -415,26 +426,26 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                 if !value.is_finite() {
                     return Err(Error::custom("pickle: non-finite BINFLOAT value"));
                 }
-                stack.push(StackItem::Value(Value::from(value)));
+                stack.push(StackItem::Value(Value::from(value), 0));
             }
             BINUNICODE | BINSTRING | BINBYTES => {
                 let len = usize::try_from(cur.le_u32()?)
                     .map_err(|_| Error::custom("pickle: string length exceeds platform limit"))?;
                 let bytes = cur.take(len)?;
                 let s = decode_unicode(bytes)?;
-                stack.push(StackItem::Value(Value::from(s)));
+                stack.push(StackItem::Value(Value::from(s), 0));
             }
             SHORT_BINUNICODE | SHORT_BINSTRING | SHORT_BINBYTES => {
                 let len = cur.byte()? as usize;
                 let bytes = cur.take(len)?;
                 let s = decode_unicode(bytes)?;
-                stack.push(StackItem::Value(Value::from(s)));
+                stack.push(StackItem::Value(Value::from(s), 0));
             }
             EMPTY_LIST => {
-                stack.push(StackItem::Value(Value::Array(Vec::new())));
+                push_checked(&mut stack, Value::Array(Vec::new()), 1)?;
             }
             EMPTY_DICT => {
-                stack.push(StackItem::Value(Value::Object(Map::new())));
+                push_checked(&mut stack, Value::Object(Map::new()), 1)?;
             }
             MARK => {
                 if mark_depth >= MAX_DEPTH {
@@ -451,13 +462,13 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                             mark_depth = mark_depth.saturating_sub(1);
                             break;
                         }
-                        Some(StackItem::Value(v)) => items.push(v),
+                        Some(StackItem::Value(v, _)) => items.push(v),
                         None => return Err(Error::custom("pickle: APPENDS without MARK")),
                     }
                 }
                 items.reverse();
                 match stack.last_mut() {
-                    Some(StackItem::Value(Value::Array(list))) => list.extend(items),
+                    Some(StackItem::Value(Value::Array(list), _)) => list.extend(items),
                     _ => return Err(Error::custom("pickle: APPENDS target is not a list")),
                 }
             }
@@ -469,13 +480,13 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                             mark_depth = mark_depth.saturating_sub(1);
                             break;
                         }
-                        Some(StackItem::Value(v)) => items.push(v),
+                        Some(StackItem::Value(v, _)) => items.push(v),
                         None => return Err(Error::custom("pickle: SETITEMS without MARK")),
                     }
                 }
                 items.reverse();
                 let map = match stack.last_mut() {
-                    Some(StackItem::Value(Value::Object(m))) => m,
+                    Some(StackItem::Value(Value::Object(m), _)) => m,
                     _ => return Err(Error::custom("pickle: SETITEMS target is not a dict")),
                 };
                 if items.len() % 2 != 0 {
@@ -487,30 +498,38 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                     map.insert(key, v);
                 }
             }
-            LIST => {
+            LIST | TUPLE => {
                 let mut items = Vec::new();
+                let mut max_child = 0u32;
                 loop {
                     match stack.pop() {
                         Some(StackItem::Mark) => {
                             mark_depth = mark_depth.saturating_sub(1);
                             break;
                         }
-                        Some(StackItem::Value(v)) => items.push(v),
-                        None => return Err(Error::custom("pickle: LIST without MARK")),
+                        Some(StackItem::Value(v, d)) => {
+                            max_child = max_child.max(d);
+                            items.push(v);
+                        }
+                        None => return Err(Error::custom("pickle: LIST/TUPLE without MARK")),
                     }
                 }
                 items.reverse();
-                stack.push(StackItem::Value(Value::Array(items)));
+                push_checked(&mut stack, Value::Array(items), max_child + 1)?;
             }
             DICT => {
                 let mut items = Vec::new();
+                let mut max_child = 0u32;
                 loop {
                     match stack.pop() {
                         Some(StackItem::Mark) => {
                             mark_depth = mark_depth.saturating_sub(1);
                             break;
                         }
-                        Some(StackItem::Value(v)) => items.push(v),
+                        Some(StackItem::Value(v, d)) => {
+                            max_child = max_child.max(d);
+                            items.push(v);
+                        }
                         None => return Err(Error::custom("pickle: DICT without MARK")),
                     }
                 }
@@ -524,22 +543,7 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                     let key = value_to_key(k)?;
                     map.insert(key, v);
                 }
-                stack.push(StackItem::Value(Value::Object(map)));
-            }
-            TUPLE => {
-                let mut items = Vec::new();
-                loop {
-                    match stack.pop() {
-                        Some(StackItem::Mark) => {
-                            mark_depth = mark_depth.saturating_sub(1);
-                            break;
-                        }
-                        Some(StackItem::Value(v)) => items.push(v),
-                        None => return Err(Error::custom("pickle: TUPLE without MARK")),
-                    }
-                }
-                items.reverse();
-                stack.push(StackItem::Value(Value::Array(items)));
+                push_checked(&mut stack, Value::Object(map), max_child + 1)?;
             }
             TUPLE1 | TUPLE2 | TUPLE3 => {
                 let n = match op {
@@ -548,14 +552,18 @@ pub(crate) fn execute_pickle(input: &[u8]) -> Result<Value> {
                     _ => 3,
                 };
                 let mut items = Vec::with_capacity(n);
+                let mut max_child = 0u32;
                 for _ in 0..n {
                     match stack.pop() {
-                        Some(StackItem::Value(v)) => items.push(v),
+                        Some(StackItem::Value(v, d)) => {
+                            max_child = max_child.max(d);
+                            items.push(v);
+                        }
                         _ => return Err(Error::custom("pickle: TUPLE without elements")),
                     }
                 }
                 items.reverse();
-                stack.push(StackItem::Value(Value::Array(items)));
+                push_checked(&mut stack, Value::Array(items), max_child + 1)?;
             }
             other => {
                 return Err(Error::custom(alloc::format!(

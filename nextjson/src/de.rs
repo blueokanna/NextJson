@@ -1531,7 +1531,11 @@ impl<'de> NsonDeserialize<'de> for f64 {
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
         let n = decoder.number()?;
-        out.write(n.as_f64());
+        let value = n.as_f64();
+        if !value.is_finite() {
+            return Err(Error::new(ErrorKind::NumberOutOfRange, None, None, 0).into());
+        }
+        out.write(value);
         Ok(())
     }
 }

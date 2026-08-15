@@ -190,6 +190,7 @@ impl<'de> Json5Decoder<'de> {
                             }
                         }
                         b'x' => {
+                            self.pos += 1;
                             let cp = self.read_hex(2)?;
                             // Lone surrogates / invalid scalars are replaced
                             // with U+FFFD per the JSON5 spec (never silently
@@ -198,9 +199,35 @@ impl<'de> Json5Decoder<'de> {
                                 .push(char::from_u32(cp as u32).unwrap_or('\u{FFFD}'));
                         }
                         b'u' => {
-                            let cp = self.read_hex(4)?;
-                            self.scratch
-                                .push(char::from_u32(cp as u32).unwrap_or('\u{FFFD}'));
+                            self.pos += 1;
+                            let hi = self.read_hex(4)?;
+                            if (0xD800..=0xDBFF).contains(&hi) {
+                                // High surrogate: must be followed by `\uXXXX`
+                                // low surrogate to form one scalar.
+                                if self.input.get(self.pos) == Some(&b'\\')
+                                    && self.input.get(self.pos + 1) == Some(&b'u')
+                                {
+                                    self.pos += 2;
+                                    let lo = self.read_hex(4)?;
+                                    if (0xDC00..=0xDFFF).contains(&lo) {
+                                        let cp = 0x10000
+                                            + ((hi as u32 - 0xD800) << 10)
+                                            + (lo as u32 - 0xDC00);
+                                        self.scratch.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                                    } else {
+                                        // High surrogate not followed by a low.
+                                        self.scratch.push('\u{FFFD}');
+                                    }
+                                } else {
+                                    self.scratch.push('\u{FFFD}');
+                                }
+                            } else if (0xDC00..=0xDFFF).contains(&hi) {
+                                // Lone low surrogate.
+                                self.scratch.push('\u{FFFD}');
+                            } else {
+                                self.scratch
+                                    .push(char::from_u32(hi as u32).unwrap_or('\u{FFFD}'));
+                            }
                         }
                         other => {
                             self.scratch.push(other as char);

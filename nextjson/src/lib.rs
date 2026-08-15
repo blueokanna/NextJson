@@ -1,12 +1,25 @@
 //! # NextJson
 //!
-//! A dependency-free, `no_std + alloc` JSON and CBOR library for Rust.
+//! A dependency-free, `no_std + alloc` **data-contract engine** for Rust,
+//! built for controlled protocols and resource-constrained environments:
+//! schema-first (a type describes its contract via `const SCHEMA`),
+//! multi-format (16 wire formats behind one implementation), and reuse-first
+//! (checked `DecodeSlot` decode straight into your fields).
 //!
 //! The public native contracts are [`NsonSerialize::nextencode`],
 //! [`NsonDeserialize::nextdecode_into`], [`nextencode`], and [`nextdecode`].
 //! JSON and the JSON-compatible CBOR profile can also be relayed through the
 //! format-neutral [`cross_format::EventSink`] protocol without constructing an
 //! intermediate [`Value`] tree.
+//!
+//! Beyond encode/decode, the schema tree powers two contract-level features:
+//!
+//! - [`validate`] — schema-declared safety policy (string / collection / numeric
+//!   limits, `deny_unknown_fields`, `max_depth`, `sensitive`) enforced on a
+//!   decoded [`Value`];
+//! - [`compat`] — version-compatibility checking: diff two `TypeSchema`s and
+//!   report every change that can break an old reader consuming new data or a
+//!   new reader consuming old data.
 //!
 //! ## Quick start
 //!
@@ -63,21 +76,26 @@
 //! 2. **Compile-time schema** - every type carries `const SCHEMA: TypeSchema`,
 //!    a runtime-introspectable metadata tree (usable for JSON Schema generation,
 //!    validation, and tooling).
-//! 3. **Unified token stream** - the byte-stream lexer and the content-replay
+//! 3. **Schema-declared safety policy** - limits (`max_str_len`, `max_items`,
+//!    `min` / `max`, `sensitive`, `max_depth`, `deny_unknown_fields`) live in
+//!    the schema and are enforced by [`validate`] on decoded values.
+//! 4. **Version-compatibility checking** - [`compat::check`] diffs two
+//!    `TypeSchema` values and reports forward / backward breaks with severity.
+//! 5. **Unified token stream** - the byte-stream lexer and the content-replay
 //!    reader share identical nextdecode primitives, so internally-tagged,
 //!    adjacently-tagged, and untagged enums plus `Value` round-trips reuse one
 //!    engine.
-//! 4. **Lazy single-token lookahead** - the parser lexes one token at a time;
+//! 6. **Lazy single-token lookahead** - the parser lexes one token at a time;
 //!    unescaped strings borrow the input with zero allocation; integer parsing
 //!    is hand-rolled with overflow detection.
-//! 5. **Safety boundary** - the library is `#![deny(unsafe_code)]`, including
+//! 7. **Safety boundary** - the library is `#![deny(unsafe_code)]`, including
 //!    nextdecode slots and partial-initialization cleanup. `no_std` is fully
 //!    supported: the core uses only `core` + `alloc`, with `std`-only types
 //!    behind the `std` feature.
-//! 6. **Streaming cross-format relay** - JSON and the JSON-compatible CBOR
+//! 8. **Streaming cross-format relay** - JSON and the JSON-compatible CBOR
 //!    profile exchange borrowed structural events without an intermediate
 //!    [`Value`].
-//! 7. **One validated event protocol** - every format encoder and both
+//! 9. **One validated event protocol** - every format encoder and both
 //!    cross-format sinks validate container / key / value ordering through a
 //!    single shared state machine, parameterized only by whether the wire
 //!    format has explicit array separators (JSON does, CBOR does not). The
@@ -113,6 +131,7 @@ extern crate std;
 pub use nextjson_derive::{NsonDeserialize, NsonSerialize};
 
 pub use crate::bytes::Bytes;
+pub use crate::compat::{check, check_between, CompatIssue, CompatKind, CompatReport, Severity};
 pub use crate::de::{
     DecodeConfig, DecodeSlot, Decoder, FormatDecoder, NsonDeserialize, OptionTag, Token,
 };
@@ -121,15 +140,20 @@ pub use crate::error::{Error, FormatError, Result};
 pub use crate::map::Map;
 pub use crate::number::Number;
 pub use crate::schema::{
-    EnumSchema, FieldSchema, NsonSchema, StructSchema, TypeSchema, VariantSchema,
+    EnumSchema, FieldSchema, NsonSchema, Policy, StructSchema, TypeSchema, VariantSchema,
 };
 pub use crate::ser::{FormatEncoder, NsonSerialize};
 #[cfg(feature = "std")]
 pub use crate::stream::StreamDecoder;
+pub use crate::validate::{
+    validate, validate_value, validate_value_with, validate_with, Report, ValidateConfig,
+    Violation, ViolationKind, HARD_DEPTH_CAP,
+};
 pub use crate::value::Value;
 pub use crate::write::Write;
 
 mod bytes;
+pub mod compat;
 pub mod cross_format;
 pub mod de;
 pub mod encoding;
@@ -146,6 +170,7 @@ mod schema;
 mod ser;
 #[cfg(feature = "std")]
 pub mod stream;
+mod validate;
 mod value;
 mod write;
 

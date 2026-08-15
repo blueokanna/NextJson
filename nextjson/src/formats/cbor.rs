@@ -38,7 +38,7 @@ impl Format for Cbor {
         let mut parser = Decoder::new(&json);
         let value = crate::Value::nextdecode(&mut parser)?;
         parser.end()?;
-        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value));
+        let mut decoder = tree::TreeDecoder::new(tree::value_to_tokens(&value)?);
         let out = T::nextdecode(&mut decoder)?;
         decoder.end()?;
         Ok(out)

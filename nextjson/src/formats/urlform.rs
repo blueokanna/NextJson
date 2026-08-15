@@ -213,7 +213,7 @@ impl<W: Write> FormatEncoder for UrlFormEncoder<W> {
     }
 
     fn write_number(&mut self, value: &Number) -> Result<(), Self::Error> {
-        let s = number_to_string(value);
+        let s = number_to_string(value)?;
         self.flush_value(&s)
     }
 
@@ -234,21 +234,21 @@ impl<W: Write> FormatEncoder for UrlFormEncoder<W> {
     }
 
     fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
-        self.flush_value(&value.to_string())
+        self.flush_value(&crate::formats::tree::float_string(value)?)
     }
 
     fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
-        self.flush_value(&value.to_string())
+        self.flush_value(&crate::formats::tree::float_string(value as f64)?)
     }
 }
 
-fn number_to_string(n: &Number) -> String {
+fn number_to_string(n: &Number) -> Result<String> {
     match n {
-        Number::I64(v) => v.to_string(),
-        Number::U64(v) => v.to_string(),
-        Number::I128(v) => v.to_string(),
-        Number::U128(v) => v.to_string(),
-        Number::F64(v) => v.to_string(),
+        Number::I64(v) => Ok(v.to_string()),
+        Number::U64(v) => Ok(v.to_string()),
+        Number::I128(v) => Ok(v.to_string()),
+        Number::U128(v) => Ok(v.to_string()),
+        Number::F64(v) => crate::formats::tree::float_string(*v),
     }
 }
 
@@ -484,6 +484,9 @@ pub(crate) fn parse_number(s: &str) -> Result<Number> {
         return Ok(Number::from(v));
     }
     if let Ok(v) = s.parse::<f64>() {
+        if !v.is_finite() {
+            return Err(Error::custom("urlform: non-finite float"));
+        }
         return Ok(Number::F64(v));
     }
     Err(Error::custom(alloc::format!(
