@@ -96,12 +96,12 @@ integer output, native-width integer parsing, token-less scalar reads on the
 byte lexer, and the trusted `FastEncoder` for the top-level entry points
 (this developer machine, 5 s window, single run):
 
-| case | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
-| --- | --- | --- | --- | --- | --- |
-| nextjson_encode | 48063 | 8447 | 406.01 | 3104 | 149.18 |
-| serde_json_encode | 48063 | 17427 | 837.59 | 3914 | 188.14 |
-| nextjson_encode_intonly | 44446 | 12412 | 551.67 | 3535 | 157.14 |
-| serde_json_encode_intonly | 44446 | 20435 | 908.24 | 3692 | 164.09 |
+| case                      | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
+| ------------------------- | ---------- | ---------- | ----------- | ---------- | ----------- |
+| nextjson_encode           | 48063      | 8447       | 406.01      | 3104       | 149.18      |
+| serde_json_encode         | 48063      | 17427      | 837.59      | 3914       | 188.14      |
+| nextjson_encode_intonly   | 44446      | 12412      | 551.67      | 3535       | 157.14      |
+| serde_json_encode_intonly | 44446      | 20435      | 908.24      | 3692       | 164.09      |
 
 Decode before these optimizations measured 131.61 MB/s (main fixture) and
 126.86 MB/s (int-only) on the same machine. The encode column doubles as the
@@ -116,7 +116,7 @@ both runs (down from ~2.1x before the trusted encoder).
 Absolute throughput on a laptop varies with power state and thermal budget;
 repeated runs of this exact binary on the same machine have produced
 nextjson encode numbers between ~158 and ~278 MB/s (serde_json ~340-460)
-across a single afternoon, and the *ratio* moved between ~1.2x and ~2.9x
+across a single afternoon, and the _ratio_ moved between ~1.2x and ~2.9x
 as the two libraries react differently to frequency changes. For that
 reason the table above records one specific run rather than a smoothed
 average, and the per-primitive A/B numbers in the next section are the
@@ -127,13 +127,13 @@ reproducible deltas.
 All table numbers above come from `cargo run --release` with the workspace
 `[profile.release]` (`opt-level = 3`, `lto = "thin"`, `codegen-units = 1`). That
 the comparison runs in release mode, not debug, is provable: in a **debug**
-build the compiler disables serde's optimizations, and nextjson is *faster*
+build the compiler disables serde's optimizations, and nextjson is _faster_
 than serde_json:
 
 | case (debug build) | encode_MBps | decode_MBps |
-| --- | --- | --- |
-| nextjson_encode | 19.36 | 8.39 |
-| serde_json_encode | 8.05 | 8.09 |
+| ------------------ | ----------- | ----------- |
+| nextjson_encode    | 19.36       | 8.39        |
+| serde_json_encode  | 8.05        | 8.09        |
 
 Four measurable causes account for the release gap:
 

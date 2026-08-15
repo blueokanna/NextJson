@@ -23,7 +23,7 @@ Postcard。它把三个性质做成了一等能力：
    `DecodeSlot` 状态直接写入字段（无中间树、无占位值），未转义字符串借用输入
    缓冲区，统一 token 流在不拖累热路径的前提下支持内容重放。
 
-诚实的边界：对高频设备间通信，真正重要的是字节数、确定性、版本兼容和延迟——
+对高频设备间通信，真正重要的是字节数、确定性、版本兼容和延迟——
 统一 API 不会自动赢得这些指标。NextJson 的价值在线的契约层：描述它、校验什么
 能进入、以及当改动破坏对端时把它检测出来。
 
@@ -85,8 +85,7 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 你的字段，零中间树；`Value` 是同一解码器上的可选消费者。公开两种编码策略：
 `Encoder` 每次调用都校验事件协议；`FastEncoder`（`nextencode` / `to_vec` /
 `to_string` / writer 入口使用）信任派生验证过的调用序列，跳过每值检查以换取
-约 2x 编码吞吐。分水岭分析、借用模型（瞬态 / 自有 / 借用）与属性 / 策略分层
-见[设计文档](docs/DESIGN_CN.md)。
+约 2x 编码吞吐。
 
 ```rust
 use nextjson::{NsonDeserialize, NsonSerialize};
@@ -166,14 +165,14 @@ for v in &report.violations {     // 或逐条检查违规
 
 已声明的限制（全部可选、全部 const 可构造）：
 
-| 属性 | 作用域 | 生效对象 |
-| ---- | ------ | -------- |
-| `max_str_len = N` | 字段 / newtype 变体 | 字符串长度（Unicode 标量数） |
-| `max_items = N`   | 字段 / newtype 变体 | 数组元素数 / 对象条目数 |
+| 属性                  | 作用域              | 生效对象                           |
+| --------------------- | ------------------- | ---------------------------------- |
+| `max_str_len = N`     | 字段 / newtype 变体 | 字符串长度（Unicode 标量数）       |
+| `max_items = N`       | 字段 / newtype 变体 | 数组元素数 / 对象条目数            |
 | `min = N` / `max = N` | 字段 / newtype 变体 | 数字（闭区间，`i128`/`u128` 精确） |
-| `sensitive` | 字段 / newtype 变体 | 仅报告、永不拒绝（脱敏） |
-| `max_depth = N` | 容器 | 该类型以下的容器嵌套 |
-| `deny_unknown_fields` | 容器 | 结构体与带 tag 枚举的未知键 |
+| `sensitive`           | 字段 / newtype 变体 | 仅报告、永不拒绝（脱敏）           |
+| `max_depth = N`       | 容器                | 该类型以下的容器嵌套               |
+| `deny_unknown_fields` | 容器                | 结构体与带 tag 枚举的未知键        |
 
 运行时调节走 `ValidateConfig`：全局嵌套上限（`max_depth`）与消息大小上限
 （`max_message_size` + 实际 `message_len`）——后者是字节层关切，Value 遍历器
@@ -202,21 +201,21 @@ assert_eq!(report.worst_severity(), Some(Severity::Critical));
 
 可检测的类别：
 
-| 改动 | 级别 | 受影响方向 |
-| ---- | ---- | ---------- |
-| 新增必填字段 | Critical | 后向 |
-| 删除必填字段 | Critical | 前向 |
-| 字段 / 变体改名 | Critical | 双向 |
-| 类型族改变（string→number、struct→seq、……） | Critical | 双向 |
-| 新增 / 删除枚举变体 | Critical | 前向 / 后向 |
-| tag 表示改变（`tag` / `content` / `untagged`） | Critical | 双向 |
-| 可选字段变必填 | Critical | 后向 |
-| 浮点变整数 | Critical | 后向 |
-| 整数范围收窄 | Warning | 后向 |
-| 整数变浮点 | Warning | 前向 |
-| 必填字段变可选 | Warning | 前向 |
-| 默认值改变 | Note | —（语义） |
-| 安全策略改变 | Note | —（不影响线上字节） |
+| 改动                                           | 级别     | 受影响方向          |
+| ---------------------------------------------- | -------- | ------------------- |
+| 新增必填字段                                   | Critical | 后向                |
+| 删除必填字段                                   | Critical | 前向                |
+| 字段 / 变体改名                                | Critical | 双向                |
+| 类型族改变（string→number、struct→seq、……）    | Critical | 双向                |
+| 新增 / 删除枚举变体                            | Critical | 前向 / 后向         |
+| tag 表示改变（`tag` / `content` / `untagged`） | Critical | 双向                |
+| 可选字段变必填                                 | Critical | 后向                |
+| 浮点变整数                                     | Critical | 后向                |
+| 整数范围收窄                                   | Warning  | 后向                |
+| 整数变浮点                                     | Warning  | 前向                |
+| 必填字段变可选                                 | Warning  | 前向                |
+| 默认值改变                                     | Note     | —（语义）           |
+| 安全策略改变                                   | Note     | —（不影响线上字节） |
 
 这是*静态*报告：它不知道线上的实际数据。`Warning`（例如 `i32` → `u8`）只有在
 真实数据永不超出新范围时才安全。建议在每次发布候选的 CI 中运行它。
@@ -326,12 +325,12 @@ let json = formats::encode_with(&42_i64, formats::Json)?; // 按值选择格式
 # let _ = (kind, detected, json);
 ```
 
-| 分组                 | 格式                                                             |
-| -------------------- | ---------------------------------------------------------------- |
-| 文本、自描述         | `json`、`json5`、`hjson`、`yaml`、`toml`、`ron`、`sexpr`、`csv`、`urlform` |
-| 二进制、自描述       | `cbor`、`msgpack`、`bson`、`bencode`、`pickle`                   |
-| 二进制、轻模式       | `postcard`                                                       |
-| 环境                 | `envy`（仅反序列化，需要 `std`）                                  |
+| 分组           | 格式                                                                       |
+| -------------- | -------------------------------------------------------------------------- |
+| 文本、自描述   | `json`、`json5`、`hjson`、`yaml`、`toml`、`ron`、`sexpr`、`csv`、`urlform` |
+| 二进制、自描述 | `cbor`、`msgpack`、`bson`、`bencode`、`pickle`                             |
+| 二进制、轻模式 | `postcard`                                                                 |
+| 环境           | `envy`（仅反序列化，需要 `std`）                                           |
 
 数据模型兼容的格式之间无需类型化值即可互转：
 
@@ -349,24 +348,24 @@ assert_eq!(json2, json);
 每种格式都实现统一契约；线格式模型限制和编解码器明确限定的子集都会以错误报告，
 不会静默做有损回退：
 
-| 格式       | 标量                                   | 容器             | 说明 |
-| ---------- | -------------------------------------- | ---------------- | ---- |
-| `json`     | null/bool/int/float/str                | array/object     | RFC 8259，完整模型 |
-| `json5`    | 同 JSON + `Infinity`/`NaN`             | + 注释、未加引号键、单引号、尾随逗号 | 编码器输出严格 JSON |
-| `hjson`    | 同 JSON                                | + 未加引号键/字符串、注释 | 编码器输出严格 JSON |
-| `yaml`     | null/bool/int/float/str                | 块式 + 流式子集   | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]`、块标量 `|`/`>`（含 `-`/`+` chomping 与缩进指示符）、锚点 `&name`/别名 `*name`（块上下文，复制解析 + 100 万节点展开预算）、标准 tag `!!str`/`!!int`/`!!float`/`!!bool`/`!!null`（自定义 tag 拒绝）、merge 键 `<<:`、文档结束标记 `...`、非有限浮点 `.inf`/`.nan` 拒绝；多文档流拒绝 |
-| `toml`     | bool/int/float/str（无 null）          | 表、数组、内联表、多行字符串 | 文档形态：裸标量根被拒绝；`"""`/`'''` 多行字符串、`\` 续行；十进制/十六进制（`0x`）/八进制（`0o`）/二进制（`0b`）整数（含 `_` 分隔）；日期时间严格校验（TOML 1.0 四种形态：offset/local date-time、date、time）后保留为字符串 |
-| `ron`      | bool/int/float/str/char                | map/seq/元组/结构体/枚举 | `Some(...)` 包装可往返 |
-| `sexpr`    | 原子、带引号字符串、数字、`#t`/`#f`、`nil` | 列表；map 编为 alist | 无模式 `Value` 解码嵌套 map 有歧义，请用类型化目标 |
-| `csv`      | int/float/bool/str                     | 行；带表头的对象行 | RFC 4180 |
-| `urlform`  | int/float/bool/str                     | 仅扁平 key/value map | RFC 3986 百分号编码 |
-| `cbor`     | null/bool/int/float/str                | array/map         | RFC 8949 JSON 兼容 profile，经事件流中继 |
-| `msgpack`  | nil/bool/int/float/str                 | array/map         | JSON 兼容标量/容器族；不支持 bin/ext；128 位整数放不进 64 位时拒绝；非有限浮点在线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
-| `bson`     | null/bool/int32/int64/double/str       | document/array    | 文档形态：裸标量根被拒绝 |
-| `bencode`  | 整数、UTF-8 字符串                     | list/dict         | key 规范排序；无 null/float；bool 映射为 1/0 |
-| `postcard` | null/bool/无符号整数/str               | seq/map           | **非自描述**：拒绝有符号整数、float、`Option`、`Value` 和 peek |
-| `pickle`   | `None`/bool/int/float/str              | list/dict/tuple   | CPython 协议 2 子集；128 位经 `LONG1` |
-| `envy`     | int/float/bool/str                     | 扁平 map（即环境变量） | 仅反序列化；需要 `std` |
+| 格式       | 标量                                       | 容器                                 | 说明                                                                                                                                                                                                                          |
+| ---------- | ------------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `json`     | null/bool/int/float/str                    | array/object                         | RFC 8259，完整模型                                                                                                                                                                                                            |
+| `json5`    | 同 JSON + `Infinity`/`NaN`                 | + 注释、未加引号键、单引号、尾随逗号 | 编码器输出严格 JSON                                                                                                                                                                                                           |
+| `hjson`    | 同 JSON                                    | + 未加引号键/字符串、注释            | 编码器输出严格 JSON                                                                                                                                                                                                           |
+| `yaml`     | null/bool/int/float/str                    | 块式 + 流式子集                      | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]`、块标量 `                                                                                                                                                               | `/`>`（含 `-`/`+`chomping 与缩进指示符）、锚点`&name`/别名 `\*name`（块上下文，复制解析 + 100 万节点展开预算）、标准 tag `!!str`/`!!int`/`!!float`/`!!bool`/`!!null`（自定义 tag 拒绝）、merge 键 `<<:`、文档结束标记 `...`、非有限浮点 `.inf`/`.nan` 拒绝；多文档流拒绝 |
+| `toml`     | bool/int/float/str（无 null）              | 表、数组、内联表、多行字符串         | 文档形态：裸标量根被拒绝；`"""`/`'''` 多行字符串、`\` 续行；十进制/十六进制（`0x`）/八进制（`0o`）/二进制（`0b`）整数（含 `_` 分隔）；日期时间严格校验（TOML 1.0 四种形态：offset/local date-time、date、time）后保留为字符串 |
+| `ron`      | bool/int/float/str/char                    | map/seq/元组/结构体/枚举             | `Some(...)` 包装可往返                                                                                                                                                                                                        |
+| `sexpr`    | 原子、带引号字符串、数字、`#t`/`#f`、`nil` | 列表；map 编为 alist                 | 无模式 `Value` 解码嵌套 map 有歧义，请用类型化目标                                                                                                                                                                            |
+| `csv`      | int/float/bool/str                         | 行；带表头的对象行                   | RFC 4180                                                                                                                                                                                                                      |
+| `urlform`  | int/float/bool/str                         | 仅扁平 key/value map                 | RFC 3986 百分号编码                                                                                                                                                                                                           |
+| `cbor`     | null/bool/int/float/str                    | array/map                            | RFC 8949 JSON 兼容 profile，经事件流中继                                                                                                                                                                                      |
+| `msgpack`  | nil/bool/int/float/str                     | array/map                            | JSON 兼容标量/容器族；不支持 bin/ext；128 位整数放不进 64 位时拒绝；非有限浮点在线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错                                                                                  |
+| `bson`     | null/bool/int32/int64/double/str           | document/array                       | 文档形态：裸标量根被拒绝                                                                                                                                                                                                      |
+| `bencode`  | 整数、UTF-8 字符串                         | list/dict                            | key 规范排序；无 null/float；bool 映射为 1/0                                                                                                                                                                                  |
+| `postcard` | null/bool/无符号整数/str                   | seq/map                              | **非自描述**：拒绝有符号整数、float、`Option`、`Value` 和 peek                                                                                                                                                                |
+| `pickle`   | `None`/bool/int/float/str                  | list/dict/tuple                      | CPython 协议 2 子集；128 位经 `LONG1`                                                                                                                                                                                         |
+| `envy`     | int/float/bool/str                         | 扁平 map（即环境变量）               | 仅反序列化；需要 `std`                                                                                                                                                                                                        |
 
 `detect()` 是启发式且刻意保守：只认定强结构签名（pickle 协议头、bencode 开头、
 BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名），有歧义输入
@@ -437,6 +436,24 @@ let json_schema = nextjson::to_json_schema::<Point>();
 - 库不能替代应用层的总长度、集合长度、CPU 时间和输出配额。
 
 详细说明见[安全模型](docs/SAFETY_CN.md)。
+
+### 示例
+
+`nextjson/examples/` 下有 6 个完整可运行的程序（每个都返回 `Result` 并打印
+结果，用 `cargo run -p nextjson --example <名称>` 运行）：
+
+| 示例                 | 演示内容                                                                                                             |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `contract_engine`    | schema-first：`#[njson]` 策略属性编译进 `SCHEMA`、对敌意载荷的校验闸门、JSON Schema 导出、版本兼容性 `check_between` |
+| `multi_format`       | 同一个值走遍全部 14 种线格式：编码体积、精确往返、跨格式转码链                                                       |
+| `cross_format_relay` | 流式 JSON ⇄ CBOR 中继（不构造中间 `Value`）、writer 变体、批量体积对比                                               |
+| `zero_copy_reuse`    | 借用型 `&str` / `Bytes` 解码（指针级验证零拷贝）、`DecodeSlot` 在持续解码循环中的复用                                |
+| `streaming_reader`   | 从任意 `std::io::Read` 增量解码（`from_reader`、`StreamDecoder`），用分片"慢速 socket"读取器演示                     |
+| `custom_codec`       | 手写 `NsonSchema` / `NsonSerialize` / `NsonDeserialize` 与 `#[njson(with = "module")]` 字段级定制编解码              |
+
+```text
+cargo run -p nextjson --example contract_engine
+```
 
 ### Benchmark
 

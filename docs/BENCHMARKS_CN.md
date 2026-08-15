@@ -36,7 +36,6 @@ RON、S 表达式、CBOR、MessagePack、Pickle。TOML 与 BSON 是文档形态�
 
 ### 示例测量（本开发机，单次运行，Intel i7-11850H, 32GB RAM, Windows 11, Rust 1.97.0）
 
-
 | format   | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
 | -------- | ---------- | ---------- | ----------- | ---------- | ----------- |
 | json     | 23636      | 12924      | 305.47      | 5984       | 141.43      |
@@ -88,12 +87,12 @@ int-only 行使用无 float 的 `IntRecord` 模型，隔离出纯整数格式化
 字节词法器免 Token 标量读取、顶层入口使用信任型 `FastEncoder`（本开发机，
 5 秒窗口，单次运行）：
 
-| case | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
-| --- | --- | --- | --- | --- | --- |
-| nextjson_encode | 48063 | 8447 | 406.01 | 3104 | 149.18 |
-| serde_json_encode | 48063 | 17427 | 837.59 | 3914 | 188.14 |
-| nextjson_encode_intonly | 44446 | 12412 | 551.67 | 3535 | 157.14 |
-| serde_json_encode_intonly | 44446 | 20435 | 908.24 | 3692 | 164.09 |
+| case                      | size_bytes | encode_ops | encode_MBps | decode_ops | decode_MBps |
+| ------------------------- | ---------- | ---------- | ----------- | ---------- | ----------- |
+| nextjson_encode           | 48063      | 8447       | 406.01      | 3104       | 149.18      |
+| serde_json_encode         | 48063      | 17427      | 837.59      | 3914       | 188.14      |
+| nextjson_encode_intonly   | 44446      | 12412      | 551.67      | 3535       | 157.14      |
+| serde_json_encode_intonly | 44446      | 20435      | 908.24      | 3692       | 164.09      |
 
 同一台机器上，优化前的 decode 为 131.61 MB/s（主数据）与 126.86 MB/s（纯
 整数）。encode 列同时充当同机对照：FastEncoder 之前编码为 361.54 MB/s
@@ -117,9 +116,9 @@ nextjson 354.40/147.84（encode/decode，主数据），serde_json 673.23/189.91
 nextjson 反而**快于** serde_json：
 
 | case（debug 构建） | encode_MBps | decode_MBps |
-| --- | --- | --- |
-| nextjson_encode | 19.36 | 8.39 |
-| serde_json_encode | 8.05 | 8.09 |
+| ------------------ | ----------- | ----------- |
+| nextjson_encode    | 19.36       | 8.39        |
+| serde_json_encode  | 8.05        | 8.09        |
 
 release 差距来自四个可测量的原因：
 

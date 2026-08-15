@@ -13,8 +13,8 @@ resource-constrained environments. It is not "another serde" and it does not
 claim to replace Postcard for device-to-device links. What it does is make
 three properties first-class:
 
-1. **schema-first** — a type does not only encode and decode, it *describes
-   the contract*. Every derived type carries `const SCHEMA: TypeSchema`, a
+1. **schema-first** — a type does not only encode and decode, it _describes
+   the contract_. Every derived type carries `const SCHEMA: TypeSchema`, a
    compile-time metadata tree that can be introspected at runtime, rendered
    as JSON Schema, used to validate incoming data, and diffed against a
    previous release to detect protocol breakage.
@@ -30,7 +30,7 @@ three properties first-class:
    strings borrow the input buffer, and the unified token stream lets content
    be replayed without taxing the hot path.
 
-The honest scope: for high-frequency device-to-device communication, what
+For high-frequency device-to-device communication, what
 matters is byte count, determinism, version compatibility and latency — a
 unified API does not win those by itself. NextJson's job is the contract
 layer around the wire: describe it, validate what enters, and detect when a
@@ -102,9 +102,7 @@ opt-in consumer of the same decoder. Two encoder policies are exposed:
 `Encoder` validates the event protocol on every call, while `FastEncoder`
 (the `nextencode` / `to_vec` / `to_string` / writer entry points) trusts the
 derive-verified call sequence and skips per-value checks for ~2x encoding
-throughput. See [Design](docs/DESIGN.md) for the fork analysis, the
-borrowing model (transient / owned / borrowed), and the attribute / policy
-layers.
+throughput.
 
 ```rust
 use nextjson::{NsonDeserialize, NsonSerialize};
@@ -154,7 +152,7 @@ version-compatibility checking.
 
 #### Pillar 2 — safety policy as part of the schema
 
-A schema can declare what the type *allows to enter the system*, not just what
+A schema can declare what the type _allows to enter the system_, not just what
 it looks like. Limits are declared with derive attributes and carried inside
 `SCHEMA`; a validator (`nextjson::validate`) walks a decoded `Value` against
 the schema and reports every violation, plus the paths of sensitive values for
@@ -186,14 +184,14 @@ for v in &report.violations {     // or inspect every violation
 
 Declared limits (all optional, all const-constructible):
 
-| Attribute | Scope | Enforced on |
-| --------- | ----- | ----------- |
-| `max_str_len = N` | field / newtype variant | string length in Unicode scalar values |
-| `max_items = N`   | field / newtype variant | array elements / object entries |
+| Attribute             | Scope                   | Enforced on                                  |
+| --------------------- | ----------------------- | -------------------------------------------- |
+| `max_str_len = N`     | field / newtype variant | string length in Unicode scalar values       |
+| `max_items = N`       | field / newtype variant | array elements / object entries              |
 | `min = N` / `max = N` | field / newtype variant | numbers (inclusive, exact for `i128`/`u128`) |
-| `sensitive` | field / newtype variant | reported, never rejected (redaction) |
-| `max_depth = N` | container | container nesting below this type |
-| `deny_unknown_fields` | container | unknown keys on structs and tagged enums |
+| `sensitive`           | field / newtype variant | reported, never rejected (redaction)         |
+| `max_depth = N`       | container               | container nesting below this type            |
+| `deny_unknown_fields` | container               | unknown keys on structs and tagged enums     |
 
 Runtime tuning goes through `ValidateConfig`: a global nesting cap
 (`max_depth`) and a message-size bound (`max_message_size` + the actual
@@ -226,23 +224,23 @@ assert_eq!(report.worst_severity(), Some(Severity::Critical));
 
 Detected classes:
 
-| Change | Severity | Direction affected |
-| ------ | -------- | ------------------ |
-| Added required field | Critical | backward |
-| Removed required field | Critical | forward |
-| Field / variant renamed | Critical | both |
-| Type-family change (string→number, struct→seq, ...) | Critical | both |
-| Added / removed enum variant | Critical | forward / backward |
-| Tag representation change (`tag` / `content` / `untagged`) | Critical | both |
-| Optional field became required | Critical | backward |
-| Float became integer | Critical | backward |
-| Integer range narrowed | Warning | backward |
-| Integer became float | Warning | forward |
-| Required field became optional | Warning | forward |
-| Default value changed | Note | — (semantic) |
-| Safety policy changed | Note | — (not wire-breaking) |
+| Change                                                     | Severity | Direction affected    |
+| ---------------------------------------------------------- | -------- | --------------------- |
+| Added required field                                       | Critical | backward              |
+| Removed required field                                     | Critical | forward               |
+| Field / variant renamed                                    | Critical | both                  |
+| Type-family change (string→number, struct→seq, ...)        | Critical | both                  |
+| Added / removed enum variant                               | Critical | forward / backward    |
+| Tag representation change (`tag` / `content` / `untagged`) | Critical | both                  |
+| Optional field became required                             | Critical | backward              |
+| Float became integer                                       | Critical | backward              |
+| Integer range narrowed                                     | Warning  | backward              |
+| Integer became float                                       | Warning  | forward               |
+| Required field became optional                             | Warning  | forward               |
+| Default value changed                                      | Note     | — (semantic)          |
+| Safety policy changed                                      | Note     | — (not wire-breaking) |
 
-This is a *static* report: it cannot know the actual values in the field. A
+This is a _static_ report: it cannot know the actual values in the field. A
 `Warning` (e.g. `i32` → `u8`) is safe only if the real data never exceeds the
 new range. Run it in CI on every release candidate.
 
@@ -328,12 +326,12 @@ let json = formats::encode_with(&42_i64, formats::Json)?; // format by value
 # let _ = (kind, detected, json);
 ```
 
-| Group              | Formats                                                            |
-| ------------------ | ------------------------------------------------------------------ |
-| Text, self-descr.  | `json`, `json5`, `hjson`, `yaml`, `toml`, `ron`, `sexpr`, `csv`, `urlform` |
-| Binary, self-descr.| `cbor`, `msgpack`, `bson`, `bencode`, `pickle`                     |
-| Binary, schema-light | `postcard`                                                       |
-| Environment        | `envy` (deserialization only, requires `std`)                      |
+| Group                | Formats                                                                    |
+| -------------------- | -------------------------------------------------------------------------- |
+| Text, self-descr.    | `json`, `json5`, `hjson`, `yaml`, `toml`, `ron`, `sexpr`, `csv`, `urlform` |
+| Binary, self-descr.  | `cbor`, `msgpack`, `bson`, `bencode`, `pickle`                             |
+| Binary, schema-light | `postcard`                                                                 |
+| Environment          | `envy` (deserialization only, requires `std`)                              |
 
 Transcoding between compatible format models needs no typed value:
 
@@ -351,24 +349,24 @@ assert_eq!(json2, json);
 Every format implements the unified contract. Wire-model limits and deliberate
 codec-subset limits are reported as errors instead of silent lossy fallback:
 
-| Format | Scalars | Containers | Notes |
-| ------ | ------- | ---------- | ----- |
-| `json` | null/bool/int/float/str | array/object | RFC 8259; full model |
-| `json5` | as JSON + `Infinity`/`NaN` | + comments, unquoted keys, single quotes, trailing commas | encoder emits strict JSON |
-| `hjson` | as JSON | + unquoted keys/strings, comments | encoder emits strict JSON |
-| `yaml` | null/bool/int/float/str | block + flow subset | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]`, block scalars `|`/`>` (with `-`/`+` chomping and indentation indicator), anchors `&name` / aliases `*name` (block context; resolved by copying with a 1M-node expansion budget), standard tags `!!str`/`!!int`/`!!float`/`!!bool`/`!!null` (custom tags rejected), merge keys `<<:`, document-end marker `...`, non-finite `.inf`/`.nan` rejected; multi-document streams rejected |
-| `toml` | bool/int/float/str (no null) | tables, arrays, inline tables, multi-line strings | document-shaped: a bare scalar root is rejected; `"""`/`'''` multi-line strings with `\` continuation; decimal / hex (`0x`) / octal (`0o`) / binary (`0b`) integers (with `_` separators); date-times strictly validated (TOML 1.0: offset/local date-time, date, time) then preserved as strings |
-| `ron` | bool/int/float/str/char | map/seq/tuple/struct/enum | `Some(...)` wrappers round-trip |
-| `sexpr` | atoms, quoted strings, numbers, `#t`/`#f`, `nil` | lists; maps as alists | schema-less nested-map `Value` decoding is ambiguous; use typed targets |
-| `csv` | int/float/bool/str | rows; object rows with header | RFC 4180 |
-| `urlform` | int/float/bool/str | flat key/value map only | RFC 3986 percent-encoding |
-| `cbor` | null/bool/int/float/str | array/map | RFC 8949 JSON-compatible profile via event relay |
-| `msgpack` | nil/bool/int/float/str | array/map | JSON-compatible scalar/container families; no bin/ext; 128-bit integers rejected when they do not fit 64-bit; non-finite floats pass through losslessly on the wire but error when relayed to formats that cannot represent them (JSON, CBOR) |
-| `bson` | null/bool/int32/int64/double/str | document/array | document-shaped: a bare scalar root is rejected |
-| `bencode` | int, UTF-8 strings | list/dict | canonical sorted keys; no null/float; bool maps to 1/0 |
-| `postcard` | null/bool/unsigned int/str | seq/map | **non-self-describing**: signed integers, floats, `Option`, `Value`, and peek are rejected |
-| `pickle` | `None`/bool/int/float/str | list/dict/tuple | CPython protocol 2 subset; 128-bit via `LONG1` |
-| `envy` | int/float/bool/str | flat map (the environment) | deserialization only; `std` required |
+| Format     | Scalars                                          | Containers                                                | Notes                                                                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `json`     | null/bool/int/float/str                          | array/object                                              | RFC 8259; full model                                                                                                                                                                                                                                                                              |
+| `json5`    | as JSON + `Infinity`/`NaN`                       | + comments, unquoted keys, single quotes, trailing commas | encoder emits strict JSON                                                                                                                                                                                                                                                                         |
+| `hjson`    | as JSON                                          | + unquoted keys/strings, comments                         | encoder emits strict JSON                                                                                                                                                                                                                                                                         |
+| `yaml`     | null/bool/int/float/str                          | block + flow subset                                       | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]`, block scalars `                                                                                                                                                                                                                     | `/`>`(with`-`/`+`chomping and indentation indicator), anchors`&name`/ aliases`\*name`(block context; resolved by copying with a 1M-node expansion budget), standard tags`!!str`/`!!int`/`!!float`/`!!bool`/`!!null`(custom tags rejected), merge keys`<<:`, document-end marker `...`, non-finite `.inf`/`.nan` rejected; multi-document streams rejected |
+| `toml`     | bool/int/float/str (no null)                     | tables, arrays, inline tables, multi-line strings         | document-shaped: a bare scalar root is rejected; `"""`/`'''` multi-line strings with `\` continuation; decimal / hex (`0x`) / octal (`0o`) / binary (`0b`) integers (with `_` separators); date-times strictly validated (TOML 1.0: offset/local date-time, date, time) then preserved as strings |
+| `ron`      | bool/int/float/str/char                          | map/seq/tuple/struct/enum                                 | `Some(...)` wrappers round-trip                                                                                                                                                                                                                                                                   |
+| `sexpr`    | atoms, quoted strings, numbers, `#t`/`#f`, `nil` | lists; maps as alists                                     | schema-less nested-map `Value` decoding is ambiguous; use typed targets                                                                                                                                                                                                                           |
+| `csv`      | int/float/bool/str                               | rows; object rows with header                             | RFC 4180                                                                                                                                                                                                                                                                                          |
+| `urlform`  | int/float/bool/str                               | flat key/value map only                                   | RFC 3986 percent-encoding                                                                                                                                                                                                                                                                         |
+| `cbor`     | null/bool/int/float/str                          | array/map                                                 | RFC 8949 JSON-compatible profile via event relay                                                                                                                                                                                                                                                  |
+| `msgpack`  | nil/bool/int/float/str                           | array/map                                                 | JSON-compatible scalar/container families; no bin/ext; 128-bit integers rejected when they do not fit 64-bit; non-finite floats pass through losslessly on the wire but error when relayed to formats that cannot represent them (JSON, CBOR)                                                     |
+| `bson`     | null/bool/int32/int64/double/str                 | document/array                                            | document-shaped: a bare scalar root is rejected                                                                                                                                                                                                                                                   |
+| `bencode`  | int, UTF-8 strings                               | list/dict                                                 | canonical sorted keys; no null/float; bool maps to 1/0                                                                                                                                                                                                                                            |
+| `postcard` | null/bool/unsigned int/str                       | seq/map                                                   | **non-self-describing**: signed integers, floats, `Option`, `Value`, and peek are rejected                                                                                                                                                                                                        |
+| `pickle`   | `None`/bool/int/float/str                        | list/dict/tuple                                           | CPython protocol 2 subset; 128-bit via `LONG1`                                                                                                                                                                                                                                                    |
+| `envy`     | int/float/bool/str                               | flat map (the environment)                                | deserialization only; `std` required                                                                                                                                                                                                                                                              |
 
 `detect()` is heuristic and intentionally conservative: it claims only strong
 structural signatures (pickle protocol header, bencode intro, BSON length
@@ -422,10 +420,10 @@ Container attributes include `rename_all` (including the directional
 `deny_unknown_fields`, `default`, `transparent`, `crate`, `bound` (including
 directional `bound(serialize=…, deserialize=…)`), `into`, `from`, `try_from`,
 `remote`, and `expecting` (overrides the type description used in
-  deserialization error messages; derived implementations install it on the
-  decoder, so container-level type mismatches like `begin_object` hitting `[`
-  report the type name instead of a bare `'{'`; the default is the type's
-  fully qualified path). Field attributes include `rename`, `alias`,
+deserialization error messages; derived implementations install it on the
+decoder, so container-level type mismatches like `begin_object` hitting `[`
+report the type name instead of a bare `'{'`; the default is the type's
+fully qualified path). Field attributes include `rename`, `alias`,
 `default`, `skip`, directional skips, `skip_serializing_if`, `flatten`,
 `borrow`, `with`, `serialize_with`, `deserialize_with`, `getter`, and the
 safety-policy attributes `max_str_len`, `max_items`, `min`, `max`,
@@ -468,6 +466,25 @@ deployment-specific byte, collection, time, and output limits.
 (std) pulls incrementally from any `std::io::Read` source (see
 `StreamDecoder`). The default JSON and CBOR nesting limit is 128. See the [Safety Model](https://github.com/blueokanna/NextJson/blob/main/docs/SAFETY.md) for the auditable invariants and remaining
 application responsibilities.
+
+### Examples
+
+Six complete, runnable programs live in `nextjson/examples/` (each returns
+`Result` and prints its results; run with `cargo run -p nextjson --example
+<name>`):
+
+| Example              | Demonstrates                                                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contract_engine`    | schema-first: `#[njson]` policy attributes compiled into `SCHEMA`, a validation gate over hostile payloads, JSON Schema export, and version-compatibility `check_between` |
+| `multi_format`       | one value through all 14 wire formats: encoded size, exact round-trip, cross-format transcode chain                                                                       |
+| `cross_format_relay` | streaming JSON ⇄ CBOR relay with no intermediate `Value`, plus writer variants and batch size comparison                                                                  |
+| `zero_copy_reuse`    | borrowed `&str` / `Bytes` decode (pointer-verified against the input slice) and `DecodeSlot` reuse in a sustained decode loop                                             |
+| `streaming_reader`   | incremental decode from any `std::io::Read` source (`from_reader`, `StreamDecoder`) over a chunked "slow socket" reader                                                   |
+| `custom_codec`       | hand-written `NsonSchema` / `NsonSerialize` / `NsonDeserialize` and `#[njson(with = "module")]` field codecs                                                              |
+
+```text
+cargo run -p nextjson --example contract_engine
+```
 
 ### Benchmark
 

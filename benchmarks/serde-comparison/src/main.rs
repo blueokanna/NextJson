@@ -310,7 +310,8 @@ fn main() {
 
     // Float-free control: quantifies how much of the encode gap is float
     // formatting (nextjson uses `core::fmt::Display`; serde_json uses ryu).
-    run_float_free_comparison();
+    // Uses the same `NEXTJSON_BENCH_MS` window as the main table.
+    run_float_free_comparison(duration);
 }
 
 /// Assert that a nextjson format round-trips `value` exactly.
@@ -373,7 +374,7 @@ fn int_fixture() -> Vec<IntRecord> {
         .collect()
 }
 
-fn run_float_free_comparison() {
+fn run_float_free_comparison(duration: Duration) {
     let records = int_fixture();
     let njson_json = nextjson::nextencode(&records).unwrap();
     assert_eq!(nextjson::nextdecode::<Vec<IntRecord>>(&njson_json).unwrap(), records);
@@ -384,7 +385,7 @@ fn run_float_free_comparison() {
     println!("case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps");
     bench(
         "nextjson_encode_intonly",
-        Duration::from_millis(2_000),
+        duration,
         &|| nextjson::nextencode(&records).unwrap(),
         &|b| {
             black_box(nextjson::nextdecode::<Vec<IntRecord>>(b).unwrap());
@@ -392,7 +393,7 @@ fn run_float_free_comparison() {
     );
     bench(
         "serde_json_encode_intonly",
-        Duration::from_millis(2_000),
+        duration,
         &|| serde_json::to_vec(&records).unwrap(),
         &|b| {
             black_box(serde_json::from_slice::<Vec<IntRecord>>(b).unwrap());
