@@ -88,6 +88,7 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 | -------- | ------: | -------------------------------------------------------------- |
 | `std`    |     yes | Standard I/O adapters and standard-library-specific types      |
 | `derive` |     yes | Repository-owned `NsonSerialize` and `NsonDeserialize` derives |
+| `simd`   |      no | Opt-in architecture acceleration for JSON string scanning: SSE2 + runtime-detected AVX2 on x86-64, NEON on aarch64, with a portable register-width fallback elsewhere. The unsafe code is confined to the `scan` module and gated behind this feature; default builds remain `#![deny(unsafe_code)]` with zero `unsafe`. |
 
 ### Native API
 
@@ -349,24 +350,24 @@ assert_eq!(json2, json);
 Every format implements the unified contract. Wire-model limits and deliberate
 codec-subset limits are reported as errors instead of silent lossy fallback:
 
-| Format     | Scalars                                          | Containers                                                | Notes                                                                                                                                                                                                                                                                                             |
-| ---------- | ------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `json`     | null/bool/int/float/str                          | array/object                                              | RFC 8259; full model                                                                                                                                                                                                                                                                              |
-| `json5`    | as JSON + `Infinity`/`NaN`                       | + comments, unquoted keys, single quotes, trailing commas | encoder emits strict JSON                                                                                                                                                                                                                                                                         |
-| `hjson`    | as JSON                                          | + unquoted keys/strings, comments                         | encoder emits strict JSON                                                                                                                                                                                                                                                                         |
-| `yaml`     | null/bool/int/float/str                          | block + flow subset                                       | block maps/sequences, `key: value`, `- `, `---`, `{…}`/`[…]`, block scalars `                                                                                                                                                                                                                     | `/`>`(with`-`/`+`chomping and indentation indicator), anchors`&name`/ aliases`\*name`(block context; resolved by copying with a 1M-node expansion budget), standard tags`!!str`/`!!int`/`!!float`/`!!bool`/`!!null`(custom tags rejected), merge keys`<<:`, document-end marker `...`, non-finite `.inf`/`.nan` rejected; multi-document streams rejected |
-| `toml`     | bool/int/float/str (no null)                     | tables, arrays, inline tables, multi-line strings         | document-shaped: a bare scalar root is rejected; `"""`/`'''` multi-line strings with `\` continuation; decimal / hex (`0x`) / octal (`0o`) / binary (`0b`) integers (with `_` separators); date-times strictly validated (TOML 1.0: offset/local date-time, date, time) then preserved as strings |
-| `ron`      | bool/int/float/str/char                          | map/seq/tuple/struct/enum                                 | `Some(...)` wrappers round-trip                                                                                                                                                                                                                                                                   |
-| `sexpr`    | atoms, quoted strings, numbers, `#t`/`#f`, `nil` | lists; maps as alists                                     | schema-less nested-map `Value` decoding is ambiguous; use typed targets                                                                                                                                                                                                                           |
-| `csv`      | int/float/bool/str                               | rows; object rows with header                             | RFC 4180                                                                                                                                                                                                                                                                                          |
-| `urlform`  | int/float/bool/str                               | flat key/value map only                                   | RFC 3986 percent-encoding                                                                                                                                                                                                                                                                         |
-| `cbor`     | null/bool/int/float/str                          | array/map                                                 | RFC 8949 JSON-compatible profile via event relay                                                                                                                                                                                                                                                  |
-| `msgpack`  | nil/bool/int/float/str                           | array/map                                                 | JSON-compatible scalar/container families; no bin/ext; 128-bit integers rejected when they do not fit 64-bit; non-finite floats pass through losslessly on the wire but error when relayed to formats that cannot represent them (JSON, CBOR)                                                     |
-| `bson`     | null/bool/int32/int64/double/str                 | document/array                                            | document-shaped: a bare scalar root is rejected                                                                                                                                                                                                                                                   |
-| `bencode`  | int, UTF-8 strings                               | list/dict                                                 | canonical sorted keys; no null/float; bool maps to 1/0                                                                                                                                                                                                                                            |
-| `postcard` | null/bool/unsigned int/str                       | seq/map                                                   | **non-self-describing**: signed integers, floats, `Option`, `Value`, and peek are rejected                                                                                                                                                                                                        |
-| `pickle`   | `None`/bool/int/float/str                        | list/dict/tuple                                           | CPython protocol 2 subset; 128-bit via `LONG1`                                                                                                                                                                                                                                                    |
-| `envy`     | int/float/bool/str                               | flat map (the environment)                                | deserialization only; `std` required                                                                                                                                                                                                                                                              |
+| Format | Scalar Types | Container Types | Features and Limitations |
+| --- | --- | --- | --- |
+| **JSON** | `null`, `bool`, `int`, `float`, `str` | `array`, `object` | RFC 8259，完整模型 |
+| **JSON5** | 同 JSON + `Infinity` / `NaN` | `array`, `object`（+ 注释、未加引号键、单引号、尾随逗号） | 编码器输出严格 JSON |
+| **Hjson** | 同 JSON | `array`, `object`（+ 未加引号键/字符串、注释） | 编码器输出严格 JSON |
+| **YAML** | `null`, `bool`, `int`, `float`, `str` | 块式 + 流式子集 | 块式 map/序列（`key: value`、`-`、`---`、`{...}`/`[...]`）；块标量 `|` / `>`（含 `-`/`+` chomping 与缩进指示符）；锚点 `&name` 与别名 `*name`（块上下文，复制解析 + 100 万节点展开预算）；标准 tag（`!!str`/`!!int`/`!!float`/`!!bool`/`!!null`，拒绝自定义 tag）；支持 merge 键 `<<:`、文档结束标记 `...`；拒绝非有限浮点（`.inf`/`.nan`）与多文档流 |
+| **TOML** | `bool`, `int`, `float`, `str`（无 `null`） | 表、数组、内联表、多行字符串 | 拒绝裸标量根；支持 `"""`/`'''` 多行字符串与 `\` 续行；支持 10/16/8/2 进制整数（含 `_` 分隔符）；严格校验日期时间形态（TOML 1.0 四种形态：offset/local date-time, date, time）后保留为字符串 |
+| **RON** | `bool`, `int`, `float`, `str`, `char` | `map`, `seq`, 元组, 结构体, 枚举 | `Some(...)` 包装可双向往返 |
+| **S-expr** | 原子、带引号字符串、数字、`#t`/`#f`, `nil` | 列表（`map` 编为 `alist`） | 无模式 `Value` 解码嵌套 `map` 存在歧义，请使用类型化目标 |
+| **CSV** | `int`, `float`, `bool`, `str` | 行、带表头的对象行 | RFC 4180 |
+| **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
+| **CBOR** | `null`, `bool`, `int`, `float`, `str` | `array`, `map` | RFC 8949 JSON 兼容 Profile，经事件流中继 |
+| **MessagePack** | `nil`, `bool`, `int`, `float`, `str` | `array`, `map` | JSON 兼容标量/容器族；不支持 `bin`/`ext`；拒绝超出 64 位的 128 位整数；非有限浮点线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
+| **BSON** | `null`, `bool`, `int32`, `int64`, `double`, `str` | `document`, `array` | 文档形态（拒绝裸标量根） |
+| **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
+| **Postcard** | `null`, `bool`, 无符号整数, `str` | `seq`, `map` | 非自描述：拒绝有符号整数、`float`、`Option`、`Value` 和 `peek` |
+| **Pickle** | `None`, `bool`, `int`, `float`, `str` | `list`, `dict`, `tuple` | CPython 协议 2 子集；128 位整数经 `LONG1` 处理 |
+| **Envy** | `int`, `float`, `bool`, `str` | 扁平 `map`（环境变量） | 仅反序列化；需要 `std` |
 
 `detect()` is heuristic and intentionally conservative: it claims only strong
 structural signatures (pickle protocol header, bencode intro, BSON length
@@ -504,22 +505,28 @@ cargo bench --locked -p nextjson --bench format_comparison
 ```
 
 An out-of-workspace crate (`benchmarks/serde-comparison/`) additionally
-benchmarks the same data against **nine serde-ecosystem formats**: JSON
-(serde_json), YAML (serde_yaml), RON (ron), MessagePack (rmp-serde), CBOR
-(ciborium), TOML (toml), BSON (bson), postcard (postcard), and bincode
-(bincode; nextjson has no bincode codec, so that case is labelled `na`). The
-`Vec<Record>` fixture covers signed / float / nested values; document-shaped
-or unsigned-only formats (TOML, BSON, postcard) use a `Config` fixture. Every
-format runs a round-trip self-check before measurement. The crate keeps its
-own Cargo.lock so the workspace dependency audit stays intact.
+benchmarks the same data against **eleven serde-ecosystem formats**: JSON
+(serde_json and simd-json), JSON5 (serde_json5), YAML (serde_yaml), RON (ron),
+MessagePack (rmp-serde), CBOR (ciborium), TOML (toml), BSON (bson), postcard
+(postcard), and bincode (bincode; nextjson has no bincode codec, so that case
+is labelled `na`). It also measures a string-heavy *long-text* JSON fixture,
+which is the workload where the `simd` feature's accelerated string scanning
+matters most. The `Vec<Record>` fixture covers signed / float / nested values;
+document-shaped or unsigned-only formats (TOML, BSON, postcard) use a `Config`
+fixture. Every format runs a round-trip self-check before measurement. The
+crate keeps its own Cargo.lock so the workspace dependency audit stays intact.
 
 ```text
 cd benchmarks/serde-comparison && cargo run --release
 ```
 
 Output is CSV (`case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps`);
-the per-case window is tuned with `NEXTJSON_BENCH_MS` (default 2000 ms). See
-the [Reproducible Benchmark](https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md) for the fixture, measurement method, output
+the per-case window is tuned with `NEXTJSON_BENCH_MS` (default 2000 ms). The
+GitHub Actions workflow (`.github/workflows/benchmark.yml`) runs both suites
+with the `simd` feature enabled and merges them into
+`benchmarks/results/Github_Action_Benchmark.md`, uploaded as a workflow
+artifact and committed back on `main` / manual dispatch / the weekly schedule.
+See the [Reproducible Benchmark](https://github.com/blueokanna/NextJson/blob/main/docs/BENCHMARKS.md) for the fixture, measurement method, output
 format, and reporting requirements.
 
 ### Reproducibility

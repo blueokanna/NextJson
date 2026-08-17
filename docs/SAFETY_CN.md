@@ -66,6 +66,16 @@ byte string、非文本 key、非有限浮点和未知 tag 会明确失败。`fo
 长度或执行时间。处理不可信流量时，应用必须在传输层和业务层设置这些配额。
 `from_reader` 会缓冲完整 reader，必须由调用方提供有界 reader。
 
+### 可选的 `simd` 特性
+
+`simd` 是唯一引入 `unsafe` 的特性，其安全模型刻意收窄：
+
+- **隔离**：`unsafe` 代码只在 `nextjson/src/scan.rs` 一个模块中，且仅在 `cfg(feature = "simd")` 下编译。模块带有 `#![cfg_attr(feature = "simd", allow(unsafe_code))]`；未启用该特性时，crate 全库保持 `#![deny(unsafe_code)]`，模块完全安全（可移植 SWAR）。
+- **边界**：每个向量加载前都有显式长度检查（SSE2/NEON 为 `i + 16 <= len`，AVX2 为 `i + 32 <= len`），更短的尾部一律回退到标量参考扫描，不可能越界读。
+- **特性检测**：AVX2 路径只在 `std::is_x86_feature_detected!("avx2")`（基于 CPUID，仅 `std`）通过后进入；SSE2 与 NEON 分别是各自架构的基线，无需检测。不支持的平台直接使用可移植路径。
+- **正确性**：所有加速路径都与标量参考实现对拍：全部 256 个字节值、全部两字节组合、长度 `0..=80` 的头部/中部/尾部扫描、1 MiB 干净缓冲区，以及 2000 个确定性伪随机缓冲区在每个前缀长度上的对拍。aarch64 NEON 路径命中后用标量参考定位（构造上正确），并断言 SIMD 比较与标量参考从不分歧。
+- **诚实的边界**：`unsafe` 块是手写内建指令（intrinsic），不是对第三方 `unsafe` API 的包装。审查范围就是上述单个模块。
+
 ### 与 serde 的安全对比
 
 本节如实比较安全相关属性，是**属性对比**，不是"谁绝对更安全"的断言——两者在
@@ -73,8 +83,8 @@ Rust 规则下都内存安全，且都依赖应用层设置部署配额。
 
 | 属性 | serde / serde_json | nextjson |
 | --- | --- | --- |
-| `unsafe` 代码 | serde 内部使用 `unsafe`（反射、`RawValue`）；serde_json 浮点解析历史上使用过 `unsafe` | `#![deny(unsafe_code)]`；crate 内无任何 `unsafe` |
-| 编译器强制的 unsafe 门禁 | 无（允许 unsafe） | `#![deny(unsafe_code)]` 让任何未来的 `unsafe` 直接编译失败 |
+| `unsafe` 代码 | serde 内部使用 `unsafe`（反射、`RawValue`）；serde_json 浮点解析历史上使用过 `unsafe` | 默认构建 `#![deny(unsafe_code)]`，crate 内无任何 `unsafe`；可选 `simd` 特性仅在 `scan` 模块引入手写 intrinsic（见上文） |
+| 编译器强制的 unsafe 门禁 | 无（允许 unsafe） | `#![deny(unsafe_code)]` 让任何未来的 `unsafe` 直接编译失败（`simd` 特性开启时仅 `scan` 模块例外） |
 | 错误模型 | `serde_json::Error` 带 line/column；serde 的 `Error` 不透明 | `Error` 带 line/column/offset 与粗粒度 `classification()` |
 | 递归限制 | serde_json 有递归限制（128）；serde 核心依赖 serializer | 所有解码器默认上限 128 层 |
 | 数字溢出 | serde_json 返回溢出错误 | 检查式 `i128/u128` 解析，溢出报错 |

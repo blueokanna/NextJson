@@ -932,68 +932,30 @@ impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
     }
 }
 
-/// Whether a 64-bit chunk contains any byte that must be escaped in JSON.
-///
-/// SWAR (SIMD-within-a-register) detection, no `unsafe`: control characters
-/// (< 0x20), `"`, `\`, and (when `escape_non_ascii`) any byte >= 0x80. The
-/// `hasless` trick answers "does any byte satisfy the predicate" correctly
-/// even when borrow propagation blurs which byte, because a borrow only
-/// happens when a lower byte is itself a true positive.
-#[inline]
-fn chunk_needs_escape(chunk: u64, escape_non_ascii: bool) -> bool {
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    // Any byte < 0x20.
-    if (chunk.wrapping_sub(0x2020_2020_2020_2020)) & !chunk & HIGH != 0 {
-        return true;
-    }
-    // Any byte == 0x22 (`"`).
-    let quote = chunk ^ 0x2222_2222_2222_2222;
-    if (quote.wrapping_sub(ONES)) & !quote & HIGH != 0 {
-        return true;
-    }
-    // Any byte == 0x5C (`\`).
-    let backslash = chunk ^ 0x5C5C_5C5C_5C5C_5C5C;
-    if (backslash.wrapping_sub(ONES)) & !backslash & HIGH != 0 {
-        return true;
-    }
-    // Any byte >= 0x80 (only when non-ASCII must be escaped).
-    escape_non_ascii && (chunk & HIGH) != 0
-}
-
-/// Whether `bytes` can be copied into JSON verbatim (no escaping needed).
-#[inline]
-fn can_copy_raw(bytes: &[u8], escape_non_ascii: bool) -> bool {
-    let mut i = 0;
-    let len = bytes.len();
-    while i + 8 <= len {
-        let chunk = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
-        if chunk_needs_escape(chunk, escape_non_ascii) {
-            return false;
-        }
-        i += 8;
-    }
-    bytes[i..].iter().all(|&byte| {
-        byte >= 0x20 && byte != b'"' && byte != b'\\' && (!escape_non_ascii || byte < 0x80)
-    })
-}
-
 /// Write `"..."` with JSON escaping into `buf`.
 ///
 /// Shared by the encoder (for values and object keys) and the cross-format
 /// JSON sink; kept infallible because escaping can only write valid UTF-8
 /// into an unbounded byte buffer.
+///
+/// The string is written in alternating *clean-run copy / escape* phases:
+/// the register-width (and, with `simd`, SSE2/AVX2/NEON) scan locates the
+/// next byte that needs escaping, the clean prefix is memcpy'd in one
+/// `extend_from_slice`, and only the escape itself is emitted byte-by-byte.
+/// A long string whose escapes sit near the tail is therefore almost pure
+/// `memcpy` instead of a per-byte dispatch loop.
 fn write_escaped_str(buf: &mut Vec<u8>, s: &str, escape_non_ascii: bool) {
     buf.push(b'"');
     let bytes = s.as_bytes();
-    if can_copy_raw(bytes, escape_non_ascii) {
-        buf.extend_from_slice(bytes);
-        buf.push(b'"');
-        return;
-    }
     let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
+    loop {
+        let Some(offset) = crate::scan::find_escape(&bytes[i..], escape_non_ascii) else {
+            buf.extend_from_slice(&bytes[i..]);
+            break;
+        };
+        let p = i + offset;
+        buf.extend_from_slice(&bytes[i..p]);
+        let b = bytes[p];
         match b {
             b'"' => buf.extend_from_slice(b"\\\""),
             b'\\' => buf.extend_from_slice(b"\\\\"),
@@ -1009,14 +971,19 @@ fn write_escaped_str(buf: &mut Vec<u8>, s: &str, escape_non_ascii: bool) {
                 buf.push(HEX[(b & 0xF) as usize]);
             }
             _ if escape_non_ascii && b >= 0x80 => {
-                let ch = s[i..].chars().next().expect("valid utf-8");
+                // `b` is the leading byte of a UTF-8 scalar (the input is
+                // valid UTF-8), so the char always decodes here.
+                let ch = s[p..].chars().next().expect("valid utf-8");
                 write_unicode_escape(buf, ch);
-                i += ch.len_utf8();
+                i = p + ch.len_utf8();
                 continue;
             }
+            // Defensive: `find_escape` only reports escape-class bytes; this
+            // arm preserves the old behavior (plain copy) should the set ever
+            // change.
             _ => buf.push(b),
         }
-        i += 1;
+        i = p + 1;
     }
     buf.push(b'"');
 }

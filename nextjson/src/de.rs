@@ -497,33 +497,18 @@ enum Inner<'de> {
     Tree(TreeReader<'de>),
 }
 
-/// Detect a JSON string terminator, escape marker, or forbidden control byte
-/// in eight bytes at once. This is SWAR (SIMD within a register), uses no
-/// unsafe code, and is valid for UTF-8 because non-ASCII bytes have their high
-/// bit set and therefore cannot equal `"`, `\\`, or a control byte.
-#[inline]
-fn string_chunk_has_special(chunk: u64) -> bool {
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    const ONES: u64 = 0x0101_0101_0101_0101;
-
-    if (chunk.wrapping_sub(0x2020_2020_2020_2020)) & !chunk & HIGH != 0 {
-        return true;
-    }
-    let quote = chunk ^ 0x2222_2222_2222_2222;
-    if (quote.wrapping_sub(ONES)) & !quote & HIGH != 0 {
-        return true;
-    }
-    let backslash = chunk ^ 0x5c5c_5c5c_5c5c_5c5c;
-    (backslash.wrapping_sub(ONES)) & !backslash & HIGH != 0
-}
-
 impl<'de> BytesReader<'de> {
     #[inline]
     fn skip_ws(&mut self) -> usize {
         let input = self.input;
-        let mut pos = self.pos;
-        while pos < input.len() && matches!(input[pos], b' ' | b'\t' | b'\n' | b'\r') {
-            pos += 1;
+        let pos = self.pos;
+        // Scalar fast path for compact JSON (no whitespace before the next
+        // token); only enter the register-width run-skip when whitespace is
+        // actually present.
+        if pos < input.len() && matches!(input[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            let pos = crate::scan::skip_whitespace(input, pos);
+            self.pos = pos;
+            return pos;
         }
         self.pos = pos;
         pos
@@ -756,19 +741,13 @@ impl<'de> BytesReader<'de> {
         let input = self.input;
         let start = self.pos + 1;
         let tail = &input[start..];
-        let mut relative = 0;
 
-        while relative + 8 <= tail.len() {
-            let chunk = u64::from_le_bytes(
-                tail[relative..relative + 8]
-                    .try_into()
-                    .expect("eight-byte string chunk"),
-            );
-            if string_chunk_has_special(chunk) {
-                break;
-            }
-            relative += 8;
-        }
+        // Register-width scan for the first special byte (quote, backslash,
+        // or control character). `None` means the string never terminates.
+        let Some(first) = crate::scan::find_string_special(tail) else {
+            return Err(self.err_at(ErrorKind::Eof, input.len()));
+        };
+        let mut relative = first;
         while relative < tail.len() {
             match tail[relative] {
                 b'"' | b'\\' => break,

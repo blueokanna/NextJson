@@ -15,6 +15,11 @@ readme = "../README.md"
 default = ["std", "derive"]
 std = []
 derive = ["dep:nextjson-derive"]
+# Opt-in SIMD acceleration (SSE2/AVX2 on x86-64, NEON on aarch64) for the
+# JSON string-scanning hot paths. The unsafe code is confined to the `scan`
+# module and gated behind this feature; default builds remain 100% safe
+# (`#![deny(unsafe_code)]`) and use the portable register-width fallback.
+simd = []
 
 [dependencies]
 nextjson-derive = { workspace = true, optional = true }

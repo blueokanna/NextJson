@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Standalone, out-of-workspace benchmark comparing nextjson against serde/serde_json."
+default-run = "nextjson-serde-comparison"
 
 # This crate is intentionally NOT a member of the root workspace. It exists so
 # the repository can benchmark against the mature serde ecosystem without
@@ -21,10 +22,12 @@ description = "Standalone, out-of-workspace benchmark comparing nextjson against
 [workspace]
 
 [dependencies]
-nextjson = { path = "../../nextjson", version = "0.1.4" }
+nextjson = { path = "../../nextjson", version = "0.1.4", features = ["simd"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json5 = "0.1"
 serde_yaml = "0.9"
+simd-json = { version = "0.14", features = ["serde"] }
 toml = "0.8"
 ron = "0.8"
 rmp-serde = "1"

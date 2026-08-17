@@ -189,3 +189,43 @@ baseline, not proof of universal performance.
 
 CI compiles both benchmark crates but does not enforce a throughput threshold
 on shared hardware.
+
+## The `simd` feature and the GitHub Actions benchmark workflow
+
+`nextjson` exposes an opt-in `simd` feature that accelerates the JSON string
+scanning hot paths: SSE2 plus runtime-detected AVX2 on x86-64, NEON on
+aarch64, with a portable register-width (8/16-byte SWAR) fallback everywhere
+else and a scalar reference scan for short inputs and tails. Default builds
+keep `#![deny(unsafe_code)]`; the `unsafe` is confined to `src/scan.rs` and
+only compiled under the feature. All accelerated paths are differential-tested
+against the scalar reference (all byte values, all pairs, all lengths
+`0..=80`, 1 MiB buffers, 2000 deterministic random buffers). The serialization
+hot path additionally writes escaped strings in *clean-run copy / escape*
+phases: the scan locates the next byte needing an escape, the clean prefix is
+memcpy'd, and only the escape is emitted byte-by-byte. A string whose escapes
+sit near its tail is therefore almost pure `memcpy`.
+
+The repository's GitHub Actions workflow (`.github/workflows/benchmark.yml`)
+runs both benchmarks with the `simd` feature enabled, merges the CSV rows into
+`benchmarks/results/Github_Action_Benchmark.md` (with runner OS, CPU, toolchain,
+commit, and methodology), uploads the raw CSVs and report as artifacts, and
+commits the report back on `main` / manual dispatch / the weekly schedule.
+Trigger it manually with *Actions → Benchmark → Run workflow*.
+
+On a string-heavy fixture (32 records with ~1.5 KiB bodies each), the chunked
+escape writer plus SIMD scanning measured, on this developer machine
+(`simd` on, 1 s window, single run):
+
+| case | size_bytes | encode_MBps | decode_MBps |
+| --- | ---: | ---: | ---: |
+| nextjson longtext JSON | 52579 | 5131.9 | 1801.0 |
+| serde_json longtext | 52579 | 1709.5 | 1841.8 |
+| simd-json longtext | 52579 | 4991.3 | 1236.6 |
+
+nextjson encodes this workload ~3.0x faster than serde_json and ~1.03x faster
+than simd-json (whose serde decoder also pays a per-iteration `to_vec()` copy
+for in-place parsing), with decode on par. On the short-string record fixture
+the gap to serde_json remains (~0.6x encode, ~0.76x decode) — serde_json is a
+monomorphic, JSON-specialized hot path, while nextjson's encode path is the
+format-neutral contract driving 14 formats. Absolute numbers drift with CPU
+power state; treat this as a single-run record, not a verdict.

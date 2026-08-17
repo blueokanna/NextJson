@@ -95,6 +95,35 @@ formats named in the README. These checks are evidence for the covered
 contracts, not a replacement for deployment-specific quotas or continuous
 fuzzing.
 
+## The opt-in `simd` feature
+
+`simd` is the only feature that introduces `unsafe` into the crate. Its safety
+model is deliberately narrow:
+
+- **Containment.** The `unsafe` code lives in exactly one module,
+  `nextjson/src/scan.rs`, and only under `cfg(feature = "simd")`. The module
+  carries `#![cfg_attr(feature = "simd", allow(unsafe_code))]`; without the
+  feature the crate keeps `#![deny(unsafe_code)]` crate-wide and the module is
+  fully safe (portable SWAR only).
+- **Bounds.** Every vector load is guarded by an explicit length check
+  (`i + 16 <= len` for SSE2/NEON, `i + 32 <= len` for AVX2) before the load;
+  shorter tails always fall back to the scalar reference scan. An
+  out-of-bounds read is not possible.
+- **Feature detection.** The AVX2 path is only entered after
+  `std::is_x86_feature_detected!("avx2")` (a CPUID-backed check, `std` only).
+  SSE2 and NEON are baseline on their respective architectures and need no
+  detection. Unsupported targets simply use the portable path.
+- **Correctness.** Every accelerated path is tested against a scalar reference
+  implementation over all 256 byte values, all two-byte pairs, all lengths
+  `0..=80` with every interesting byte at head/middle/tail, 1 MiB clean
+  buffers, and 2000 deterministic pseudo-random buffers across every prefix
+  length. The aarch64 NEON path resolves hit positions with the scalar
+  reference (correct by construction) and asserts that the SIMD compare never
+  disagrees with it.
+- **Honest boundary.** The `unsafe` blocks are hand-written intrinsics, not
+  `unsafe`-wrapped safe APIs from a third party. Review scope is the single
+  module above.
+
 ## Safety comparison with serde
 
 This section compares safety-relevant properties honestly. It is a *property*
@@ -104,8 +133,8 @@ quotas.
 
 | Property | serde / serde_json | nextjson |
 | --- | --- | --- |
-| `unsafe` code | serde uses internal `unsafe` (reflection, `RawValue`); serde_json float parsing historically used `unsafe` | `#![deny(unsafe_code)]`; the only `unsafe`-adjacent path is `MaybeUninit`-free checked slots — no `unsafe` in the crate |
-| Compiler-enforced unsafe gate | none (unsafe is allowed) | `#![deny(unsafe_code)]` makes any future `unsafe` a compile error |
+| `unsafe` code | serde uses internal `unsafe` (reflection, `RawValue`); serde_json float parsing historically used `unsafe` | default build is `#![deny(unsafe_code)]` with no `unsafe` in the crate; the opt-in `simd` feature confines hand-written intrinsics to the `scan` module (see above) |
+| Compiler-enforced unsafe gate | none (unsafe is allowed) | `#![deny(unsafe_code)]` makes any future `unsafe` a compile error (with `simd` enabled, only the `scan` module is exempt) |
 | Error model | `serde_json::Error` carries line/column; serde `Error` is opaque | `Error` carries line/column/offset and a coarse `classification()` |
 | Recursion limits | serde_json has a recursion limit (128); serde core relies on serializer | all decoders cap nesting at 128 by default |
 | Number overflow | serde_json returns overflow errors | checked `i128`/`u128` parsing with overflow errors |
@@ -118,5 +147,6 @@ quotas.
 
 What this table does *not* claim: it does not assert nextjson has fewer
 long-tail bugs than a decade-old, community-fuzzed ecosystem, and it does not
-replace external fuzzing or deployment quotas. The `unsafe`-free property and
-the `deny(unsafe_code)` gate are the concrete, verifiable differences.
+replace external fuzzing or deployment quotas. The `unsafe`-free property (in
+default builds) and the `deny(unsafe_code)` gate are the concrete, verifiable
+differences.

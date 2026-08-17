@@ -56,6 +56,13 @@
 //! - `std` (default): standard I/O adapters and standard-library integrations.
 //! - `derive` (default): repository-owned `NsonSerialize` and
 //!   `NsonDeserialize` procedural macros.
+//! - `simd` (opt-in): architecture-accelerated JSON string scanning. On
+//!   x86-64 this uses SSE2 (always present) plus AVX2 after a runtime CPUID
+//!   check; on aarch64 it uses NEON; everywhere else (and whenever `simd` is
+//!   off) a portable 8/16-byte register-width SWAR fallback is used. The
+//!   `unsafe` code lives only in the private `scan` module and only when
+//!   `simd` is enabled; default builds keep the crate-wide
+//!   `#![deny(unsafe_code)]` with zero `unsafe`.
 //!
 //! Disabling default features leaves a `core + alloc` implementation. The
 //! complete workspace dependency graph contains only `nextjson` and the local,
@@ -166,6 +173,7 @@ pub mod map;
 mod number;
 #[doc(hidden)]
 pub mod private;
+mod scan;
 mod schema;
 mod ser;
 #[cfg(feature = "std")]

@@ -86,6 +86,8 @@ jobs:
             args: -p nextjson --no-default-features
           - name: no-std-derive
             args: -p nextjson --no-default-features --features derive
+          - name: no-std-simd
+            args: -p nextjson --no-default-features --features simd,derive
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
@@ -161,7 +163,9 @@ jobs:
   # out-of-workspace crate (`benchmarks/serde-comparison`) with its own
   # Cargo.lock so the workspace dependency-audit (zero third-party sources)
   # stays intact; CI builds it but does not enforce a throughput threshold on
-  # shared hardware.
+  # shared hardware. The in-workspace benchmark is compiled with the `simd`
+  # feature (opt-in architecture acceleration) so the gate matches the
+  # benchmark workflow.
   # ---------------------------------------------------------------------------
   benchmark:
     name: benchmark compile
@@ -170,8 +174,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
-      - name: Compile in-workspace format benchmark
-        run: cargo bench -p nextjson --bench format_comparison --no-run --locked
+      - name: Compile in-workspace format benchmark (with simd)
+        run: cargo bench -p nextjson --bench format_comparison --features simd --no-run --locked
       - name: Compile serde comparison benchmark (out-of-workspace)
         working-directory: benchmarks/serde-comparison
         run: cargo build --release --locked

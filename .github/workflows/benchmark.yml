@@ -1,0 +1,104 @@
+name: Benchmark
+
+# Full benchmark + report generation.
+#
+# Runs both benchmark suites (the in-workspace 14-format matrix and the
+# standalone serde/simd-json comparison), merges the CSV results into
+# `benchmarks/results/Github_Action_Benchmark.md`, uploads the raw CSVs and
+# the report as workflow artifacts, and (on push to `main`, manual dispatch,
+# or the weekly schedule) commits the report back to the repository.
+#
+# The nextjson `simd` feature is enabled so the reported numbers reflect the
+# architecture-accelerated scanning paths (SSE2/AVX2 on x86-64, NEON on
+# aarch64) with runtime detection and scalar fallback.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "nextjson/**"
+      - "nextjson-derive/**"
+      - "benchmarks/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/benchmark.yml"
+  pull_request:
+    paths:
+      - "nextjson/**"
+      - "nextjson-derive/**"
+      - "benchmarks/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/benchmark.yml"
+  schedule:
+    # Weekly refresh of the committed report.
+    - cron: "0 0 * * 0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # required to commit results back on main / manual / schedule
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  NEXTJSON_BENCH_MS: "2000"
+
+jobs:
+  benchmark:
+    name: run benchmarks and generate report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Run in-workspace 14-format benchmark (with simd)
+        run: |
+          mkdir -p benchmarks/results
+          cargo bench -p nextjson --bench format_comparison --features simd --locked 2>&1 \
+            | tee /tmp/format_raw.txt
+          grep -E '^[A-Za-z0-9_]+,[0-9]+,[0-9.]+,[0-9.]+,[0-9.]+,[0-9.]+$' /tmp/format_raw.txt \
+            > benchmarks/results/format_comparison.csv
+
+      - name: Run serde ecosystem comparison (with simd)
+        working-directory: benchmarks/serde-comparison
+        run: |
+          cargo run --release --locked 2>&1 | tee /tmp/serde_raw.txt
+          grep -E '^[A-Za-z0-9_()]+,[0-9]+,[0-9.]+,[0-9.]+,[0-9.]+,[0-9.]+$' /tmp/serde_raw.txt \
+            > ../results/serde_comparison.csv
+
+      - name: Generate Github_Action_Benchmark.md
+        run: |
+          cargo run --release --manifest-path benchmarks/serde-comparison/Cargo.toml --bin bench_report -- \
+            --format-csv benchmarks/results/format_comparison.csv \
+            --serde-csv benchmarks/results/serde_comparison.csv \
+            --out benchmarks/results/Github_Action_Benchmark.md
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4 # official action; v4 tag
+        with:
+          name: benchmark-results
+          path: |
+            benchmarks/results/*.csv
+            benchmarks/results/Github_Action_Benchmark.md
+          if-no-files-found: error
+
+      - name: Commit benchmark report (main / manual / schedule only)
+        if: >-
+          github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add benchmarks/results/
+          if git diff --cached --quiet; then
+            echo "No benchmark result changes; nothing to commit."
+          else
+            git commit -m "chore(benchmark): refresh Github_Action_Benchmark.md"
+            git push
+          fi

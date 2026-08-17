@@ -156,3 +156,37 @@ JSON 热路径。下结论前请在自己的硬件与数据上交叉验证。
 
 发布结果必须同时记录 CPU、操作系统、`rustc -Vv`、提交版本、测量时长和完整
 表格。CI 只编译两个 benchmark crate，不在共享机器上设置吞吐阈值。
+
+## `simd` 特性与 GitHub Actions 基准工作流
+
+`nextjson` 提供可选的 `simd` 特性，加速 JSON 字符串扫描热路径：x86-64 使用
+SSE2 + 运行时检测的 AVX2，aarch64 使用 NEON，其它平台回退到可移植的寄存器
+宽度（8/16 字节 SWAR）实现，短输入与尾部一律使用标量参考扫描。默认构建保持
+`#![deny(unsafe_code)]`；`unsafe` 只存在于 `src/scan.rs` 且仅在启用该特性时
+编译。所有加速路径都与标量参考实现对拍（全部字节值、全部两字节组合、长度
+`0..=80`、1 MiB 缓冲区、2000 个确定性随机缓冲区）。序列化热路径还以
+*干净段整段拷贝 / 转义* 两相方式写转义字符串：扫描定位下一个需要转义的字节、
+把干净前缀整段 memcpy、只逐字节写出转义本身。转义位于尾部的长字符串因此几乎
+是纯 `memcpy`。
+
+仓库的 GitHub Actions 工作流（`.github/workflows/benchmark.yml`）会以启用
+`simd` 特性的方式运行两套基准，把 CSV 合并为
+`benchmarks/results/Github_Action_Benchmark.md`（含运行器 OS、CPU、工具链、
+提交与方法学），上传原始 CSV 与报告为工作流产物，并在 `main` 分支 / 手动
+触发 / 每周定时时把报告提交回仓库。也可在 *Actions → Benchmark → Run
+workflow* 手动触发。
+
+在字符串密集的数据集（32 条记录，每条正文约 1.5 KiB）上，分块转义写出器配合
+SIMD 扫描在本开发机测得（`simd` 开启，1 秒窗口，单次运行）：
+
+| case | size_bytes | 编码 MB/s | 解码 MB/s |
+| --- | ---: | ---: | ---: |
+| nextjson 长文本 JSON | 52579 | 5131.9 | 1801.0 |
+| serde_json 长文本 | 52579 | 1709.5 | 1841.8 |
+| simd-json 长文本 | 52579 | 4991.3 | 1236.6 |
+
+nextjson 在该负载下编码比 serde_json 快约 3.0x、比 simd-json 快约 1.03x
+（simd-json 的 serde 解码还因原地解析需要每次迭代一次 `to_vec()` 拷贝），
+解码持平。短字符串记录 fixture 上仍有差距（编码约 0.6x、解码约 0.76x）——
+serde_json 是单一专精 JSON 热路径，nextjson 的编码路径是驱动 14 种格式的
+通用格式中立契约。绝对数值随 CPU 功耗状态漂移，请当作单次运行记录而非裁决。

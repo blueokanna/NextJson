@@ -78,6 +78,7 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 | -------- | ---: | --------------------------------------------------- |
 | `std`    |   是 | 启用标准 IO 适配器和标准库专属类型                  |
 | `derive` |   是 | 启用自有 `NsonSerialize` / `NsonDeserialize` 派生宏 |
+| `simd`   |   否 | 可选的架构加速：JSON 字符串扫描在 x86-64 使用 SSE2 + 运行时检测的 AVX2，在 aarch64 使用 NEON，其它平台回退到可移植寄存器宽度 SWAR。`unsafe` 代码被限定在 `scan` 模块并仅在启用该 feature 时编译；默认构建保持 `#![deny(unsafe_code)]` 零 `unsafe`。 |
 
 ### 原生 nextencode / nextdecode
 
@@ -348,24 +349,24 @@ assert_eq!(json2, json);
 每种格式都实现统一契约；线格式模型限制和编解码器明确限定的子集都会以错误报告，
 不会静默做有损回退：
 
-| 格式       | 标量                                       | 容器                                 | 说明                                                                                                                                                                                                                          |
-| ---------- | ------------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `json`     | null/bool/int/float/str                    | array/object                         | RFC 8259，完整模型                                                                                                                                                                                                            |
-| `json5`    | 同 JSON + `Infinity`/`NaN`                 | + 注释、未加引号键、单引号、尾随逗号 | 编码器输出严格 JSON                                                                                                                                                                                                           |
-| `hjson`    | 同 JSON                                    | + 未加引号键/字符串、注释            | 编码器输出严格 JSON                                                                                                                                                                                                           |
-| `yaml`     | null/bool/int/float/str                    | 块式 + 流式子集                      | 块式 map/序列、`key: value`、`- `、`---`、`{…}`/`[…]`、块标量 `                                                                                                                                                               | `/`>`（含 `-`/`+`chomping 与缩进指示符）、锚点`&name`/别名 `\*name`（块上下文，复制解析 + 100 万节点展开预算）、标准 tag `!!str`/`!!int`/`!!float`/`!!bool`/`!!null`（自定义 tag 拒绝）、merge 键 `<<:`、文档结束标记 `...`、非有限浮点 `.inf`/`.nan` 拒绝；多文档流拒绝 |
-| `toml`     | bool/int/float/str（无 null）              | 表、数组、内联表、多行字符串         | 文档形态：裸标量根被拒绝；`"""`/`'''` 多行字符串、`\` 续行；十进制/十六进制（`0x`）/八进制（`0o`）/二进制（`0b`）整数（含 `_` 分隔）；日期时间严格校验（TOML 1.0 四种形态：offset/local date-time、date、time）后保留为字符串 |
-| `ron`      | bool/int/float/str/char                    | map/seq/元组/结构体/枚举             | `Some(...)` 包装可往返                                                                                                                                                                                                        |
-| `sexpr`    | 原子、带引号字符串、数字、`#t`/`#f`、`nil` | 列表；map 编为 alist                 | 无模式 `Value` 解码嵌套 map 有歧义，请用类型化目标                                                                                                                                                                            |
-| `csv`      | int/float/bool/str                         | 行；带表头的对象行                   | RFC 4180                                                                                                                                                                                                                      |
-| `urlform`  | int/float/bool/str                         | 仅扁平 key/value map                 | RFC 3986 百分号编码                                                                                                                                                                                                           |
-| `cbor`     | null/bool/int/float/str                    | array/map                            | RFC 8949 JSON 兼容 profile，经事件流中继                                                                                                                                                                                      |
-| `msgpack`  | nil/bool/int/float/str                     | array/map                            | JSON 兼容标量/容器族；不支持 bin/ext；128 位整数放不进 64 位时拒绝；非有限浮点在线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错                                                                                  |
-| `bson`     | null/bool/int32/int64/double/str           | document/array                       | 文档形态：裸标量根被拒绝                                                                                                                                                                                                      |
-| `bencode`  | 整数、UTF-8 字符串                         | list/dict                            | key 规范排序；无 null/float；bool 映射为 1/0                                                                                                                                                                                  |
-| `postcard` | null/bool/无符号整数/str                   | seq/map                              | **非自描述**：拒绝有符号整数、float、`Option`、`Value` 和 peek                                                                                                                                                                |
-| `pickle`   | `None`/bool/int/float/str                  | list/dict/tuple                      | CPython 协议 2 子集；128 位经 `LONG1`                                                                                                                                                                                         |
-| `envy`     | int/float/bool/str                         | 扁平 map（即环境变量）               | 仅反序列化；需要 `std`                                                                                                                                                                                                        |
+| 格式 | 标量类型 | 容器类型 | 特性与限制说明 |
+| --- | --- | --- | --- |
+| **JSON** | `null`, `bool`, `int`, `float`, `str` | `array`, `object` | RFC 8259，完整模型 |
+| **JSON5** | 同 JSON + `Infinity` / `NaN` | `array`, `object`（+ 注释、未加引号键、单引号、尾随逗号） | 编码器输出严格 JSON |
+| **Hjson** | 同 JSON | `array`, `object`（+ 未加引号键/字符串、注释） | 编码器输出严格 JSON |
+| **YAML** | `null`, `bool`, `int`, `float`, `str` | 块式 + 流式子集 | 块式 map/序列（`key: value`、`-`、`---`、`{...}`/`[...]`）；块标量 `|` / `>`（含 `-`/`+` chomping 与缩进指示符）；锚点 `&name` 与别名 `*name`（块上下文，复制解析 + 100 万节点展开预算）；标准 tag（`!!str`/`!!int`/`!!float`/`!!bool`/`!!null`，拒绝自定义 tag）；支持 merge 键 `<<:`、文档结束标记 `...`；拒绝非有限浮点（`.inf`/`.nan`）与多文档流 |
+| **TOML** | `bool`, `int`, `float`, `str`（无 `null`） | 表、数组、内联表、多行字符串 | 拒绝裸标量根；支持 `"""`/`'''` 多行字符串与 `\` 续行；支持 10/16/8/2 进制整数（含 `_` 分隔符）；严格校验日期时间形态（TOML 1.0 四种形态：offset/local date-time, date, time）后保留为字符串 |
+| **RON** | `bool`, `int`, `float`, `str`, `char` | `map`, `seq`, 元组, 结构体, 枚举 | `Some(...)` 包装可双向往返 |
+| **S-expr** | 原子、带引号字符串、数字、`#t`/`#f`, `nil` | 列表（`map` 编为 `alist`） | 无模式 `Value` 解码嵌套 `map` 存在歧义，请使用类型化目标 |
+| **CSV** | `int`, `float`, `bool`, `str` | 行、带表头的对象行 | RFC 4180 |
+| **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
+| **CBOR** | `null`, `bool`, `int`, `float`, `str` | `array`, `map` | RFC 8949 JSON 兼容 Profile，经事件流中继 |
+| **MessagePack** | `nil`, `bool`, `int`, `float`, `str` | `array`, `map` | JSON 兼容标量/容器族；不支持 `bin`/`ext`；拒绝超出 64 位的 128 位整数；非有限浮点线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
+| **BSON** | `null`, `bool`, `int32`, `int64`, `double`, `str` | `document`, `array` | 文档形态（拒绝裸标量根） |
+| **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
+| **Postcard** | `null`, `bool`, 无符号整数, `str` | `seq`, `map` | 非自描述：拒绝有符号整数、`float`、`Option`、`Value` 和 `peek` |
+| **Pickle** | `None`, `bool`, `int`, `float`, `str` | `list`, `dict`, `tuple` | CPython 协议 2 子集；128 位整数经 `LONG1` 处理 |
+| **Envy** | `int`, `float`, `bool`, `str` | 扁平 `map`（环境变量） | 仅反序列化；需要 `std` |
 
 `detect()` 是启发式且刻意保守：只认定强结构签名（pickle 协议头、bencode 开头、
 BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名），有歧义输入
@@ -470,19 +471,24 @@ cargo bench --locked -p nextjson --bench format_comparison
 ```
 
 另有**独立于工作区之外的 crate**（`benchmarks/serde-comparison/`）在同一数据上
-对比 nextjson 与 serde 生态的 **9 种格式**：JSON（serde_json）、YAML
-（serde_yaml）、RON（ron）、MessagePack（rmp-serde）、CBOR（ciborium）、
-TOML（toml）、BSON（bson）、postcard（postcard）与 bincode（bincode，nextjson
-无对应格式故标注 `na`）。`Vec<Record>` fixture 覆盖有符号/浮点/嵌套，
-文档形态或无符号格式（TOML、BSON、postcard）用 `Config` fixture；每种格式在
-编码前先做往返 self-check。它持有自己的 Cargo.lock，工作区依赖审计不受影响。
+对比 nextjson 与 serde 生态的 **11 种格式**：JSON（serde_json 与 simd-json）、
+JSON5（serde_json5）、YAML（serde_yaml）、RON（ron）、MessagePack（rmp-serde）、
+CBOR（ciborium）、TOML（toml）、BSON（bson）、postcard（postcard）与 bincode
+（bincode，nextjson 无对应格式故标注 `na`），并额外测量字符串密集的*长文本*
+JSON 数据——这正是 `simd` 特性加速字符串扫描最相关的负载。`Vec<Record>`
+fixture 覆盖有符号/浮点/嵌套，文档形态或无符号格式（TOML、BSON、postcard）
+用 `Config` fixture；每种格式在编码前先做往返 self-check。它持有自己的
+Cargo.lock，工作区依赖审计不受影响。
 
 ```text
 cd benchmarks/serde-comparison && cargo run --release
 ```
 
 输出为 CSV（`case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps`），
-窗口时长用 `NEXTJSON_BENCH_MS` 调节（默认 2000 ms）。复现方法和输出格式见
+窗口时长用 `NEXTJSON_BENCH_MS` 调节（默认 2000 ms）。GitHub Actions 工作流
+（`.github/workflows/benchmark.yml`）以启用 `simd` 特性的方式运行两套基准，
+合并为 `benchmarks/results/Github_Action_Benchmark.md`，作为工作流产物上传，
+并在 `main` 分支 / 手动触发 / 每周定时时提交回仓库。复现方法和输出格式见
 [可复现基准测试](docs/BENCHMARKS_CN.md)。
 
 ### 验证
