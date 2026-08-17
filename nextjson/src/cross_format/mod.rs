@@ -7,6 +7,7 @@
 mod cbor;
 mod json;
 
+pub(crate) use self::cbor::half_to_f32;
 pub use self::cbor::CborSink;
 pub use self::json::JsonSink;
 

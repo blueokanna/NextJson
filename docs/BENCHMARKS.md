@@ -62,8 +62,10 @@ Interpretation is about _trade-offs_, not rank:
 - Compact binary (postcard, bencode, msgpack) is 3-4x smaller than JSON for
   this fixture.
 - TOML/YAML trade throughput for human-oriented, document-shaped output.
-- CBOR here is the JSON-compatible profile (with bignum/float machinery), which
-  is why it is slower than the simpler MessagePack path.
+- CBOR here is the JSON-compatible profile (native codec with definite-length
+  containers, bignum tags for 128-bit integers, and rejection of byte strings /
+  non-text keys / non-finite floats / unknown tags, matching the historical
+  relay semantics without the relay's intermediate JSON round-trip).
 
 Published results must include CPU, OS, `rustc -Vv`, revision, measurement
 duration, and the full table. This benchmark is a reproducible project

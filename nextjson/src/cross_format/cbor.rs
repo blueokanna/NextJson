@@ -463,7 +463,11 @@ impl<'de> CborReader<'de> {
     }
 }
 
-fn half_to_f32(bits: u16) -> f32 {
+/// Convert an IEEE 754 half-precision bit pattern to `f32`.
+///
+/// Shared with the native `formats::Cbor` codec so the two CBOR paths use the
+/// exact same conversion.
+pub(crate) fn half_to_f32(bits: u16) -> f32 {
     let sign = ((bits & 0x8000) as u32) << 16;
     let exponent = ((bits >> 10) & 0x1f) as i32;
     let mut fraction = (bits & 0x03ff) as u32;

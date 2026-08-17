@@ -58,8 +58,7 @@ RON、S 表达式、CBOR、MessagePack、Pickle。TOML 与 BSON 是文档形态�
 - MessagePack 与 Pickle 编码吞吐领先；JSON 在可移植性上无可替代。
 - 紧凑二进制（postcard、bencode、msgpack）比 JSON 小 3-4 倍。
 - TOML/YAML 以吞吐换人可读的文档形态输出。
-- 此处的 CBOR 是 JSON 兼容 profile（含 bignum/float 机制），因此比更简单的
-  MessagePack 路径慢。
+- 此处的 CBOR 是 JSON 兼容 profile（原生 codec，定长容器、128 位整数走 bignum 标签、拒绝字节串/非文本键/非有限浮点/未知标签），行为与历史中继实现一致，但没有中继的 JSON 中间往返。
 
 发布结果必须同时记录 CPU、操作系统、`rustc -Vv`、提交版本、测量时长和完整
 表格。该基准是可复现的项目基线，不是普遍性能证明。

@@ -475,9 +475,14 @@ mod imp {
                 vorrq_u8(vceqq_u8(data, space), vceqq_u8(data, tab)),
                 vorrq_u8(vceqq_u8(data, lf), vceqq_u8(data, cr)),
             );
-            // Count consecutive whitespace bytes from the start of the chunk.
-            if vmaxvq_u8(any) != 0xFF {
-                // Find the first non-whitespace byte within this chunk.
+            // A 16-byte chunk may be skipped only when EVERY byte is
+            // whitespace. `vmaxvq_u8(any) == 0xFF` would only prove *at
+            // least one* byte is whitespace (and would skip past content in
+            // a mixed chunk), so the all-whitespace test must use the
+            // horizontal *minimum*: min == 0xFF iff all lanes are 0xFF.
+            if vminvq_u8(any) != 0xFF {
+                // Mixed or non-whitespace chunk: the scalar loop resolves the
+                // exact boundary (it stops at the first non-whitespace byte).
                 return skip_ws_scalar(input, pos);
             }
             pos += 16;

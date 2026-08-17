@@ -361,7 +361,7 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | **S-expr** | 原子、带引号字符串、数字、`#t`/`#f`, `nil` | 列表（`map` 编为 `alist`） | 无模式 `Value` 解码嵌套 `map` 存在歧义，请使用类型化目标 |
 | **CSV** | `int`, `float`, `bool`, `str` | 行、带表头的对象行 | RFC 4180 |
 | **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
-| **CBOR** | `null`, `bool`, `int`, `float`, `str` | `array`, `map` | RFC 8949 JSON 兼容 Profile，经事件流中继 |
+| **CBOR** | `null`, `bool`, `int`, `float`, `str` | `array`, `map` | RFC 8949 JSON 兼容 Profile；原生定长容器编解码（兼容读取不定长）；128 位整数走 bignum 标签 2/3；拒绝字节串、非文本键、非有限浮点与未知标签 |
 | **MessagePack** | `nil`, `bool`, `int`, `float`, `str` | `array`, `map` | JSON 兼容标量/容器族；不支持 `bin`/`ext`；拒绝超出 64 位的 128 位整数；非有限浮点线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
 | **BSON** | `null`, `bool`, `int32`, `int64`, `double`, `str` | `document`, `array` | 文档形态（拒绝裸标量根） |
 | **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
