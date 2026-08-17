@@ -1,22 +1,22 @@
 //! GitHub Actions benchmark report generator.
 //!
-//! Merges the two benchmark CSVs produced by the `benchmark.yml` workflow —
-//! the in-workspace format matrix (`format_comparison`) and the standalone
-//! serde comparison (`serde-comparison`) — into a single
-//! `Github_Action_Benchmark.md` report with environment metadata.
+//! Merges the two benchmark outputs into one `Github_Action_Benchmark.md`:
+//!
+//! 1. `--serde-csv`: the standalone matrix benchmark output (sections
+//!    `# throughput` and `# security`, CSV rows with a single header per
+//!    section).
+//! 2. `--format-csv`: the in-workspace 14-format matrix.
+//!
+//! The throughput section is grouped per data-shape fixture; each row shows
+//! encode/decode MB/s for nextjson and the serde implementation, the ratio,
+//! and per-operation latency (ns/op). The security section reports rejection
+//! latency and whether every malicious input is rejected without panicking.
 //!
 //! Usage:
 //! ```text
 //! cargo run --release --bin bench_report -- \
-//!   --format-csv format.csv \
-//!   --serde-csv serde.csv \
-//!   [--out Github_Action_Benchmark.md]
+//!   --serde-csv serde.csv --format-csv format.csv [--out Github_Action_Benchmark.md]
 //! ```
-//!
-//! Environment metadata comes from standard variables (`GITHUB_SHA`,
-//! `GITHUB_REF_NAME`, `GITHUB_RUN_ID`, `RUNNER_OS`) plus `rustc --version`
-//! and, on Linux, the CPU model from `/proc/cpuinfo`. Missing values are
-//! reported as `n/a`; the tool never fails on missing metadata.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -29,40 +29,92 @@ struct Row {
     size: u64,
     encode_mbps: f64,
     decode_mbps: f64,
+    encode_ops: f64,
+    decode_ops: f64,
 }
 
-/// Parse a `case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps`
-/// CSV (single header row; extra columns are ignored).
-fn parse_csv(path: &str) -> Vec<Row> {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path));
-    let mut rows = Vec::new();
+#[derive(Clone, Debug)]
+struct SecRow {
+    name: String,
+    bytes: u64,
+    nj_us: f64,
+    sd_us: f64,
+    nj_rejects: bool,
+    sd_rejects: bool,
+    nj_panics: u64,
+    sd_panics: u64,
+}
+
+fn parse_bool(s: &str) -> bool {
+    matches!(s.trim(), "true" | "1")
+}
+
+/// Parse the standalone matrix CSV. Returns (throughput rows, security rows).
+fn parse_sections(path: &str) -> (Vec<Row>, Vec<SecRow>) {
+    let text = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path));
+    let mut throughput = Vec::new();
+    let mut security = Vec::new();
+    let mut section = "";
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("case,") || line.starts_with("format,") {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('#') {
+            section = name.trim();
+            continue;
+        }
+        if line.starts_with("case,")
+            || line.starts_with("format,")
+            || line.starts_with("security_case,")
+        {
             continue;
         }
         let cols: Vec<&str> = line.split(',').collect();
-        if cols.len() < 5 {
-            eprintln!(
-                "warning: {path}:{} malformed row ({} cols): {}",
-                lineno + 1,
-                cols.len(),
-                line
-            );
-            continue;
+        match section {
+            "security" => {
+                if cols.len() < 8 {
+                    eprintln!(
+                        "warning: {path}:{} malformed security row: {}",
+                        lineno + 1,
+                        line
+                    );
+                    continue;
+                }
+                security.push(SecRow {
+                    name: cols[0].trim().to_string(),
+                    bytes: cols[1].trim().parse().unwrap_or(0),
+                    nj_us: cols[2].trim().parse().unwrap_or(0.0),
+                    sd_us: cols[3].trim().parse().unwrap_or(0.0),
+                    nj_rejects: parse_bool(cols[4]),
+                    sd_rejects: parse_bool(cols[5]),
+                    nj_panics: cols[6].trim().parse().unwrap_or(0),
+                    sd_panics: cols[7].trim().parse().unwrap_or(0),
+                });
+            }
+            _ => {
+                if cols.len() < 6 {
+                    eprintln!(
+                        "warning: {path}:{} malformed row ({} cols): {}",
+                        lineno + 1,
+                        cols.len(),
+                        line
+                    );
+                    continue;
+                }
+                throughput.push(Row {
+                    name: cols[0].trim().to_string(),
+                    size: cols[1].trim().parse().unwrap_or(0),
+                    encode_ops: cols[2].trim().parse().unwrap_or(0.0),
+                    encode_mbps: cols[3].trim().parse().unwrap_or(0.0),
+                    decode_ops: cols[4].trim().parse().unwrap_or(0.0),
+                    decode_mbps: cols[5].trim().parse().unwrap_or(0.0),
+                });
+            }
         }
-        let name = cols[0].trim().to_string();
-        let size = cols[1].trim().parse::<u64>().unwrap_or(0);
-        let encode_mbps = cols[3].trim().parse::<f64>().unwrap_or(0.0);
-        let decode_mbps = cols[5].trim().parse::<f64>().unwrap_or(0.0);
-        rows.push(Row {
-            name,
-            size,
-            encode_mbps,
-            decode_mbps,
-        });
     }
-    rows
+    (throughput, security)
 }
 
 fn rustc_version() -> String {
@@ -76,7 +128,6 @@ fn rustc_version() -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
-/// Run `git <args...>` and return trimmed stdout on success.
 fn git(args: &[&str]) -> Option<String> {
     std::process::Command::new("git")
         .args(args)
@@ -87,8 +138,6 @@ fn git(args: &[&str]) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Best-effort commit SHA: `GITHUB_SHA` in Actions, `git rev-parse HEAD`
-/// locally.
 fn commit_sha() -> String {
     env::var("GITHUB_SHA")
         .ok()
@@ -96,7 +145,6 @@ fn commit_sha() -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
-/// Best-effort branch/ref name.
 fn ref_name() -> String {
     env::var("GITHUB_REF_NAME")
         .ok()
@@ -104,8 +152,6 @@ fn ref_name() -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
-/// Best-effort timestamp: in Actions the run page has the wall-clock time;
-/// locally the last-commit committer date is the closest stable reference.
 fn generated_at() -> String {
     if env::var("GITHUB_ACTIONS").is_ok() {
         return env::var("GITHUB_RUN_ID")
@@ -126,29 +172,57 @@ fn cpu_model() -> String {
     env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "n/a".to_string())
 }
 
-/// Split a case name into (implementation, format-suffix), e.g.
-/// `nextjson_longtext_json` -> (`nextjson`, `longtext_json`),
-/// `serde_bincode` -> (`serde`, `bincode`).
-fn split_case(name: &str) -> (&str, &str) {
-    match name.split_once('_') {
-        Some((impl_, rest)) => (impl_, rest),
-        None => (name, ""),
+/// Split `impl_fixture_format` (or `impl_format` for bincode) into parts.
+fn split_case(name: &str) -> (String, String, String) {
+    let parts: Vec<&str> = name.split('_').collect();
+    if parts.is_empty() {
+        return (String::new(), String::new(), name.to_string());
+    }
+    let impl_ = parts[0].to_string();
+    if name == "nextjson_bincode(na)" {
+        return (impl_, "bincode".to_string(), "na".to_string());
+    }
+    match parts.len() {
+        2 => (impl_, String::new(), parts[1].to_string()),
+        _ => (impl_, parts[1].to_string(), parts[2..].join("_")),
     }
 }
 
+const FIXTURE_ORDER: &[&str] = &[
+    "records",
+    "numbers",
+    "unicode",
+    "integers",
+    "longtexts",
+    "bigarray",
+    "smallobj",
+    "deep",
+    "config",
+];
+
 const FORMAT_ORDER: &[&str] = &[
     "json",
-    "longtext_json",
+    "msgpack",
+    "cbor",
     "json5",
     "yaml",
     "ron",
-    "msgpack",
-    "cbor",
-    "bincode",
     "toml",
     "bson",
     "postcard",
-    "intonly",
+    "bincode",
+];
+
+const FIXTURE_DESCRIPTIONS: &[(&str, &str)] = &[
+    ("records", "混合类型记录 ×256（id/bool/f64/字符串/标签/样本数组）"),
+    ("numbers", "浮点密集：64 行 ×16 个 f64（多数量级/正负号/小数形态）"),
+    ("unicode", "Unicode 密集：256 条多字节 UTF-8（CJK/emoji/组合字符）"),
+    ("integers", "纯整数：256 条记录，无浮点（隔离整数格式化）"),
+    ("longtexts", "长文本：32 条记录 ×~1.5KiB 正文（SIMD 扫描 + 分块拷贝路径）"),
+    ("bigarray", "大数组：100,000 个 u64（容器帧与 memcpy 主导）"),
+    ("smallobj", "小对象：100,000 个 {id:u32, ok:bool}（每对象固定开销主导）"),
+    ("deep", "深层嵌套：24 层动态 Value 数组（递归容器深度）"),
+    ("config", "文档形态：TOML/BSON/postcard 用的小配置对象"),
 ];
 
 fn main() {
@@ -182,27 +256,21 @@ fn main() {
     let format_csv = format_csv.expect("--format-csv is required");
     let serde_csv = serde_csv.expect("--serde-csv is required");
 
-    let format_rows = parse_csv(&format_csv);
-    let serde_rows = parse_csv(&serde_csv);
+    let (throughput, security) = parse_sections(&serde_csv);
+    let format_rows = parse_sections(&format_csv).0;
 
-    // Group serde-comparison rows by format suffix, keeping impl order.
-    let mut by_format: BTreeMap<String, Vec<(String, Row)>> = BTreeMap::new();
-    for row in &serde_rows {
-        let (impl_, fmt) = split_case(&row.name);
-        if impl_ == "nextjson" && fmt == "bincode(na)" {
-            continue; // placeholder row, never measured
+    let mut by_fixture: BTreeMap<String, Vec<Row>> = BTreeMap::new();
+    for row in &throughput {
+        let (impl_, fixture, format) = split_case(&row.name);
+        if impl_ == "nextjson" && fixture == "bincode" && format == "na" {
+            continue;
         }
-        by_format
-            .entry(fmt.to_string())
-            .or_default()
-            .push((impl_.to_string(), row.clone()));
+        by_fixture.entry(fixture).or_default().push(row.clone());
     }
 
     let mut md = String::new();
     md.push_str("# GitHub Actions 基准报告 — NextJson vs Serde 生态\n\n");
-    md.push_str(
-        "> 本报告由 `.github/workflows/benchmark.yml` 自动生成，原始 CSV 随工作流产物一起上传。\n",
-    );
+    md.push_str("> 本报告由 `.github/workflows/benchmark.yml` 自动生成，原始 CSV 随工作流产物一起上传。\n");
     md.push_str("> 所有数字均为 **release** 构建（`opt-level=3`, `lto=thin`, `codegen-units=1`），预热后按固定时间窗测量。\n\n");
 
     md.push_str("| 元数据 | 值 |\n|---|---|\n");
@@ -212,11 +280,7 @@ fn main() {
     ));
     md.push_str(&format!("| CPU | `{}` |\n", cpu_model()));
     md.push_str(&format!("| 工具链 | `{}` |\n", rustc_version()));
-    md.push_str(&format!(
-        "| 提交 | `{}` (`{}`) |\n",
-        commit_sha(),
-        ref_name()
-    ));
+    md.push_str(&format!("| 提交 | `{}` (`{}`) |\n", commit_sha(), ref_name()));
     md.push_str(&format!(
         "| 工作流运行 | `{}` |\n",
         env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local run".to_string())
@@ -224,90 +288,123 @@ fn main() {
     md.push_str(&format!("| 生成时间 | `{}` |\n", generated_at()));
     md.push('\n');
 
-    // ---- Section 1: serde ecosystem comparison ---------------------------
-    md.push_str("## 1. Serde 生态对比（encode / decode，MB/s）\n\n");
-    md.push_str("| 格式 | nextjson 编码 | nextjson 解码 | serde 编码 | serde 解码 | 编码比(nj/serde) | 解码比(nj/serde) |\n");
-    md.push_str("|---|---|---|---|---|---|---|\n");
-    for fmt in FORMAT_ORDER {
-        let Some(entries) = by_format.get(*fmt) else {
+    // ---- Section 1: serde comparison grouped by data shape ----------------
+    md.push_str("## 1. Serde 生态对比（按数据特征分组）\n\n");
+    for fixture in FIXTURE_ORDER {
+        let Some(rows) = by_fixture.get(*fixture) else {
             continue;
         };
-        let nj = entries.iter().find(|(i, _)| i == "nextjson");
-        let serde = entries.iter().find(|(i, _)| i == "serde");
-        let simd = entries.iter().find(|(i, _)| i == "simd");
-        if nj.is_none() && serde.is_none() {
-            continue;
-        }
-        let mut line = format!("| `{fmt}` ");
-        let fmt_col = |entry: Option<&(String, Row)>| match entry {
-            Some((_, r)) => format!("| {:.1} | {:.1} ", r.encode_mbps, r.decode_mbps),
-            None => "| — | — ".to_string(),
-        };
-        line.push_str(&fmt_col(nj));
-        line.push_str(&fmt_col(serde));
-        match (nj, serde) {
-            (Some((_, a)), Some((_, b))) if b.encode_mbps > 0.0 && b.decode_mbps > 0.0 => {
-                line.push_str(&format!(
-                    "| {:.2}x | {:.2}x |\n",
-                    a.encode_mbps / b.encode_mbps,
-                    a.decode_mbps / b.decode_mbps
+        let desc = FIXTURE_DESCRIPTIONS
+            .iter()
+            .find(|(f, _)| *f == *fixture)
+            .map(|(_, d)| *d)
+            .unwrap_or("");
+        md.push_str(&format!("### `{fixture}` — {desc}\n\n"));
+        md.push_str("| 格式 | nextjson 编 | nextjson 解 | serde 编 | serde 解 | 编码比 | 解码比 | nextjson ns/op(编) | serde ns/op(编) |\n");
+        md.push_str("|---|---|---|---|---|---|---|---|---|\n");
+        for format in FORMAT_ORDER {
+            let nj = rows
+                .iter()
+                .find(|r| split_case(&r.name).0 == "nextjson" && split_case(&r.name).2 == *format);
+            let serde = rows
+                .iter()
+                .find(|r| split_case(&r.name).0 == "serde" && split_case(&r.name).2 == *format);
+            let simd = rows
+                .iter()
+                .find(|r| split_case(&r.name).0 == "simd" && split_case(&r.name).2 == *format);
+            if nj.is_none() && serde.is_none() && simd.is_none() {
+                continue;
+            }
+            let cell = |r: Option<&Row>| match r {
+                Some(row) => format!("| {:.1} | {:.1} ", row.encode_mbps, row.decode_mbps),
+                None => "| — | — ".to_string(),
+            };
+            let mut line = format!("| `{format}` ");
+            line.push_str(&cell(nj));
+            line.push_str(&cell(serde));
+            match (nj, serde) {
+                (Some(a), Some(b)) if b.encode_mbps > 0.0 && b.decode_mbps > 0.0 => {
+                    line.push_str(&format!(
+                        "| {:.2}x | {:.2}x ",
+                        a.encode_mbps / b.encode_mbps,
+                        a.decode_mbps / b.decode_mbps
+                    ));
+                }
+                _ => line.push_str("| — | — "),
+            }
+            match nj {
+                Some(row) if row.encode_ops > 0.0 => {
+                    line.push_str(&format!("| {:.0} ", 1e9 / row.encode_ops));
+                }
+                _ => line.push_str("| — "),
+            }
+            match serde {
+                Some(row) if row.encode_ops > 0.0 => {
+                    line.push_str(&format!("| {:.0} |\n", 1e9 / row.encode_ops));
+                }
+                _ => line.push_str("| — |\n"),
+            }
+            md.push_str(&line);
+            if let Some(row) = simd {
+                md.push_str(&format!(
+                    "| `{format}` *(simd-json)* | — | — | {:.1} | {:.1} | — | — | — | — |\n",
+                    row.encode_mbps, row.decode_mbps
                 ));
             }
-            _ => line.push_str("| — | — |\n"),
         }
-        md.push_str(&line);
-        // Note simd-json row when present (it has no direct pair column).
-        if let Some((_, r)) = simd {
-            md.push_str(&format!(
-                "| `{fmt}` *(simd-json)* | — | — | {:.1} | {:.1} | — | — |\n",
-                r.encode_mbps, r.decode_mbps
-            ));
-        }
+        md.push('\n');
     }
-    md.push_str("\n> 比值为 nextjson ÷ serde（>1 表示 nextjson 更快）。`bincode` 仅 serde 侧有实现（`nextjson` 无 bincode codec），单独列出。\n");
-    if let Some(entries) = by_format.get("bincode") {
-        for (_, r) in entries {
-            md.push_str(&format!(
-                "> - `bincode`（serde only）：{} 字节；编码 {:.1} MB/s；解码 {:.1} MB/s\n",
-                r.size, r.encode_mbps, r.decode_mbps
-            ));
-        }
-    }
-    md.push('\n');
+    md.push_str("> 比值 = nextjson ÷ serde（>1 表示 nextjson 更快）。`bincode` 仅 serde 侧有实现。`simd-json` 的解码每次迭代含一次 `to_vec()` 拷贝（原地解析），该拷贝计入其耗时。\n\n");
 
-    // ---- Section 2: nextjson full format matrix --------------------------
-    md.push_str("## 2. NextJson 全格式吞吐矩阵（14 格式，encode / decode）\n\n");
-    md.push_str("| 格式 | size(字节) | 编码 MB/s | 解码 MB/s |\n|---|---|---|---|\n");
+    // ---- Section 2: security / robustness ---------------------------------
+    md.push_str("## 2. 安全与鲁棒性对比（恶意输入拒绝）\n\n");
+    md.push_str("| 攻击向量 | 输入字节 | nextjson 拒绝 | serde 拒绝 | nextjson us/op | serde us/op | nextjson 加速 | nextjson panic | serde panic |\n");
+    md.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    for row in &security {
+        let speedup = if row.sd_us > 0.0 { row.sd_us / row.nj_us } else { 0.0 };
+        md.push_str(&format!(
+            "| `{}` | {} | {} | {} | {:.2} | {:.2} | {:.1}x | {} | {} |\n",
+            row.name,
+            row.bytes,
+            mark(row.nj_rejects),
+            mark(row.sd_rejects),
+            row.nj_us,
+            row.sd_us,
+            speedup,
+            mark(row.nj_panics == 0),
+            mark(row.sd_panics == 0),
+        ));
+    }
+    md.push_str("\n> 所有恶意输入必须被**拒绝且不 panic**（任何 panic 都是安全漏洞）。拒绝速度 = 每个输入的平均微秒数（越低越好）。\n");
+    md.push_str("> **浮点精度对比**：serde_json 1.0.151 的解析器对部分 17 位有效数字小数存在 1-ULP 误差（写对读错，如 `-0.012750000000000001` → `-0.01275`）；nextjson 与 simd-json 均完全 round-trip。\n\n");
+
+    // ---- Section 3: nextjson full format matrix ---------------------------
+    md.push_str("## 3. NextJson 全格式吞吐矩阵（14 格式，encode / decode）\n\n");
+    md.push_str("| 格式 | size(字节) | 编码 MB/s | 解码 MB/s | 编码 ns/op | 解码 ns/op |\n|---|---|---|---|---|---|\n");
     for row in &format_rows {
+        let enc_ns = if row.encode_ops > 0.0 { 1e9 / row.encode_ops } else { 0.0 };
+        let dec_ns = if row.decode_ops > 0.0 { 1e9 / row.decode_ops } else { 0.0 };
         md.push_str(&format!(
-            "| `{}` | {} | {:.1} | {:.1} |\n",
-            row.name, row.size, row.encode_mbps, row.decode_mbps
+            "| `{}` | {} | {:.1} | {:.1} | {:.0} | {:.0} |\n",
+            row.name, row.size, row.encode_mbps, row.decode_mbps, enc_ns, dec_ns
         ));
     }
     md.push('\n');
 
-    // ---- Section 3: serde ecosystem raw rows -----------------------------
-    md.push_str("## 3. Serde 对比原始行\n\n");
-    md.push_str("| case | size(字节) | 编码 MB/s | 解码 MB/s |\n|---|---|---|---|\n");
-    for row in &serde_rows {
-        md.push_str(&format!(
-            "| `{}` | {} | {:.1} | {:.1} |\n",
-            row.name, row.size, row.encode_mbps, row.decode_mbps
-        ));
-    }
-    md.push('\n');
-
-    // ---- Section 4: methodology ------------------------------------------
+    // ---- Section 4: methodology -------------------------------------------
     md.push_str(
         "## 4. 方法学\n\n\
 - **构建**：`--release`，workspace `[profile.release]`（`opt-level=3`, `lto=\"thin\"`, `codegen-units=1`）。\n\
-- **测量**：每个 case 先跑 500 次预热（含 decode），再按 `NEXTJSON_BENCH_MS`（默认 2000ms）时间窗计数 encode 与 decode 的 ops，取吞吐量（MB/s = ops × size / 1e6）。\n\
+- **测量**：每个 case 先跑 500 次预热（含 decode），再按 `NEXTJSON_BENCH_MS`（默认 2000ms）时间窗计数 encode 与 decode 的 ops，取吞吐量（MB/s = ops × size / 1e6）与延迟（ns/op = 1e9 / ops）。\n\
 - **同一进程**：nextjson 与 serde 使用相同的 fixture、相同的预热与测量循环，直接可比。\n\
+- **数据形状**：9 个 fixture 覆盖混合记录、浮点密集、Unicode、纯整数、长文本、大数组、小对象、深层嵌套、文档形态，避免单 fixture 偏差。\n\
 - **nextjson `simd` feature**：本报告中的 nextjson 数字启用了 `simd`（x86-64：SSE2 基线 + AVX2 运行时检测；aarch64：NEON）。`simd` 是 opt-in 特性，默认构建保持 `#![deny(unsafe_code)]` 零 unsafe。\n\
 - **诚实声明**：\n\
   - `simd-json` 的 serde 解码要求可变输入缓冲（原地解析），因此其每次解码迭代包含一次 `to_vec()` 拷贝，该拷贝计入其耗时。\n\
+  - serde_json 1.0.151 对 17 位有效数字浮点的解析有 1-ULP 误差（见第 2 节）；其 `numbers` fixture 的 self-check 使用 1-ULP 容差并如实报告。\n\
+  - simd-json 的浮点序列化器对超出其格式化缓冲的极值（如次正规数 `5e-324`）报错，故 `numbers` fixture 的指数范围限定在 -6..+6。\n\
   - 共享 CI 硬件的吞吐会随负载与散热漂移；本报告是单次运行的记录，不是严格的性能基准判决。\n\
-  - `bincode` 无 nextjson 对应实现；TOML/BSON 需文档根、postcard 拒有符号标量，这三者使用 `Config` fixture 而非 `Vec<Record>`。\n",
+  - `bincode` 无 nextjson 对应实现；TOML/BSON 需文档根、postcard 拒有符号标量，这三者使用 `config` fixture。\n",
     );
 
     let out_path = Path::new(&out);
@@ -318,4 +415,12 @@ fn main() {
     }
     fs::write(out_path, md).expect("write report");
     eprintln!("wrote {out}");
+}
+
+fn mark(b: bool) -> &'static str {
+    if b {
+        "✓"
+    } else {
+        "✗"
+    }
 }
