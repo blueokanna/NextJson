@@ -45,7 +45,7 @@ fn field_name(
 ) -> String {
     match vrule {
         Some(rule) => {
-            if let Some(r) = &fa.rename {
+            if let Some(r) = fa.rename_de.as_ref().or(fa.rename.as_ref()) {
                 r.clone()
             } else {
                 crate::case::apply(rule, &field.ident.clone().unwrap_or_default())
@@ -183,31 +183,43 @@ pub(crate) fn deserialize_struct(
                 c.l("::core::result::Result::Ok(())");
                 return c.out();
             }
-            let count = f.len();
             c.l("__d.begin_array()?;");
             let mut names = Vec::new();
+            let mut wire_index = 0usize;
             for (i, field) in f.iter().enumerate() {
                 let fa = attr::field_attrs(&field.attrs);
                 let id = format!("__v{i}");
-                if i > 0 {
-                    c.l(&format!(
-                        "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
-                    ));
-                }
                 if fa.skip_deserializing {
                     c.l(&format!(
-                        "let {id} = {{ <{cp}::Value as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?; <{} as ::core::default::Default>::default() }};",
+                        "let {id} = <{} as ::core::default::Default>::default();",
                         field.ty
                     ));
-                } else {
-                    let expr = field_decode_expr(field, &fa, cp, "__d");
-                    c.l(&format!("let {id} = {expr};"));
+                    names.push(id);
+                    continue;
                 }
+                if wire_index == 0 {
+                    c.l(&format!(
+                        "if !__d.array_has_more()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
+                    ));
+                } else {
+                    c.l(&format!(
+                        "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({wire_index}, Self::expecting()).into()); }}"
+                    ));
+                }
+                let expr = field_decode_expr(field, &fa, cp, "__d");
+                c.l(&format!("let {id} = {expr};"));
                 names.push(id);
+                wire_index += 1;
             }
-            c.l(&format!(
-                "if __d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({count}, Self::expecting()).into()); }}"
-            ));
+            if wire_index == 0 {
+                c.l(&format!(
+                    "if __d.array_has_more()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
+                ));
+            } else {
+                c.l(&format!(
+                    "if __d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({wire_index}, Self::expecting()).into()); }}"
+                ));
+            }
             c.l("__d.end_array()?;");
             c.l(&format!("__out.write(Self({}));", names.join(", ")));
             c.l("::core::result::Result::Ok(())");
@@ -269,6 +281,10 @@ fn gen_match_nextdecode(
             pats.push(format!("{a:?}"));
         }
         c.l(&format!("{} => {{", pats.join(" | ")));
+        let check = check_tpl.replace("{i}", &idx.to_string());
+        c.l(&format!(
+            "if {check} {{ return Err({cp}::Error::duplicate_field({main:?}).into()); }}"
+        ));
         c.l(&set_tpl.replace("{i}", &idx.to_string()));
         if fa.deserialize_with.is_some() || fa.with.is_some() {
             let expr = field_decode_expr(f, fa, cp, decoder);
@@ -530,28 +546,41 @@ fn deserialize_external(
                 let mut sub = Code::new();
                 sub.l("__d.begin_array()?;");
                 let mut names = Vec::new();
+                let mut wire_index = 0usize;
                 for (i, field) in f.iter().enumerate() {
                     let fa = attr::field_attrs(&field.attrs);
                     let id = format!("__v{i}");
-                    if i > 0 {
-                        sub.l(&format!(
-                            "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
-                        ));
-                    }
                     if fa.skip_deserializing {
                         sub.l(&format!(
-                            "let {id} = {{ <{cp}::Value as {cp}::NsonDeserialize<'de>>::nextdecode(__d)?; <{} as ::core::default::Default>::default() }};",
+                            "let {id} = <{} as ::core::default::Default>::default();",
                             field.ty
                         ));
-                    } else {
-                        let expr = field_decode_expr(field, &fa, cp, "__d");
-                        sub.l(&format!("let {id} = {expr};"));
+                        names.push(id);
+                        continue;
                     }
+                    if wire_index == 0 {
+                        sub.l(&format!(
+                            "if !__d.array_has_more()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
+                        ));
+                    } else {
+                        sub.l(&format!(
+                            "if !__d.array_entry_sep()? {{ return Err({cp}::Error::invalid_length({wire_index}, Self::expecting()).into()); }}"
+                        ));
+                    }
+                    let expr = field_decode_expr(field, &fa, cp, "__d");
+                    sub.l(&format!("let {id} = {expr};"));
                     names.push(id);
+                    wire_index += 1;
                 }
-                sub.l(&format!(
-                    "if __d.array_entry_sep()? {{ return Err({cp}::Error::custom(\"too many elements in tuple variant\").into()); }}"
-                ));
+                if wire_index == 0 {
+                    sub.l(&format!(
+                        "if __d.array_has_more()? {{ return Err({cp}::Error::invalid_length(0, Self::expecting()).into()); }}"
+                    ));
+                } else {
+                    sub.l(&format!(
+                        "if __d.array_entry_sep()? {{ return Err({cp}::Error::custom(\"too many elements in tuple variant\").into()); }}"
+                    ));
+                }
                 sub.l("__d.end_array()?;");
                 sub.l(&format!(
                     "__out.write(Self::{}({}));",
@@ -601,7 +630,10 @@ fn deserialize_internal(
     ));
     c.l("for (__k, __v) in __entries {");
     c.l(&format!(
-        "if __k == {tag:?} {{ __tag = ::core::option::Option::Some({cp}::private::token_to_string(&__v)?); }} else {{ __rest.push((__k, __v)); }}"
+        "if __k == {tag:?} {{ \
+         if __tag.is_some() {{ return Err({cp}::Error::duplicate_field({tag:?}).into()); }} \
+         __tag = ::core::option::Option::Some({cp}::private::token_to_string(&__v)?); \
+         }} else {{ __rest.push((__k, __v)); }}"
     ));
     c.l("}");
     c.l(&format!(
@@ -720,8 +752,13 @@ fn deserialize_adjacent(
     ));
     c.l("for (__k, __v) in __entries {");
     c.l(&format!(
-        "if __k == {tag:?} {{ __tag = ::core::option::Option::Some({cp}::private::token_to_string(&__v)?); }} \
-         else if __k == {content:?} {{ __content = ::core::option::Option::Some(__v); }} \
+        "if __k == {tag:?} {{ \
+         if __tag.is_some() {{ return Err({cp}::Error::duplicate_field({tag:?}).into()); }} \
+         __tag = ::core::option::Option::Some({cp}::private::token_to_string(&__v)?); \
+         }} else if __k == {content:?} {{ \
+         if __content.is_some() {{ return Err({cp}::Error::duplicate_field({content:?}).into()); }} \
+         __content = ::core::option::Option::Some(__v); \
+         }} \
          else {{ return Err({cp}::Error::unknown_field(__k.into_owned()).into()); }}"
     ));
     c.l("}");

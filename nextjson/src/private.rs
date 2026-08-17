@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::de::{read_token_tree, DecodeSlot, Decoder, NsonDeserialize};
 use crate::error::{FormatError, Result};
-use crate::ser::NsonSerialize;
+use crate::ser::{FormatEncoder, NsonSerialize};
 use crate::value::Value;
 
 pub use crate::de::{
@@ -201,6 +201,271 @@ pub fn write_tagged_object<E: crate::ser::FormatEncoder>(
             "internally tagged newtype variant must serialize to an object",
         )
         .into()),
+    }
+}
+
+/// Forward a serialized object's entries into an already-open outer object.
+///
+/// The adapter suppresses exactly the flattened value's root object markers
+/// and forwards every nested event unchanged. Its small root state machine is
+/// intentionally independent from a concrete encoder so derive-generated
+/// flattening stays allocation-free for every output format.
+pub fn flatten_serialize<T, E>(value: &T, encoder: &mut E) -> Result<(), E::Error>
+where
+    T: NsonSerialize + ?Sized,
+    E: FormatEncoder,
+{
+    let mut flat = FlattenEncoder::new(encoder);
+    value.nextencode(&mut flat)?;
+    flat.finish()
+}
+
+struct FlattenEncoder<'a, E: FormatEncoder> {
+    inner: &'a mut E,
+    depth: usize,
+    started: bool,
+    finished: bool,
+    root_pending_value: bool,
+}
+
+impl<'a, E: FormatEncoder> FlattenEncoder<'a, E> {
+    fn new(inner: &'a mut E) -> Self {
+        FlattenEncoder {
+            inner,
+            depth: 0,
+            started: false,
+            finished: false,
+            root_pending_value: false,
+        }
+    }
+
+    fn error(message: &'static str) -> E::Error {
+        crate::error::Error::custom(message).into()
+    }
+
+    fn start_value(&mut self) -> Result<(), E::Error> {
+        if !self.started || self.finished {
+            return Err(Self::error("flatten: expected an object root"));
+        }
+        if self.depth == 1 {
+            if !self.root_pending_value {
+                return Err(Self::error("flatten: object value has no key"));
+            }
+            self.root_pending_value = false;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), E::Error> {
+        if !self.started || !self.finished || self.depth != 0 {
+            return Err(Self::error("flatten: object was not closed"));
+        }
+        if self.root_pending_value {
+            return Err(Self::error("flatten: object ended before keyed value"));
+        }
+        Ok(())
+    }
+}
+
+impl<E: FormatEncoder> FormatEncoder for FlattenEncoder<'_, E> {
+    type Error = E::Error;
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.begin_array()?;
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn separator(&mut self) -> Result<(), Self::Error> {
+        if self.depth <= 1 {
+            return Err(Self::error("flatten: array separator at object root"));
+        }
+        self.inner.separator()
+    }
+
+    fn end_array(&mut self) -> Result<(), Self::Error> {
+        if self.depth <= 1 {
+            return Err(Self::error("flatten: array end without matching start"));
+        }
+        self.inner.end_array()?;
+        self.depth -= 1;
+        Ok(())
+    }
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
+        if !self.started {
+            self.started = true;
+            self.depth = 1;
+            return Ok(());
+        }
+        self.start_value()?;
+        self.inner.begin_object()?;
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn key(&mut self, key: &str) -> Result<(), Self::Error> {
+        if !self.started || self.finished || self.depth == 0 {
+            return Err(Self::error("flatten: object key outside object"));
+        }
+        if self.depth == 1 {
+            if self.root_pending_value {
+                return Err(Self::error("flatten: object value required after key"));
+            }
+            self.inner.key(key)?;
+            self.root_pending_value = true;
+            return Ok(());
+        }
+        self.inner.key(key)
+    }
+
+    fn end_object(&mut self) -> Result<(), Self::Error> {
+        if self.depth == 0 {
+            return Err(Self::error("flatten: object end without matching start"));
+        }
+        if self.depth == 1 {
+            if self.root_pending_value {
+                return Err(Self::error("flatten: object ended before keyed value"));
+            }
+            self.depth = 0;
+            self.finished = true;
+            return Ok(());
+        }
+        self.inner.end_object()?;
+        self.depth -= 1;
+        Ok(())
+    }
+
+    fn write_null(&mut self) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_null()
+    }
+
+    fn write_bool(&mut self, value: bool) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_bool(value)
+    }
+
+    fn write_str(&mut self, value: &str) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_str(value)
+    }
+
+    fn write_char(&mut self, value: char) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_char(value)
+    }
+
+    fn write_number(&mut self, value: &crate::Number) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_number(value)
+    }
+
+    fn write_i64(&mut self, value: i64) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_i64(value)
+    }
+
+    fn write_u64(&mut self, value: u64) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_u64(value)
+    }
+
+    fn write_i128(&mut self, value: i128) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_i128(value)
+    }
+
+    fn write_u128(&mut self, value: u128) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_u128(value)
+    }
+
+    fn write_f64(&mut self, value: f64) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_f64(value)
+    }
+
+    fn write_f32(&mut self, value: f32) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_f32(value)
+    }
+
+    fn write_i8(&mut self, value: i8) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_i8(value)
+    }
+
+    fn write_i16(&mut self, value: i16) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_i16(value)
+    }
+
+    fn write_i32(&mut self, value: i32) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_i32(value)
+    }
+
+    fn write_u8(&mut self, value: u8) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_u8(value)
+    }
+
+    fn write_u16(&mut self, value: u16) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_u16(value)
+    }
+
+    fn write_u32(&mut self, value: u32) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_u32(value)
+    }
+
+    fn write_bytes(&mut self, value: &[u8]) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_bytes(value)
+    }
+
+    fn write_none(&mut self) -> Result<(), Self::Error> {
+        self.start_value()?;
+        self.inner.write_none()
+    }
+
+    fn write_some(&mut self) -> Result<(), Self::Error> {
+        if self.finished {
+            return Err(Self::error("flatten: expected an object root"));
+        }
+        // Flattening is defined by the JSON object shape. At the root, Some
+        // is transparent (including nested Option wrappers), matching the
+        // previous JSON-mediated implementation. Option values inside the
+        // flattened object still forward their native format marker.
+        if !self.started {
+            return Ok(());
+        }
+        if self.depth == 1 && !self.root_pending_value {
+            return Err(Self::error("flatten: object value has no key"));
+        }
+        self.inner.write_some()
+    }
+
+    fn map_key<K: NsonSerialize>(&mut self, key: &K) -> Result<(), Self::Error> {
+        if !self.started || self.finished || self.depth == 0 {
+            return Err(Self::error("flatten: map key outside object"));
+        }
+        if self.depth == 1 {
+            if self.root_pending_value {
+                return Err(Self::error("flatten: object value required after key"));
+            }
+            self.inner.map_key(key)?;
+            self.root_pending_value = true;
+            return Ok(());
+        }
+        self.inner.map_key(key)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.inner.is_human_readable()
     }
 }
 

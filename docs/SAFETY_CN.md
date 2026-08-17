@@ -80,7 +80,7 @@ Rust 规则下都内存安全，且都依赖应用层设置部署配额。
 | 数字溢出 | serde_json 返回溢出错误 | 检查式 `i128/u128` 解析，溢出报错 |
 | 非有限浮点（JSON） | serde_json 在无 feature 时把 `NaN`/`Infinity` 输出为 `null` | 显式报错（无静默有损回退） |
 | UTF-8 / surrogate 校验 | serde_json 校验 | 每条字符串路径都校验 |
-| 派生错误的部分析构安全 | serde visitor 模式把状态放在局部变量 | `InitSlot<T>` 用正常 `Option<T>` 析构语义；重复字段替换会 drop 旧值 |
+| 派生错误的部分析构安全 | serde visitor 模式把状态放在局部变量 | `InitSlot<T>` 用正常 `Option<T>` 析构语义；重复字段立即报错，已初始化值会正常析构 |
 | `no_std` | serde `no_std`；serde_json 仅 `std` | 核心 `no_std + alloc`；仅流式 IO 依赖 `std` |
 | 零依赖构建图 | serde 本身是依赖；生态格式 crate 更多 | 整个工作区只有两个本地 crate |
 | 格式严格性 | 各 serde 格式 crate 行为不一（如 serde_json `RawValue`、YAML 怪癖） | 每种格式都拒绝其线格式无法保真的值——无静默有损回退 |

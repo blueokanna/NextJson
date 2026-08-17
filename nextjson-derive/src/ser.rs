@@ -55,10 +55,7 @@ pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &
                 let key = crate::schema::renamed_field(field, &fa, ca, true);
                 if fa.flatten {
                     c.l(&format!(
-                        "{{ let __flat = {cp}::to_vec(&self.{ident})?; \
-                         if __flat.first() == ::core::option::Option::Some(&b'{{') {{ \
-                         {cp}::private::flatten_into(&__flat, __e)?; \
-                         }} else {{ return Err({cp}::Error::custom(\"flatten: expected an object or map\").into()); }} }}"
+                        "{cp}::private::flatten_serialize(&self.{ident}, __e)?;"
                     ));
                     continue;
                 }

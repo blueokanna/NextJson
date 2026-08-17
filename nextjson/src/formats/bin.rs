@@ -7,6 +7,13 @@ use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 
+/// Maximum number of unvalidated container entries reserved up front.
+///
+/// Valid larger containers grow normally as entries are decoded. Keeping the
+/// initial reservation bounded prevents a forged length plus unrelated
+/// trailing bytes from amplifying into a much larger `Vec<Value>` allocation.
+pub(crate) const MAX_CONTAINER_PREALLOC: usize = 4_096;
+
 /// Unsigned LEB128 (varint) length used by Postcard sequence headers.
 pub(crate) fn write_varint(buf: &mut Vec<u8>, mut value: u64) {
     loop {
@@ -108,6 +115,12 @@ impl<'a> Cursor<'a> {
     #[inline]
     pub(crate) fn pos(&self) -> usize {
         self.pos
+    }
+
+    /// Bytes remaining from the current cursor position.
+    #[inline]
+    pub(crate) fn remaining_len(&self) -> usize {
+        self.input.len().saturating_sub(self.pos)
     }
 
     #[inline]

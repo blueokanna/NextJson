@@ -80,6 +80,7 @@ fn unquote(s: &str) -> Option<String> {
 /// Container-level attributes.
 #[derive(Clone)]
 pub(crate) struct ContainerAttrs {
+    pub unknown: Vec<String>,
     pub rename_all: Option<String>,
     pub rename_all_ser: Option<String>,
     pub rename_all_de: Option<String>,
@@ -122,6 +123,7 @@ impl ContainerAttrs {
 
     pub fn from_metas(metas: &[Meta]) -> ContainerAttrs {
         let mut c = ContainerAttrs {
+            unknown: Vec::new(),
             rename_all: None,
             rename_all_ser: None,
             rename_all_de: None,
@@ -214,7 +216,7 @@ impl ContainerAttrs {
                     }
                 }
                 "max_depth" => c.max_depth = parse_u64(m.value()),
-                _ => {}
+                _ => c.unknown.push(m.name().to_string()),
             }
         }
         c
@@ -283,7 +285,10 @@ fn clean_bound(bound: String) -> String {
 /// Field-level attributes.
 #[derive(Clone, Default)]
 pub(crate) struct FieldAttrs {
+    pub unknown: Vec<String>,
     pub rename: Option<String>,
+    pub rename_ser: Option<String>,
+    pub rename_de: Option<String>,
     pub alias: Vec<String>,
     /// `None` = absent, `Some("")` = bare `default`, `Some("path")` = `default = "path"`.
     pub default: Option<String>,
@@ -333,7 +338,17 @@ pub(crate) fn field_attrs(metas: &[Meta]) -> FieldAttrs {
             }
             "flatten" => f.flatten = true,
             "borrow" => f.borrow = true,
-            "rename" => f.rename = m.value().and_then(unquote),
+            "rename" => {
+                if let Some(value) = m.value() {
+                    match split_directional(value) {
+                        Some((ser, de)) => {
+                            f.rename_ser = ser;
+                            f.rename_de = de;
+                        }
+                        None => f.rename = unquote(value),
+                    }
+                }
+            }
             "alias" => {
                 if let Some(v) = m.value().and_then(unquote) {
                     f.alias.push(v);
@@ -349,7 +364,7 @@ pub(crate) fn field_attrs(metas: &[Meta]) -> FieldAttrs {
             "min" => f.min = parse_i128(m.value()),
             "max" => f.max = parse_i128(m.value()),
             "sensitive" => f.sensitive = true,
-            _ => {}
+            _ => f.unknown.push(m.name().to_string()),
         }
     }
     f
@@ -375,8 +390,13 @@ fn path_of(m: &Meta) -> Option<String> {
 /// Variant-level attributes.
 #[derive(Clone, Default)]
 pub(crate) struct VariantAttrs {
+    pub unknown: Vec<String>,
     pub rename: Option<String>,
+    pub rename_ser: Option<String>,
+    pub rename_de: Option<String>,
     pub rename_all: Option<String>,
+    pub rename_all_ser: Option<String>,
+    pub rename_all_de: Option<String>,
     pub skip_serializing: bool,
     pub skip_deserializing: bool,
     pub alias: Vec<String>,
@@ -411,8 +431,28 @@ pub(crate) fn variant_attrs(metas: &[Meta]) -> VariantAttrs {
             }
             "skip_serializing" => v.skip_serializing = true,
             "skip_deserializing" => v.skip_deserializing = true,
-            "rename" => v.rename = m.value().and_then(unquote),
-            "rename_all" => v.rename_all = m.value().and_then(unquote),
+            "rename" => {
+                if let Some(value) = m.value() {
+                    match split_directional(value) {
+                        Some((ser, de)) => {
+                            v.rename_ser = ser;
+                            v.rename_de = de;
+                        }
+                        None => v.rename = unquote(value),
+                    }
+                }
+            }
+            "rename_all" => {
+                if let Some(value) = m.value() {
+                    match split_directional(value) {
+                        Some((ser, de)) => {
+                            v.rename_all_ser = ser;
+                            v.rename_all_de = de;
+                        }
+                        None => v.rename_all = unquote(value),
+                    }
+                }
+            }
             "alias" => {
                 if let Some(a) = m.value().and_then(unquote) {
                     v.alias.push(a);
@@ -427,7 +467,7 @@ pub(crate) fn variant_attrs(metas: &[Meta]) -> VariantAttrs {
             "min" => v.min = parse_i128(m.value()),
             "max" => v.max = parse_i128(m.value()),
             "sensitive" => v.sensitive = true,
-            _ => {}
+            _ => v.unknown.push(m.name().to_string()),
         }
     }
     v

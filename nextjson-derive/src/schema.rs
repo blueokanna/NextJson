@@ -240,7 +240,8 @@ pub(crate) fn renamed_field(
     ca: &ContainerAttrs,
     ser: bool,
 ) -> String {
-    if let Some(r) = &fa.rename {
+    let directional = if ser { &fa.rename_ser } else { &fa.rename_de };
+    if let Some(r) = directional.as_ref().or(fa.rename.as_ref()) {
         return r.clone();
     }
     let orig = field.ident.clone().unwrap_or_default();
@@ -262,7 +263,8 @@ pub(crate) fn renamed_variant(
     ca: &ContainerAttrs,
     ser: bool,
 ) -> String {
-    if let Some(r) = &va.rename {
+    let directional = if ser { &va.rename_ser } else { &va.rename_de };
+    if let Some(r) = directional.as_ref().or(va.rename.as_ref()) {
         return r.clone();
     }
     let orig = v.ident.clone();
@@ -283,7 +285,12 @@ pub(crate) fn variant_field_rule(
     ca: &ContainerAttrs,
     ser: bool,
 ) -> Option<String> {
-    va.rename_all.clone().or_else(|| {
+    let variant_rule = if ser {
+        va.rename_all_ser.clone()
+    } else {
+        va.rename_all_de.clone()
+    };
+    variant_rule.or_else(|| va.rename_all.clone()).or_else(|| {
         if ser {
             ca.rename_all_fields_ser
                 .clone()
@@ -305,7 +312,8 @@ pub(crate) fn renamed_variant_field(
     ca: &ContainerAttrs,
     ser: bool,
 ) -> String {
-    if let Some(r) = &fa.rename {
+    let directional = if ser { &fa.rename_ser } else { &fa.rename_de };
+    if let Some(r) = directional.as_ref().or(fa.rename.as_ref()) {
         return r.clone();
     }
     let orig = field.ident.clone().unwrap_or_default();

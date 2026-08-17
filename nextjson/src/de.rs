@@ -235,6 +235,25 @@ pub trait FormatDecoder<'de> {
     fn array_has_more(&mut self) -> Result<bool, Self::Error>;
     /// Array entry separator: `true` if more elements follow, `false` at end.
     fn array_entry_sep(&mut self) -> Result<bool, Self::Error>;
+
+    /// A conservative upper bound for the remaining elements in the current
+    /// array, when the wire format carries a length prefix.
+    ///
+    /// Collection decoders use this only as an allocation hint. Implementors
+    /// handling untrusted input must cap it by the bytes still available and
+    /// by a reasonable initial allocation budget so a forged length cannot
+    /// trigger disproportionate allocation. The default returns `None`,
+    /// preserving compatibility with existing codecs.
+    fn array_len_hint(&self) -> Option<usize> {
+        None
+    }
+
+    /// A conservative upper bound for the remaining entries in the current
+    /// object, subject to the same resource-safety rule as
+    /// [`array_len_hint`](FormatDecoder::array_len_hint).
+    fn object_len_hint(&self) -> Option<usize> {
+        None
+    }
     /// Consume `null`.
     fn unit(&mut self) -> Result<(), Self::Error>;
     /// Read a boolean.
@@ -292,7 +311,7 @@ pub trait FormatDecoder<'de> {
             },
             Token::BeginArray => {
                 self.begin_array()?;
-                let mut out = Vec::new();
+                let mut out = Vec::with_capacity(self.array_len_hint().unwrap_or(0));
                 while self.array_has_more()? {
                     out.push(self.u8()?);
                     if !self.array_entry_sep()? {
@@ -476,6 +495,26 @@ struct TreeReader<'de> {
 enum Inner<'de> {
     Bytes(BytesReader<'de>),
     Tree(TreeReader<'de>),
+}
+
+/// Detect a JSON string terminator, escape marker, or forbidden control byte
+/// in eight bytes at once. This is SWAR (SIMD within a register), uses no
+/// unsafe code, and is valid for UTF-8 because non-ASCII bytes have their high
+/// bit set and therefore cannot equal `"`, `\\`, or a control byte.
+#[inline]
+fn string_chunk_has_special(chunk: u64) -> bool {
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    const ONES: u64 = 0x0101_0101_0101_0101;
+
+    if (chunk.wrapping_sub(0x2020_2020_2020_2020)) & !chunk & HIGH != 0 {
+        return true;
+    }
+    let quote = chunk ^ 0x2222_2222_2222_2222;
+    if (quote.wrapping_sub(ONES)) & !quote & HIGH != 0 {
+        return true;
+    }
+    let backslash = chunk ^ 0x5c5c_5c5c_5c5c_5c5c;
+    (backslash.wrapping_sub(ONES)) & !backslash & HIGH != 0
 }
 
 impl<'de> BytesReader<'de> {
@@ -718,6 +757,18 @@ impl<'de> BytesReader<'de> {
         let start = self.pos + 1;
         let tail = &input[start..];
         let mut relative = 0;
+
+        while relative + 8 <= tail.len() {
+            let chunk = u64::from_le_bytes(
+                tail[relative..relative + 8]
+                    .try_into()
+                    .expect("eight-byte string chunk"),
+            );
+            if string_chunk_has_special(chunk) {
+                break;
+            }
+            relative += 8;
+        }
         while relative < tail.len() {
             match tail[relative] {
                 b'"' | b'\\' => break,
@@ -1683,8 +1734,8 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Vec<T> {
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
-        let mut v = Vec::new();
         decoder.begin_array()?;
+        let mut v = Vec::with_capacity(decoder.array_len_hint().unwrap_or(0));
         while decoder.array_has_more()? {
             v.push(T::nextdecode(decoder)?);
             if !decoder.array_entry_sep()? {
@@ -2157,8 +2208,8 @@ impl<'de> NsonDeserialize<'de> for Map {
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
-        let mut map = Map::new();
         decoder.begin_object()?;
+        let mut map = Map::with_capacity(decoder.object_len_hint().unwrap_or(0));
         while let Some(key) = decoder.object_key()? {
             let v = Value::nextdecode(decoder)?;
             map.insert(key.into_owned(), v);
@@ -2186,8 +2237,8 @@ impl<'de> NsonDeserialize<'de> for Value {
             Token::Number(_) => Value::Number(decoder.number()?),
             Token::Str(_) => Value::String(decoder.string()?.into_owned()),
             Token::BeginObject => {
-                let mut map = Map::new();
                 decoder.begin_object()?;
+                let mut map = Map::with_capacity(decoder.object_len_hint().unwrap_or(0));
                 while let Some(key) = decoder.object_key()? {
                     let v = Value::nextdecode(decoder)?;
                     map.insert(key.into_owned(), v);
@@ -2199,8 +2250,8 @@ impl<'de> NsonDeserialize<'de> for Value {
                 Value::Object(map)
             }
             Token::BeginArray => {
-                let mut arr = Vec::new();
                 decoder.begin_array()?;
+                let mut arr = Vec::with_capacity(decoder.array_len_hint().unwrap_or(0));
                 while decoder.array_has_more()? {
                     arr.push(Value::nextdecode(decoder)?);
                     if !decoder.array_entry_sep()? {

@@ -433,6 +433,11 @@ attributes, which apply to the contained field. Attributes are accepted in
 `#[njson(...)]`, `#[nextjson(...)]`, or `#[serde(...)]` form, so existing
 serde types migrate without rewriting their attributes.
 
+This is not a Serde drop-in guarantee. Visitor/error semantics and external
+adapters (notably big integers, fixed bytes, curve points, and feature-gated
+types) require separate verification; see the
+[Serde compatibility contract](https://github.com/blueokanna/NextJson/blob/main/docs/SERDE_COMPATIBILITY.md).
+
 The derive macro is implemented entirely with the standard `proc_macro` API
 (no `syn`, `quote`, or `proc-macro2`). The trade-off is stated plainly: a
 hand-written parser cannot offer the same span-precise diagnostics as a full

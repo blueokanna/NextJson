@@ -27,7 +27,7 @@ jobs:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Reject external lockfile sources
@@ -46,7 +46,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - name: Check formatting
@@ -61,11 +61,11 @@ jobs:
     name: coverage (lines >= 80%)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable with llvm-tools
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
-          cargo install cargo-llvm-cov --locked
+          cargo install cargo-llvm-cov --version 0.6.16 --locked
       - name: Run tests with coverage gate
         run: cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
@@ -87,14 +87,14 @@ jobs:
           - name: no-std-derive
             args: -p nextjson --no-default-features --features derive
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal --component clippy
       - name: Run clippy
         run: cargo clippy ${{ matrix.args }} --locked -- -D warnings
 
   # ---------------------------------------------------------------------------
-  # Test gate: full test suite on stable and MSRV (rust-version = 1.71) across
+  # Test gate: full test suite on stable and MSRV (rust-version = 1.78) across
   # all three hosted OS families, plus the no_std unit suite and a release
   # build.
   # ---------------------------------------------------------------------------
@@ -107,13 +107,15 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, 1.78.0]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust ${{ matrix.rust }}
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
       - name: Run all tests
         run: cargo +${{ matrix.rust }} test --workspace --all-features --locked
       - name: Run no_std library tests
         run: cargo +${{ matrix.rust }} test -p nextjson --no-default-features --lib --locked
+      - name: Run no_std plus derive library tests
+        run: cargo +${{ matrix.rust }} test -p nextjson --no-default-features --features derive --lib --locked
       - name: Build release
         run: cargo +${{ matrix.rust }} build --release --workspace --locked
 
@@ -125,7 +127,7 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Build documentation
@@ -145,7 +147,7 @@ jobs:
     name: crates.io package verification
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Verify derive crate package
@@ -165,7 +167,7 @@ jobs:
     name: benchmark compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Compile in-workspace format benchmark

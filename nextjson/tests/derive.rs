@@ -75,6 +75,20 @@ fn tuple_struct() {
 }
 
 #[test]
+fn tuple_struct_skip_does_not_consume_a_wire_element() {
+    #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+    struct Tuple(i32, #[serde(skip)] String, bool);
+
+    let value = Tuple(7, "not-on-wire".into(), true);
+    assert_eq!(to_string(&value).unwrap(), "[7,true]");
+    assert_eq!(
+        from_str::<Tuple>("[7,true]").unwrap(),
+        Tuple(7, String::new(), true)
+    );
+    assert!(from_str::<Tuple>("[7,false,99]").is_err());
+}
+
+#[test]
 fn unit_struct() {
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
     struct Unit;

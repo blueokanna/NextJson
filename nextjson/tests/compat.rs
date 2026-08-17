@@ -142,6 +142,37 @@ fn serde_attribute_directional_rename_all() {
 }
 
 #[test]
+fn serde_attribute_directional_field_and_variant_rename() {
+    #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+    struct DirectionalField {
+        #[serde(rename(serialize = "wireOut", deserialize = "wire_in"))]
+        value: u32,
+    }
+
+    let value = DirectionalField { value: 7 };
+    assert_eq!(to_string(&value).unwrap(), r#"{"wireOut":7}"#);
+    assert_eq!(
+        from_str::<DirectionalField>(r#"{"wire_in":8}"#).unwrap(),
+        DirectionalField { value: 8 }
+    );
+
+    #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+    enum DirectionalVariant {
+        #[serde(rename(serialize = "sent", deserialize = "received"))]
+        Message,
+    }
+
+    assert_eq!(
+        to_string(&DirectionalVariant::Message).unwrap(),
+        r#"{"sent":null}"#
+    );
+    assert_eq!(
+        from_str::<DirectionalVariant>(r#"{"received":null}"#).unwrap(),
+        DirectionalVariant::Message
+    );
+}
+
+#[test]
 fn serde_attribute_directional_bound() {
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
     #[serde(bound(

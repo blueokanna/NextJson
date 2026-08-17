@@ -29,7 +29,9 @@ use alloc::vec::Vec;
 
 use crate::de::{FormatDecoder, Mark, NsonDeserialize, Token};
 use crate::error::{Error, Result};
-use crate::formats::bin::{patch_prefix, read_varint, write_varint, Cursor};
+use crate::formats::bin::{
+    patch_prefix, read_varint, write_varint, Cursor, MAX_CONTAINER_PREALLOC,
+};
 use crate::formats::Format;
 use crate::number::Number;
 use crate::ser::{FormatEncoder, NsonSerialize};
@@ -426,6 +428,28 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
             }
         }
         self.array_has_more()
+    }
+
+    fn array_len_hint(&self) -> Option<usize> {
+        self.frames.last().and_then(|frame| {
+            (frame.kind == CFrameKind::Seq).then(|| {
+                usize::try_from(frame.remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(self.cur.remaining_len())
+                    .min(MAX_CONTAINER_PREALLOC)
+            })
+        })
+    }
+
+    fn object_len_hint(&self) -> Option<usize> {
+        self.frames.last().and_then(|frame| {
+            (frame.kind == CFrameKind::Map).then(|| {
+                usize::try_from(frame.remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(self.cur.remaining_len())
+                    .min(MAX_CONTAINER_PREALLOC)
+            })
+        })
     }
 
     fn unit(&mut self) -> Result<(), Self::Error> {

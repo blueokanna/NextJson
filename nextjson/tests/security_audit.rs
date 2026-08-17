@@ -248,3 +248,32 @@ fn container_max_depth_attribute_overflow_is_safe() {
     let v = nextjson::json!({});
     assert!(nextjson::validate(S, &v).is_ok());
 }
+
+#[test]
+fn forged_binary_container_lengths_do_not_drive_allocation() {
+    use nextjson::formats::{Format, MsgPack, MsgPackDecoder, Postcard, PostcardDecoder};
+    use nextjson::FormatDecoder;
+
+    // array32 with 2^32-1 declared elements and no payload. The decoder may
+    // reserve only in proportion to bytes actually remaining (zero here).
+    let msgpack = [0xdd, 0xff, 0xff, 0xff, 0xff];
+    assert!(MsgPack.decode::<Vec<u8>>(&msgpack).is_err());
+
+    // Canonical u64::MAX LEB128 sequence length with no element bytes.
+    let postcard = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+    assert!(Postcard.decode::<Vec<u8>>(&postcard).is_err());
+
+    // Even when an attacker appends enough unrelated bytes to defeat the
+    // remaining-input cap, the unvalidated initial reservation stays small.
+    let mut padded_msgpack = vec![0xdd, 0xff, 0xff, 0xff, 0xff];
+    padded_msgpack.resize(16_384, 0);
+    let mut decoder = MsgPackDecoder::new(&padded_msgpack);
+    decoder.begin_array().unwrap();
+    assert_eq!(decoder.array_len_hint(), Some(4_096));
+
+    let mut padded_postcard = postcard.to_vec();
+    padded_postcard.resize(16_384, 0);
+    let mut decoder = PostcardDecoder::new(&padded_postcard);
+    decoder.begin_array().unwrap();
+    assert_eq!(decoder.array_len_hint(), Some(4_096));
+}

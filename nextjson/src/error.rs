@@ -37,6 +37,7 @@ pub(crate) enum ErrorKind {
     InvalidUtf8,
     RecursionLimitExceeded,
     UnknownField(String),
+    DuplicateField(&'static str),
     MissingField(&'static str),
     UnknownVariant(String),
     InvalidType {
@@ -87,6 +88,11 @@ impl Error {
         Error::new(ErrorKind::UnknownField(field), None, None, 0)
     }
 
+    /// A field occurred more than once while decoding a derived type.
+    pub fn duplicate_field(field: &'static str) -> Self {
+        Error::new(ErrorKind::DuplicateField(field), None, None, 0)
+    }
+
     /// An unknown enum variant was encountered.
     pub fn unknown_variant(variant: String) -> Self {
         Error::new(ErrorKind::UnknownVariant(variant), None, None, 0)
@@ -135,6 +141,7 @@ impl Error {
             ErrorKind::InvalidUtf8 => "invalid utf-8",
             ErrorKind::RecursionLimitExceeded => "recursion limit exceeded",
             ErrorKind::UnknownField(_) => "unknown field",
+            ErrorKind::DuplicateField(_) => "duplicate field",
             ErrorKind::MissingField(_) => "missing field",
             ErrorKind::UnknownVariant(_) => "unknown variant",
             ErrorKind::InvalidType { .. } => "invalid type",
@@ -172,6 +179,7 @@ impl fmt::Display for Error {
             ErrorKind::InvalidUtf8 => write!(f, "invalid utf-8 sequence in string"),
             ErrorKind::RecursionLimitExceeded => write!(f, "recursion limit exceeded"),
             ErrorKind::UnknownField(field) => write!(f, "unknown field `{field}`"),
+            ErrorKind::DuplicateField(field) => write!(f, "duplicate field `{field}`"),
             ErrorKind::MissingField(field) => write!(f, "missing field `{field}`"),
             ErrorKind::UnknownVariant(v) => write!(f, "unknown variant `{v}`"),
             ErrorKind::InvalidType { expected, found } => {

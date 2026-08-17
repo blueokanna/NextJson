@@ -407,6 +407,10 @@ MongoDB 风格 BSON 文档，以及手写 TOML/YAML/RON/S 表达式/JSON5/Hjson 
 
 属性同时接受 `#[njson(...)]`、`#[nextjson(...)]` 与 `#[serde(...)]` 三种写法，迁移既有 serde 类型时无需改写属性。
 
+这不是 Serde drop-in 语义保证。Visitor/错误语义以及外部 adapter（尤其是大整数、
+定长字节、曲线点和 feature-gated 类型）必须单独验证；详见
+[Serde 兼容性契约](https://github.com/blueokanna/NextJson/blob/main/docs/SERDE_COMPATIBILITY.md)。
+
 派生宏完全用标准 `proc_macro` API 实现（无 `syn`、`quote`、`proc-macro2`）。
 取舍说得很直白：手写解析器无法提供与完整 `syn` 移植同等的 span 级诊断，因此当它
 不理解某个 item（包括未来它没见过的 Rust 语法）时，会以指名消息大声失败，而不是

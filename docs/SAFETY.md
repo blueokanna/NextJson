@@ -111,7 +111,7 @@ quotas.
 | Number overflow | serde_json returns overflow errors | checked `i128`/`u128` parsing with overflow errors |
 | Non-finite floats (JSON) | serde_json emits `null` for `NaN`/`Infinity` unless feature flags | explicit error (no silent lossy fallback) |
 | UTF-8 / surrogate validation | serde_json validates | validated in every string path |
-| Partial-drop safety on derive errors | serde visitor pattern keeps state in locals | `InitSlot<T>` uses normal `Option<T>` drop semantics; duplicate-field replacement drops the previous value |
+| Partial-drop safety on derive errors | serde visitor pattern keeps state in locals | `InitSlot<T>` uses normal `Option<T>` drop semantics; duplicate fields are rejected and already initialized values are dropped |
 | `no_std` | serde `no_std`; serde_json is `std`-only | core is `no_std + alloc`; only streaming IO is `std` |
 | Zero-dependency build graph | serde is one dependency; ecosystem formats add many | the whole workspace has only the two local crates |
 | Format-specific strictness | serde format crates vary (e.g., serde_json `RawValue`, YAML quirks) | every format rejects values its wire model cannot preserve — no silent lossy fallback |

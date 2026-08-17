@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use crate::de::{token_name, FormatDecoder, Mark, NsonDeserialize, Token};
 use crate::error::{Error, Result};
-use crate::formats::bin::{patch_prefix, Cursor};
+use crate::formats::bin::{patch_prefix, Cursor, MAX_CONTAINER_PREALLOC};
 use crate::formats::Format;
 use crate::number::Number;
 use crate::ser::{FormatEncoder, NsonSerialize};
@@ -659,6 +659,28 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         self.array_has_more()
     }
 
+    fn array_len_hint(&self) -> Option<usize> {
+        self.frames.last().and_then(|frame| {
+            (frame.kind == CFrameKind::Array).then(|| {
+                usize::try_from(frame.remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(self.cur.remaining_len())
+                    .min(MAX_CONTAINER_PREALLOC)
+            })
+        })
+    }
+
+    fn object_len_hint(&self) -> Option<usize> {
+        self.frames.last().and_then(|frame| {
+            (frame.kind == CFrameKind::Map).then(|| {
+                usize::try_from(frame.remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(self.cur.remaining_len())
+                    .min(MAX_CONTAINER_PREALLOC)
+            })
+        })
+    }
+
     fn unit(&mut self) -> Result<(), Self::Error> {
         match self.next_token()? {
             Token::Null => Ok(()),
@@ -789,7 +811,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
                 // small integers. Keep reading it so old data round-trips.
                 self.cur.rewind(1);
                 self.begin_array()?;
-                let mut out = Vec::new();
+                let mut out = Vec::with_capacity(self.array_len_hint().unwrap_or(0));
                 while self.array_has_more()? {
                     out.push(self.u8()?);
                     if !self.array_entry_sep()? {

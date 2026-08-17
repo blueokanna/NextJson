@@ -182,6 +182,7 @@ impl<'de> NsonDeserialize<'de> for DropProbe {
 }
 
 #[derive(NsonDeserialize)]
+#[allow(dead_code)]
 struct ResourceOwner {
     resource: DropProbe,
     count: u32,
@@ -204,18 +205,17 @@ fn derived_struct_drops_initialized_fields_after_later_error() {
 }
 
 #[test]
-fn duplicate_field_replacement_drops_the_previous_value() {
+fn duplicate_field_error_drops_the_initialized_value() {
     reset_drops();
-    let value = nextjson::from_str::<ResourceOwner>(
+    let error = match nextjson::from_str::<ResourceOwner>(
         r#"{"resource":"first","resource":"second","count":1}"#,
-    )
-    .unwrap();
+    ) {
+        Ok(_) => panic!("duplicate field must fail"),
+        Err(error) => error,
+    };
 
     assert_eq!(drops(), 1);
-    assert_eq!(value.count, 1);
-    let _ = &value.resource;
-    drop(value);
-    assert_eq!(drops(), 2);
+    assert_eq!(error.classification(), "duplicate field");
 }
 
 #[test]

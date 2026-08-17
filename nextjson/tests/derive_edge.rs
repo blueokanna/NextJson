@@ -95,7 +95,7 @@ enum SkippedVariant {
     A,
     #[njson(skip_serializing)]
     Hidden,
-    #[njson(skip_deserializing, default)]
+    #[njson(skip_deserializing)]
     Ghost(i32),
     Keep,
 }
@@ -487,7 +487,7 @@ fn large_struct_over_64_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Duplicate keys: the latter overwrites the former (serde semantics)
+// 9. Duplicate fields are rejected (serde derive semantics)
 // ---------------------------------------------------------------------------
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -497,15 +497,10 @@ struct Dup {
 }
 
 #[test]
-fn duplicate_keys_last_wins() {
-    let back: Dup = from_str(r#"{"a":1,"a":2,"b":"x"}"#).unwrap();
-    assert_eq!(
-        back,
-        Dup {
-            a: 2,
-            b: "x".into()
-        }
-    );
+fn duplicate_keys_are_rejected() {
+    let err = from_str::<Dup>(r#"{"a":1,"a":2,"b":"x"}"#).unwrap_err();
+    assert_eq!(err.classification(), "duplicate field");
+    assert!(err.to_string().contains("duplicate field `a`"));
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +571,64 @@ fn flatten_struct_roundtrip() {
     assert_eq!(json, r#"{"name":"n","x":1,"y":2}"#);
     let back: FlatNested = from_str(r#"{"y":2,"name":"n","x":1}"#).unwrap();
     assert_eq!(back, v);
+}
+
+#[test]
+fn flatten_struct_roundtrips_without_a_json_intermediate() {
+    use nextjson::formats::{Cbor, Format, Json, MsgPack};
+
+    let value = FlatNested {
+        name: "nested".into(),
+        inner: FlatInner { x: 11, y: 22 },
+    };
+    let json = Json.encode(&value).unwrap();
+    assert_eq!(Json.decode::<FlatNested>(&json).unwrap(), value);
+    let cbor = Cbor.encode(&value).unwrap();
+    assert_eq!(Cbor.decode::<FlatNested>(&cbor).unwrap(), value);
+    let msgpack = MsgPack.encode(&value).unwrap();
+    assert_eq!(MsgPack.decode::<FlatNested>(&msgpack).unwrap(), value);
+}
+
+#[test]
+fn flatten_optional_struct_preserves_root_option_semantics() {
+    use nextjson::formats::{Cbor, Format, Json, MsgPack};
+
+    #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
+    struct OptionalFlatten {
+        id: u32,
+        #[njson(flatten)]
+        inner: Option<FlatInner>,
+    }
+
+    let value = OptionalFlatten {
+        id: 7,
+        inner: Some(FlatInner { x: 11, y: 22 }),
+    };
+    let json = Json.encode(&value).unwrap();
+    assert_eq!(json, br#"{"id":7,"x":11,"y":22}"#);
+    assert_eq!(Json.decode::<OptionalFlatten>(&json).unwrap(), value);
+    let cbor = Cbor.encode(&value).unwrap();
+    assert_eq!(Cbor.decode::<OptionalFlatten>(&cbor).unwrap(), value);
+    let msgpack = MsgPack.encode(&value).unwrap();
+    assert_eq!(MsgPack.decode::<OptionalFlatten>(&msgpack).unwrap(), value);
+
+    let absent = OptionalFlatten { id: 7, inner: None };
+    assert!(Json.encode(&absent).is_err());
+    assert!(Cbor.encode(&absent).is_err());
+    assert!(MsgPack.encode(&absent).is_err());
+}
+
+#[test]
+fn flatten_rejects_a_non_object_root() {
+    #[derive(NsonSerialize)]
+    struct InvalidFlatten {
+        id: u32,
+        #[njson(flatten)]
+        scalar: u32,
+    }
+
+    let error = to_string(&InvalidFlatten { id: 1, scalar: 2 }).unwrap_err();
+    assert!(error.to_string().contains("expected an object root"));
 }
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ pub(crate) fn ts(s: &str) -> TokenStream {
 
 /// Build a `compile_error!` expansion from a message.
 pub(crate) fn err(msg: &str) -> TokenStream {
-    ts(&format!("::core::compile_error!({:?})", msg))
+    ts(&format!("::core::compile_error!({:?});", msg))
 }
 
 /// Error string returned by codegen helpers.
@@ -711,6 +711,44 @@ pub(crate) fn build_generics(
 /// derive entry points so the rejection is identical regardless of which
 /// macro is expanded first.
 fn validate_input(input: &Input) -> Option<String> {
+    if let Some(name) = input.cattr.unknown.first() {
+        return Some(format!(
+            "nextjson: unsupported container attribute `{name}`; refusing to ignore wire semantics"
+        ));
+    }
+    fn unknown_field_attribute(fields: &Fields) -> Option<String> {
+        for field in fields.iter() {
+            if let Some(name) = attr::field_attrs(&field.attrs).unknown.into_iter().next() {
+                return Some(format!(
+                    "nextjson: unsupported field attribute `{name}`; refusing to ignore wire semantics"
+                ));
+            }
+        }
+        None
+    }
+    match &input.data {
+        Data::Struct(fields) => {
+            if let Some(message) = unknown_field_attribute(fields) {
+                return Some(message);
+            }
+        }
+        Data::Enum(variants) => {
+            for variant in variants {
+                if let Some(name) = attr::variant_attrs(&variant.attrs)
+                    .unknown
+                    .into_iter()
+                    .next()
+                {
+                    return Some(format!(
+                        "nextjson: unsupported variant attribute `{name}`; refusing to ignore wire semantics"
+                    ));
+                }
+                if let Some(message) = unknown_field_attribute(&variant.fields) {
+                    return Some(message);
+                }
+            }
+        }
+    }
     // `transparent` is only meaningful on single-field structs.
     if input.cattr.transparent {
         match &input.data {
@@ -1081,6 +1119,21 @@ mod tests {
         );
         let msg = validate_input(&input).expect("must reject flatten + skip_serializing_if");
         assert!(msg.contains("flatten"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_wire_attributes() {
+        let input = struct_named(
+            cattr(&[]),
+            vec![named_field(
+                "a",
+                "i32",
+                vec![meta_flag("not_actually_supported")],
+            )],
+        );
+        let message = validate_input(&input).expect("unknown attribute must be rejected");
+        assert!(message.contains("not_actually_supported"));
+        assert!(message.contains("refusing to ignore"));
     }
 
     #[test]
