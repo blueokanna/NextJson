@@ -98,6 +98,26 @@ struct Owner {
     id: u64,
 }
 
+/// INI 只能表示标量（不支持数组），因此给 INI 基准使用去数组化的扁平配置。
+/// 嵌套对象经 INI 的 `[section]` 语义表达，与 `Config` 除 `tags` 外同构。
+#[derive(Clone, Debug, PartialEq, NsonSerialize, NsonDeserialize)]
+struct ConfigIni {
+    title: String,
+    owner: Owner,
+    retries: u32,
+}
+
+fn config_ini_fixture() -> ConfigIni {
+    ConfigIni {
+        title: "NextJson benchmark".into(),
+        owner: Owner {
+            name: "blueokanna".into(),
+            id: 42,
+        },
+        retries: 3,
+    }
+}
+
 fn config_fixture() -> Config {
     Config {
         title: "NextJson benchmark".into(),
@@ -116,6 +136,10 @@ fn config_fixture() -> Config {
 /// serialize: simd-json rejects subnormals and values beyond its formatting
 /// buffer (e.g. `5e-324`, `-1.797e308`), so extremes are excluded and the
 /// fixture honestly documents that limitation in the report.
+///
+/// The `PI`/`E` literals are deliberate float-formatter exercise values, not
+/// approximations clippy should rewrite.
+#[allow(clippy::approx_constant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, NsonSerialize, NsonDeserialize)]
 struct FloatRow {
     id: u64,
@@ -128,6 +152,7 @@ fn numbers_fixture() -> Vec<FloatRow> {
     // values outside its formatting buffer (very small / very large
     // magnitudes), so extremes are excluded and the report notes that
     // limitation. All three engines round-trip every value below exactly.
+    #[allow(clippy::approx_constant)]
     let pool: [f64; 16] = [
         0.5,
         1.25,
@@ -277,7 +302,12 @@ struct SmallObj {
 }
 
 fn smallobj_fixture() -> Vec<SmallObj> {
-    (0..100_000u32).map(|i| SmallObj { id: i, ok: i % 2 == 0 }).collect()
+    (0..100_000u32)
+        .map(|i| SmallObj {
+            id: i,
+            ok: i % 2 == 0,
+        })
+        .collect()
 }
 
 /// Deeply nested structure (24 levels) exercising recursive container depth.
@@ -396,9 +426,15 @@ fn measure(duration: Duration, mut operation: impl FnMut()) -> f64 {
 fn bench(name: &str, duration: Duration, encode: &dyn Fn() -> Vec<u8>, decode: &dyn Fn(&[u8])) {
     let bytes = encode();
     let size = bytes.len();
-    for _ in 0..500 {
+    // Time-bounded warm-up: steady the allocator and caches without spending
+    // minutes on huge fixtures (e.g. 100k-element arrays through slow
+    // codecs). At least 10 iterations, then ~250 ms of steady-state work.
+    let warmup_start = Instant::now();
+    let mut warmup_ops = 0_u64;
+    while warmup_start.elapsed() < Duration::from_millis(250) || warmup_ops < 10 {
         black_box(encode());
         decode(black_box(&bytes));
+        warmup_ops += 1;
     }
     let encode_ops = measure(duration, || {
         black_box(encode());
@@ -557,9 +593,8 @@ fn security_case(
     let sd_start = Instant::now();
     let mut sd_ops = 0_u64;
     while sd_start.elapsed() < duration {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            black_box(serde_ok(input))
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| black_box(serde_ok(input))));
         match result {
             Ok(_) => {}
             Err(_) => sd_panics += 1,
@@ -618,9 +653,15 @@ fn main() {
     // Deep nesting: dynamic values (self-checks done inline).
     {
         let nj = nextjson::nextencode(&deep_nj).unwrap();
-        assert_eq!(nextjson::nextdecode::<nextjson::Value>(&nj).unwrap(), deep_nj);
+        assert_eq!(
+            nextjson::nextdecode::<nextjson::Value>(&nj).unwrap(),
+            deep_nj
+        );
         let sd = serde_json::to_vec(&deep_sd).unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&sd).unwrap(), deep_sd);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&sd).unwrap(),
+            deep_sd
+        );
         let simd = simd_json::serde::to_vec(&deep_sd).unwrap();
         assert_eq!(simd_json_serde_decode::<serde_json::Value>(&simd), deep_sd);
         bench(
@@ -649,163 +690,136 @@ fn main() {
         );
     }
 
-    // ---- MessagePack pair on the shapes it can carry ----------------------
+    // -----------------------------------------------------------------------
+    // Full-matrix: every format on every fixture it can represent, for both
+    // engines. JSON (trio) is benched above on all nine fixtures.
+    // -----------------------------------------------------------------------
+    use nextjson::formats::*;
+
+    // serde-side NDJSON helper: one JSON value per line.
+    fn serde_ndjson_encode<T: serde::Serialize>(v: &[T]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for item in v {
+            out.extend_from_slice(&serde_json::to_vec(item).unwrap());
+            out.push(b'\n');
+        }
+        out
+    }
+    fn serde_ndjson_decode<'a, T: serde::Deserialize<'a>>(b: &'a [u8]) -> Vec<T> {
+        b.split(|c| *c == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect()
+    }
+
+    macro_rules! nj_encode {
+        ($v:expr, $fmt:ident, $t:ty) => {
+            &|v: &$t| encode_with(v, $fmt).unwrap()
+        };
+    }
+    macro_rules! nj_decode {
+        ($fmt:ident, $t:ty) => {
+            &|b: &[u8]| decode_with::<$t, _>(b, $fmt).unwrap()
+        };
+    }
+    macro_rules! nj_ndjson_enc {
+        ($t:ty) => {
+            &|v: &$t| encode_with(v, Ndjson).unwrap()
+        };
+    }
+    macro_rules! nj_ndjson_dec {
+        ($t:ty) => {
+            &|b: &[u8]| decode_with::<$t, _>(b, Ndjson).unwrap()
+        };
+    }
+
+    // ---- records: every full-model format --------------------------------
     bench_pair(
         "records",
         "msgpack",
         duration,
         &records,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::MsgPack).unwrap(),
-        &|b| nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::MsgPack).unwrap(),
+        nj_encode!(records, MsgPack, Vec<Record>),
+        nj_decode!(MsgPack, Vec<Record>),
         &|v| rmp_serde::to_vec(v).unwrap(),
         &|b| rmp_serde::from_slice::<Vec<Record>>(b).unwrap(),
     );
     bench_pair(
-        "numbers",
-        "msgpack",
-        duration,
-        &numbers,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::MsgPack).unwrap(),
-        &|b| {
-            nextjson::formats::decode_with::<Vec<FloatRow>, _>(b, nextjson::formats::MsgPack)
-                .unwrap()
-        },
-        &|v| rmp_serde::to_vec(v).unwrap(),
-        &|b| rmp_serde::from_slice::<Vec<FloatRow>>(b).unwrap(),
-    );
-    bench_pair(
-        "bigarray",
-        "msgpack",
-        duration,
-        &bigarray,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::MsgPack).unwrap(),
-        &|b| {
-            nextjson::formats::decode_with::<Vec<u64>, _>(b, nextjson::formats::MsgPack).unwrap()
-        },
-        &|v| rmp_serde::to_vec(v).unwrap(),
-        &|b| rmp_serde::from_slice::<Vec<u64>>(b).unwrap(),
-    );
-    bench_pair(
-        "config",
-        "msgpack",
-        duration,
-        &config,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::MsgPack).unwrap(),
-        &|b| nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::MsgPack).unwrap(),
-        &|v| rmp_serde::to_vec(v).unwrap(),
-        &|b| rmp_serde::from_slice::<Config>(b).unwrap(),
-    );
-
-    // ---- CBOR pair on the shapes it can carry -----------------------------
-    bench_pair(
         "records",
         "cbor",
         duration,
         &records,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Cbor).unwrap(),
-        &|b| nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Cbor).unwrap(),
+        nj_encode!(records, Cbor, Vec<Record>),
+        nj_decode!(Cbor, Vec<Record>),
         &|v| ciborium_serialize(v),
         &|b| ciborium::from_reader::<Vec<Record>, _>(b).unwrap(),
     );
-    bench_pair(
-        "numbers",
-        "cbor",
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_records_ubjson",
         duration,
-        &numbers,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Cbor).unwrap(),
+        &|| encode_with(&records, Ubjson).unwrap(),
         &|b| {
-            nextjson::formats::decode_with::<Vec<FloatRow>, _>(b, nextjson::formats::Cbor).unwrap()
+            black_box(decode_with::<Vec<Record>, _>(b, Ubjson).unwrap());
         },
-        &|v| ciborium_serialize(v),
-        &|b| ciborium::from_reader::<Vec<FloatRow>, _>(b).unwrap(),
     );
-    bench_pair(
-        "bigarray",
-        "cbor",
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_records_smile",
         duration,
-        &bigarray,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Cbor).unwrap(),
-        &|b| nextjson::formats::decode_with::<Vec<u64>, _>(b, nextjson::formats::Cbor).unwrap(),
-        &|v| ciborium_serialize(v),
-        &|b| ciborium::from_reader::<Vec<u64>, _>(b).unwrap(),
+        &|| encode_with(&records, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<Record>, _>(b, Smile).unwrap());
+        },
     );
-    bench_pair(
-        "config",
-        "cbor",
-        duration,
-        &config,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Cbor).unwrap(),
-        &|b| nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Cbor).unwrap(),
-        &|v| ciborium_serialize(v),
-        &|b| ciborium::from_reader::<Config, _>(b).unwrap(),
-    );
-
-    // ---- Text formats on their canonical fixture --------------------------
-    // JSON5
     bench_pair(
         "records",
         "json5",
         duration,
         &records,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Json5).unwrap(),
-        &|b| nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Json5).unwrap(),
+        nj_encode!(records, Json5, Vec<Record>),
+        nj_decode!(Json5, Vec<Record>),
         &|v| serde_json5::to_string(v).unwrap().into_bytes(),
         &|b| serde_json5::from_str::<Vec<Record>>(std::str::from_utf8(b).unwrap()).unwrap(),
     );
-    // YAML
     bench_pair(
         "records",
         "yaml",
         duration,
         &records,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Yaml).unwrap(),
-        &|b| nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Yaml).unwrap(),
+        nj_encode!(records, Yaml, Vec<Record>),
+        nj_decode!(Yaml, Vec<Record>),
         &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
         &|b| serde_yaml::from_slice::<Vec<Record>>(b).unwrap(),
     );
-    // RON
     bench_pair(
         "records",
         "ron",
         duration,
         &records,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Ron).unwrap(),
-        &|b| nextjson::formats::decode_with::<Vec<Record>, _>(b, nextjson::formats::Ron).unwrap(),
+        nj_encode!(records, Ron, Vec<Record>),
+        nj_decode!(Ron, Vec<Record>),
         &|v| ron::to_string(v).unwrap().into_bytes(),
         &|b| ron::from_str::<Vec<Record>>(std::str::from_utf8(b).unwrap()).unwrap(),
     );
-    // TOML / BSON / postcard (document-shaped Config)
     bench_pair(
-        "config",
-        "toml",
+        "records",
+        "ndjson",
         duration,
-        &config,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Toml).unwrap(),
-        &|b| nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Toml).unwrap(),
-        &|v| toml::to_string(v).unwrap().into_bytes(),
-        &|b| toml::from_str::<Config>(std::str::from_utf8(b).unwrap()).unwrap(),
+        &records,
+        nj_ndjson_enc!(Vec<Record>),
+        nj_ndjson_dec!(Vec<Record>),
+        &|v| serde_ndjson_encode(v),
+        &|b| serde_ndjson_decode::<Record>(b),
     );
-    bench_pair(
-        "config",
-        "bson",
+    bench(
+        "nextjson_records_edn",
         duration,
-        &config,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Bson).unwrap(),
-        &|b| nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Bson).unwrap(),
-        &|v| bson::to_vec(v).unwrap(),
-        &|b| bson::from_slice::<Config>(b).unwrap(),
+        &|| encode_with(&records, Edn).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<Record>, _>(b, Edn).unwrap());
+        },
     );
-    bench_pair(
-        "config",
-        "postcard",
-        duration,
-        &config,
-        &|v| nextjson::formats::encode_with(v, nextjson::formats::Postcard).unwrap(),
-        &|b| nextjson::formats::decode_with::<Config, _>(b, nextjson::formats::Postcard).unwrap(),
-        &|v| postcard::to_allocvec(v).unwrap(),
-        &|b| postcard::from_bytes::<Config>(b).unwrap(),
-    );
-    // Bincode (serde only)
     bench("nextjson_bincode(na)", duration, &|| Vec::new(), &|_| {});
     bench(
         "serde_bincode",
@@ -815,6 +829,741 @@ fn main() {
             black_box(bincode::deserialize::<Vec<Record>>(b).unwrap());
         },
     );
+
+    // ---- numbers: float-dense, no bincode (serde only on records) --------
+    bench_pair(
+        "numbers",
+        "msgpack",
+        duration,
+        &numbers,
+        nj_encode!(numbers, MsgPack, Vec<FloatRow>),
+        nj_decode!(MsgPack, Vec<FloatRow>),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Vec<FloatRow>>(b).unwrap(),
+    );
+    bench_pair(
+        "numbers",
+        "cbor",
+        duration,
+        &numbers,
+        nj_encode!(numbers, Cbor, Vec<FloatRow>),
+        nj_decode!(Cbor, Vec<FloatRow>),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Vec<FloatRow>, _>(b).unwrap(),
+    );
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_numbers_ubjson",
+        duration,
+        &|| encode_with(&numbers, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<FloatRow>, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_numbers_smile",
+        duration,
+        &|| encode_with(&numbers, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<FloatRow>, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "numbers",
+        "json5",
+        duration,
+        &numbers,
+        nj_encode!(numbers, Json5, Vec<FloatRow>),
+        nj_decode!(Json5, Vec<FloatRow>),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Vec<FloatRow>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "numbers",
+        "yaml",
+        duration,
+        &numbers,
+        nj_encode!(numbers, Yaml, Vec<FloatRow>),
+        nj_decode!(Yaml, Vec<FloatRow>),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Vec<FloatRow>>(b).unwrap(),
+    );
+    bench_pair(
+        "numbers",
+        "ron",
+        duration,
+        &numbers,
+        nj_encode!(numbers, Ron, Vec<FloatRow>),
+        nj_decode!(Ron, Vec<FloatRow>),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Vec<FloatRow>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    // NDJSON on the float-dense fixture: the serde side is serde_json per
+    // line, which has the documented 1-ULP float parse drift — use the same
+    // ULP-tolerant self-check as the JSON trio.
+    {
+        let nj = encode_with(&numbers, Ndjson).unwrap();
+        assert_eq!(
+            &decode_with::<Vec<FloatRow>, _>(&nj, Ndjson).unwrap(),
+            &numbers
+        );
+        let sd = serde_ndjson_encode(&numbers);
+        let sd_back = serde_ndjson_decode::<FloatRow>(&sd);
+        let (within_ulp, worst_ulp) = float_rows_ulp(&numbers, &sd_back);
+        assert!(within_ulp, "serde ndjson float round-trip exceeded 1 ULP");
+        if worst_ulp > 0 {
+            eprintln!(
+                "NOTE: serde ndjson float parse 1-ULP drift on `numbers` (worst {worst_ulp} ULP)"
+            );
+        }
+        bench(
+            "nextjson_numbers_ndjson",
+            duration,
+            &|| encode_with(&numbers, Ndjson).unwrap(),
+            &|b| {
+                black_box(decode_with::<Vec<FloatRow>, _>(b, Ndjson).unwrap());
+            },
+        );
+        bench(
+            "serde_numbers_ndjson",
+            duration,
+            &|| serde_ndjson_encode(&numbers),
+            &|b| {
+                black_box(serde_ndjson_decode::<FloatRow>(b));
+            },
+        );
+    }
+
+    // ---- unicode ---------------------------------------------------------
+    bench_pair(
+        "unicode",
+        "msgpack",
+        duration,
+        &unicode,
+        nj_encode!(unicode, MsgPack, Vec<UnicodeRow>),
+        nj_decode!(MsgPack, Vec<UnicodeRow>),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Vec<UnicodeRow>>(b).unwrap(),
+    );
+    bench_pair(
+        "unicode",
+        "cbor",
+        duration,
+        &unicode,
+        nj_encode!(unicode, Cbor, Vec<UnicodeRow>),
+        nj_decode!(Cbor, Vec<UnicodeRow>),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Vec<UnicodeRow>, _>(b).unwrap(),
+    );
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_unicode_ubjson",
+        duration,
+        &|| encode_with(&unicode, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<UnicodeRow>, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_unicode_smile",
+        duration,
+        &|| encode_with(&unicode, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<UnicodeRow>, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "unicode",
+        "json5",
+        duration,
+        &unicode,
+        nj_encode!(unicode, Json5, Vec<UnicodeRow>),
+        nj_decode!(Json5, Vec<UnicodeRow>),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Vec<UnicodeRow>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "unicode",
+        "yaml",
+        duration,
+        &unicode,
+        nj_encode!(unicode, Yaml, Vec<UnicodeRow>),
+        nj_decode!(Yaml, Vec<UnicodeRow>),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Vec<UnicodeRow>>(b).unwrap(),
+    );
+    bench_pair(
+        "unicode",
+        "ron",
+        duration,
+        &unicode,
+        nj_encode!(unicode, Ron, Vec<UnicodeRow>),
+        nj_decode!(Ron, Vec<UnicodeRow>),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Vec<UnicodeRow>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "unicode",
+        "ndjson",
+        duration,
+        &unicode,
+        nj_ndjson_enc!(Vec<UnicodeRow>),
+        nj_ndjson_dec!(Vec<UnicodeRow>),
+        &|v| serde_ndjson_encode(v),
+        &|b| serde_ndjson_decode::<UnicodeRow>(b),
+    );
+
+    // ---- integers --------------------------------------------------------
+    bench_pair(
+        "integers",
+        "msgpack",
+        duration,
+        &integers,
+        nj_encode!(integers, MsgPack, Vec<IntRecord>),
+        nj_decode!(MsgPack, Vec<IntRecord>),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Vec<IntRecord>>(b).unwrap(),
+    );
+    bench_pair(
+        "integers",
+        "cbor",
+        duration,
+        &integers,
+        nj_encode!(integers, Cbor, Vec<IntRecord>),
+        nj_decode!(Cbor, Vec<IntRecord>),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Vec<IntRecord>, _>(b).unwrap(),
+    );
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_integers_ubjson",
+        duration,
+        &|| encode_with(&integers, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<IntRecord>, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_integers_smile",
+        duration,
+        &|| encode_with(&integers, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<IntRecord>, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "integers",
+        "json5",
+        duration,
+        &integers,
+        nj_encode!(integers, Json5, Vec<IntRecord>),
+        nj_decode!(Json5, Vec<IntRecord>),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Vec<IntRecord>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "integers",
+        "yaml",
+        duration,
+        &integers,
+        nj_encode!(integers, Yaml, Vec<IntRecord>),
+        nj_decode!(Yaml, Vec<IntRecord>),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Vec<IntRecord>>(b).unwrap(),
+    );
+    bench_pair(
+        "integers",
+        "ron",
+        duration,
+        &integers,
+        nj_encode!(integers, Ron, Vec<IntRecord>),
+        nj_decode!(Ron, Vec<IntRecord>),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Vec<IntRecord>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "integers",
+        "ndjson",
+        duration,
+        &integers,
+        nj_ndjson_enc!(Vec<IntRecord>),
+        nj_ndjson_dec!(Vec<IntRecord>),
+        &|v| serde_ndjson_encode(v),
+        &|b| serde_ndjson_decode::<IntRecord>(b),
+    );
+
+    // ---- longtexts -------------------------------------------------------
+    bench_pair(
+        "longtexts",
+        "msgpack",
+        duration,
+        &longtexts,
+        nj_encode!(longtexts, MsgPack, Vec<LongText>),
+        nj_decode!(MsgPack, Vec<LongText>),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Vec<LongText>>(b).unwrap(),
+    );
+    bench_pair(
+        "longtexts",
+        "cbor",
+        duration,
+        &longtexts,
+        nj_encode!(longtexts, Cbor, Vec<LongText>),
+        nj_decode!(Cbor, Vec<LongText>),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Vec<LongText>, _>(b).unwrap(),
+    );
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_longtexts_ubjson",
+        duration,
+        &|| encode_with(&longtexts, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<LongText>, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_longtexts_smile",
+        duration,
+        &|| encode_with(&longtexts, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<LongText>, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "longtexts",
+        "json5",
+        duration,
+        &longtexts,
+        nj_encode!(longtexts, Json5, Vec<LongText>),
+        nj_decode!(Json5, Vec<LongText>),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Vec<LongText>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "longtexts",
+        "yaml",
+        duration,
+        &longtexts,
+        nj_encode!(longtexts, Yaml, Vec<LongText>),
+        nj_decode!(Yaml, Vec<LongText>),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Vec<LongText>>(b).unwrap(),
+    );
+    bench_pair(
+        "longtexts",
+        "ron",
+        duration,
+        &longtexts,
+        nj_encode!(longtexts, Ron, Vec<LongText>),
+        nj_decode!(Ron, Vec<LongText>),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Vec<LongText>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "longtexts",
+        "ndjson",
+        duration,
+        &longtexts,
+        nj_ndjson_enc!(Vec<LongText>),
+        nj_ndjson_dec!(Vec<LongText>),
+        &|v| serde_ndjson_encode(v),
+        &|b| serde_ndjson_decode::<LongText>(b),
+    );
+
+    // ---- bigarray --------------------------------------------------------
+    bench_pair(
+        "bigarray",
+        "msgpack",
+        duration,
+        &bigarray,
+        nj_encode!(bigarray, MsgPack, Vec<u64>),
+        nj_decode!(MsgPack, Vec<u64>),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Vec<u64>>(b).unwrap(),
+    );
+    bench_pair(
+        "bigarray",
+        "cbor",
+        duration,
+        &bigarray,
+        nj_encode!(bigarray, Cbor, Vec<u64>),
+        nj_decode!(Cbor, Vec<u64>),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Vec<u64>, _>(b).unwrap(),
+    );
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_bigarray_ubjson",
+        duration,
+        &|| encode_with(&bigarray, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<u64>, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_bigarray_smile",
+        duration,
+        &|| encode_with(&bigarray, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<u64>, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "bigarray",
+        "json5",
+        duration,
+        &bigarray,
+        nj_encode!(bigarray, Json5, Vec<u64>),
+        nj_decode!(Json5, Vec<u64>),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Vec<u64>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "bigarray",
+        "yaml",
+        duration,
+        &bigarray,
+        nj_encode!(bigarray, Yaml, Vec<u64>),
+        nj_decode!(Yaml, Vec<u64>),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Vec<u64>>(b).unwrap(),
+    );
+    bench_pair(
+        "bigarray",
+        "ron",
+        duration,
+        &bigarray,
+        nj_encode!(bigarray, Ron, Vec<u64>),
+        nj_decode!(Ron, Vec<u64>),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Vec<u64>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "bigarray",
+        "ndjson",
+        duration,
+        &bigarray,
+        nj_ndjson_enc!(Vec<u64>),
+        nj_ndjson_dec!(Vec<u64>),
+        &|v| serde_ndjson_encode(v),
+        &|b| serde_ndjson_decode::<u64>(b),
+    );
+
+    // ---- smallobj --------------------------------------------------------
+    bench_pair(
+        "smallobj",
+        "msgpack",
+        duration,
+        &smallobj,
+        nj_encode!(smallobj, MsgPack, Vec<SmallObj>),
+        nj_decode!(MsgPack, Vec<SmallObj>),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Vec<SmallObj>>(b).unwrap(),
+    );
+    bench_pair(
+        "smallobj",
+        "cbor",
+        duration,
+        &smallobj,
+        nj_encode!(smallobj, Cbor, Vec<SmallObj>),
+        nj_decode!(Cbor, Vec<SmallObj>),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Vec<SmallObj>, _>(b).unwrap(),
+    );
+    // : nextjson full pair; the serde-side codec's decoder lacks full unsigned-int support, so the comparison is nextjson encode+decode with the serde encode side omitted (documented in the report).
+    bench(
+        "nextjson_smallobj_ubjson",
+        duration,
+        &|| encode_with(&smallobj, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<SmallObj>, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_smallobj_smile",
+        duration,
+        &|| encode_with(&smallobj, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Vec<SmallObj>, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "smallobj",
+        "json5",
+        duration,
+        &smallobj,
+        nj_encode!(smallobj, Json5, Vec<SmallObj>),
+        nj_decode!(Json5, Vec<SmallObj>),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Vec<SmallObj>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "smallobj",
+        "yaml",
+        duration,
+        &smallobj,
+        nj_encode!(smallobj, Yaml, Vec<SmallObj>),
+        nj_decode!(Yaml, Vec<SmallObj>),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Vec<SmallObj>>(b).unwrap(),
+    );
+    bench_pair(
+        "smallobj",
+        "ron",
+        duration,
+        &smallobj,
+        nj_encode!(smallobj, Ron, Vec<SmallObj>),
+        nj_decode!(Ron, Vec<SmallObj>),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Vec<SmallObj>>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "smallobj",
+        "ndjson",
+        duration,
+        &smallobj,
+        nj_ndjson_enc!(Vec<SmallObj>),
+        nj_ndjson_dec!(Vec<SmallObj>),
+        &|v| serde_ndjson_encode(v),
+        &|b| serde_ndjson_decode::<SmallObj>(b),
+    );
+
+    // ---- config: document-shaped formats join the full set ---------------
+    bench_pair(
+        "config",
+        "msgpack",
+        duration,
+        &config,
+        nj_encode!(config, MsgPack, Config),
+        nj_decode!(MsgPack, Config),
+        &|v| rmp_serde::to_vec(v).unwrap(),
+        &|b| rmp_serde::from_slice::<Config>(b).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "cbor",
+        duration,
+        &config,
+        nj_encode!(config, Cbor, Config),
+        nj_decode!(Cbor, Config),
+        &|v| ciborium_serialize(v),
+        &|b| ciborium::from_reader::<Config, _>(b).unwrap(),
+    );
+    // ubjson: nextjson full pair; serde_ubj's decoder only supports signed 32/64-bit ints (documented).
+    bench(
+        "nextjson_config_ubjson",
+        duration,
+        &|| encode_with(&config, Ubjson).unwrap(),
+        &|b| {
+            black_box(decode_with::<Config, _>(b, Ubjson).unwrap());
+        },
+    );
+    // smile: nextjson full pair; serde-smile's u64 handling is incomplete for these fixtures (documented).
+    bench(
+        "nextjson_config_smile",
+        duration,
+        &|| encode_with(&config, Smile).unwrap(),
+        &|b| {
+            black_box(decode_with::<Config, _>(b, Smile).unwrap());
+        },
+    );
+    bench_pair(
+        "config",
+        "json5",
+        duration,
+        &config,
+        nj_encode!(config, Json5, Config),
+        nj_decode!(Json5, Config),
+        &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+        &|b| serde_json5::from_str::<Config>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "yaml",
+        duration,
+        &config,
+        nj_encode!(config, Yaml, Config),
+        nj_decode!(Yaml, Config),
+        &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+        &|b| serde_yaml::from_slice::<Config>(b).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "ron",
+        duration,
+        &config,
+        nj_encode!(config, Ron, Config),
+        nj_decode!(Ron, Config),
+        &|v| ron::to_string(v).unwrap().into_bytes(),
+        &|b| ron::from_str::<Config>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "ndjson",
+        duration,
+        &config,
+        nj_ndjson_enc!(Config),
+        nj_ndjson_dec!(Config),
+        &|v| serde_json::to_vec(v).unwrap(),
+        &|b| serde_json::from_slice::<Config>(b).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "toml",
+        duration,
+        &config,
+        nj_encode!(config, Toml, Config),
+        nj_decode!(Toml, Config),
+        &|v| toml::to_string(v).unwrap().into_bytes(),
+        &|b| toml::from_str::<Config>(std::str::from_utf8(b).unwrap()).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "bson",
+        duration,
+        &config,
+        nj_encode!(config, Bson, Config),
+        nj_decode!(Bson, Config),
+        &|v| bson::to_vec(v).unwrap(),
+        &|b| bson::from_slice::<Config>(b).unwrap(),
+    );
+    bench_pair(
+        "config",
+        "postcard",
+        duration,
+        &config,
+        nj_encode!(config, Postcard, Config),
+        nj_decode!(Postcard, Config),
+        &|v| postcard::to_allocvec(v).unwrap(),
+        &|b| postcard::from_bytes::<Config>(b).unwrap(),
+    );
+    // INI: nextjson-only (all values are strings, no arrays).
+    let config_ini = config_ini_fixture();
+    bench(
+        "nextjson_config_ini",
+        duration,
+        &|| encode_with(&config_ini, Ini).unwrap(),
+        &|b| {
+            black_box(decode_with::<ConfigIni, _>(b, Ini).unwrap());
+        },
+    );
+
+    // ---- deep: dynamic values (self-checks done inline per format) -------
+    {
+        type NjCodec = (
+            &'static str,
+            &'static dyn Fn(&nextjson::Value) -> Vec<u8>,
+            &'static dyn Fn(&[u8]) -> nextjson::Value,
+        );
+        let nj_formats: &[NjCodec] = &[
+            ("msgpack", &|v| encode_with(v, MsgPack).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, MsgPack).unwrap()
+            }),
+            ("cbor", &|v| encode_with(v, Cbor).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, Cbor).unwrap()
+            }),
+            ("ubjson", &|v| encode_with(v, Ubjson).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, Ubjson).unwrap()
+            }),
+            ("smile", &|v| encode_with(v, Smile).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, Smile).unwrap()
+            }),
+            ("json5", &|v| encode_with(v, Json5).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, Json5).unwrap()
+            }),
+            ("yaml", &|v| encode_with(v, Yaml).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, Yaml).unwrap()
+            }),
+            ("ron", &|v| encode_with(v, Ron).unwrap(), &|b| {
+                decode_with::<nextjson::Value, _>(b, Ron).unwrap()
+            }),
+        ];
+        for (name, enc, dec) in nj_formats {
+            let bytes = enc(&deep_nj);
+            assert_eq!(&dec(&bytes), &deep_nj);
+            bench(
+                &format!("nextjson_deep_{name}"),
+                duration,
+                &|| enc(&deep_nj),
+                &|b| {
+                    black_box(dec(b));
+                },
+            );
+        }
+        // NDJSON cannot round-trip a *root* array (the root array IS the
+        // record stream, one value per line), so bench it on the same deep
+        // shape wrapped in an object root, which round-trips exactly.
+        {
+            let mut wrapped = nextjson::Map::new();
+            wrapped.insert("deep".to_string(), deep_nj.clone());
+            let deep_wrapped = nextjson::Value::Object(wrapped);
+            let enc = |v: &nextjson::Value| encode_with(v, Ndjson).unwrap();
+            let dec = |b: &[u8]| decode_with::<nextjson::Value, _>(b, Ndjson).unwrap();
+            let bytes = enc(&deep_wrapped);
+            assert_eq!(&dec(&bytes), &deep_wrapped);
+            bench(
+                "nextjson_deep_ndjson",
+                duration,
+                &|| enc(&deep_wrapped),
+                &|b| {
+                    black_box(dec(b));
+                },
+            );
+        }
+        type SdCodec = (
+            &'static str,
+            &'static dyn Fn(&serde_json::Value) -> Vec<u8>,
+            &'static dyn Fn(&[u8]) -> serde_json::Value,
+        );
+        let sd_formats: &[SdCodec] = &[
+            ("msgpack", &|v| rmp_serde::to_vec(v).unwrap(), &|b| {
+                rmp_serde::from_slice::<serde_json::Value>(b).unwrap()
+            }),
+            ("cbor", &|v| ciborium_serialize(v), &|b| {
+                ciborium::from_reader::<serde_json::Value, _>(b).unwrap()
+            }),
+            // ubjson / smile: serde-side codecs lack full unsigned-int
+            // support, so they are omitted from the deep comparison.
+            (
+                "json5",
+                &|v| serde_json5::to_string(v).unwrap().into_bytes(),
+                &|b| {
+                    serde_json5::from_str::<serde_json::Value>(std::str::from_utf8(b).unwrap())
+                        .unwrap()
+                },
+            ),
+            (
+                "yaml",
+                &|v| serde_yaml::to_string(v).unwrap().into_bytes(),
+                &|b| serde_yaml::from_slice::<serde_json::Value>(b).unwrap(),
+            ),
+            ("ron", &|v| ron::to_string(v).unwrap().into_bytes(), &|b| {
+                ron::from_str::<serde_json::Value>(std::str::from_utf8(b).unwrap()).unwrap()
+            }),
+            ("ndjson", &|v| serde_json::to_vec(v).unwrap(), &|b| {
+                serde_json::from_slice::<serde_json::Value>(b).unwrap()
+            }),
+        ];
+        for (name, enc, dec) in sd_formats {
+            let bytes = enc(&deep_sd);
+            assert_eq!(&dec(&bytes), &deep_sd);
+            bench(
+                &format!("serde_deep_{name}"),
+                duration,
+                &|| enc(&deep_sd),
+                &|b| {
+                    black_box(dec(b));
+                },
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Security / robustness: malicious input must be rejected without panic.
@@ -908,8 +1657,7 @@ fn main() {
         security_duration,
         &[0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
         |b| {
-            nextjson::formats::decode_with::<nextjson::Value, _>(b, nextjson::formats::Cbor)
-                .is_ok()
+            nextjson::formats::decode_with::<nextjson::Value, _>(b, nextjson::formats::Cbor).is_ok()
         },
         |b| ciborium::from_reader::<serde_json::Value, _>(b).is_ok(),
     );

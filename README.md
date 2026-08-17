@@ -19,7 +19,7 @@ three properties first-class:
    as JSON Schema, used to validate incoming data, and diffed against a
    previous release to detect protocol breakage.
 2. **multi-format** — switching wire formats for the same type is a
-   first-class operation, not an adapter. Sixteen formats share one
+   first-class operation, not an adapter. Twenty-one formats share one
    `NsonSerialize` / `NsonDeserialize` implementation through the
    format-neutral `FormatEncoder` / `FormatDecoder` contracts, and
    format-to-format relay through the shared event stream is verified to be
@@ -314,9 +314,10 @@ assert_eq!(back, formats::decode_with(&yaml, formats::Yaml)?);
 # Ok::<(), nextjson::Error>(())
 ```
 
-Sixteen formats are registered. Formats are first-class `Format` values with a
-canonical name, MIME type, file extensions, and binary/text classification, so
-they can be passed around, stored, or selected dynamically:
+Twenty-one formats are registered. Formats are first-class `Format` values
+with a canonical name, MIME type, file extensions, and binary/text
+classification, so they can be passed around, stored, or selected
+dynamically:
 
 ```rust
 use nextjson::formats::{FormatKind, self};
@@ -329,8 +330,8 @@ let json = formats::encode_with(&42_i64, formats::Json)?; // format by value
 
 | Group                | Formats                                                                    |
 | -------------------- | -------------------------------------------------------------------------- |
-| Text, self-descr.    | `json`, `json5`, `hjson`, `yaml`, `toml`, `ron`, `sexpr`, `csv`, `urlform` |
-| Binary, self-descr.  | `cbor`, `msgpack`, `bson`, `bencode`, `pickle`                             |
+| Text, self-descr.    | `json`, `json5`, `hjson`, `yaml`, `toml`, `ron`, `sexpr`, `csv`, `urlform`, `ndjson`, `ini`, `edn` |
+| Binary, self-descr.  | `cbor`, `msgpack`, `ubjson`, `smile`, `bson`, `bencode`, `pickle`           |
 | Binary, schema-light | `postcard`                                                                 |
 | Environment          | `envy` (deserialization only, requires `std`)                              |
 
@@ -363,6 +364,11 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
 | **CBOR** | `null`, `bool`, `int`, `float`, `str` | `array`, `map` | RFC 8949 JSON 兼容 Profile；原生定长容器编解码（兼容读取不定长）；128 位整数走 bignum 标签 2/3；拒绝字节串、非文本键、非有限浮点与未知标签 |
 | **MessagePack** | `nil`, `bool`, `int`, `float`, `str` | `array`, `map` | JSON 兼容标量/容器族；不支持 `bin`/`ext`；拒绝超出 64 位的 128 位整数；非有限浮点线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
+| **UBJSON** | `null`, `bool`, `int`, `float`, `str` | `array`, `object` | UBJSON v5/Draft 12；对象键为 `<整数长度><UTF-8>`（无 `S` 标记）；整数级联最小类型（`i`/`U`/`I`/`l`/`L`），超 63 位走 `H` 高精度十进制；字节串写为 `[ $U #n ]`；解码兼容计数式 `#`、强类型 `$` 容器（无结束标记）；拒绝非有限浮点 |
+| **SMILE** | `null`, `bool`, `int`, `float`, `str` | `array`, `object` | Jackson Smile 1.0（`0x3A 0x29 0x0A` 头）；zigzag VInt 整数、7 位打包浮点、tiny/short/long ASCII/Unicode 字符串；字节串 `0xFD` 原始二进制；解码兼容共享字符串/键名引用；编码禁用共享（自包含）；拒绝非有限浮点 |
+| **NDJSON** | 同 JSON | 每行一个 JSON 值 | 编码：顶层数组逐元素一行；解码：`Vec<T>` 为行流（跳过空行，容忍 `\r`），单值模式解析首行并拒绝尾随 |
+| **INI** | `str`（数字/布尔按文本） | 全局段 + `[section]` 块 | 注释 `;`/`#`、可选引号（`'` 字面 / `"` 转义）；重复键取后者；拒绝数组、`null` 与嵌套段 |
+| **EDN** | `nil`, `bool`, `int`, `float`, `str` | 向量 `[...]`、列表 `(...)`（→ 数组）、映射 `{...}` | Clojure EDN 子集；字符串或关键字键（关键字解码为其名）；支持 `#_` 丢弃；拒绝符号、集合、字符、tagged literal 与高精度 `M`/`N` 数字 |
 | **BSON** | `null`, `bool`, `int32`, `int64`, `double`, `str` | `document`, `array` | 文档形态（拒绝裸标量根） |
 | **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
 | **Postcard** | `null`, `bool`, 无符号整数, `str` | `seq`, `map` | 非自描述：拒绝有符号整数、`float`、`Option`、`Value` 和 `peek` |
@@ -371,8 +377,9 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 
 `detect()` is heuristic and intentionally conservative: it claims only strong
 structural signatures (pickle protocol header, bencode intro, BSON length
-prefix, text-format ASCII starts, MessagePack/CBOR binary signatures) and
-returns `None` for ambiguous input.
+prefix, text-format ASCII starts, MessagePack/CBOR binary signatures, the
+SMILE `:)\n` header, and UBJSON `{S…` / `[$` / `[#` object/typed-array
+starts) and returns `None` for ambiguous input.
 
 #### Cross-language compatibility
 
@@ -495,7 +502,7 @@ cargo run -p nextjson --example contract_engine
 ### Benchmark
 
 The repository-owned benchmark compares encode/decode throughput and encoded
-size across the 14 wire formats that can represent the fixture (of the 16
+size across the 19 wire formats that can represent the fixture (of the 21
 registered: `envy` reads the process environment rather than a wire format,
 and `urlform` only represents a flat map). It imports no comparison library
 in the workspace and does not claim universal superiority.

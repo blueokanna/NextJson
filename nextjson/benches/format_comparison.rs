@@ -7,6 +7,11 @@
 //! format,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps
 //! ```
 //!
+//! Formats: `json`, `json5`, `hjson`, `yaml`, `ron`, `sexpr`, `cbor`,
+//! `msgpack`, `ubjson`, `smile`, `pickle`, `ndjson`, `edn` (full-model);
+//! `toml`, `bson` (document root); `ini` (config document); `bencode`,
+//! `postcard` (int/uint); `csv` (flat rows).
+//!
 //! Run with `cargo bench -p nextjson --bench format_comparison`. Tune the
 //! per-case measurement window with `NEXTJSON_BENCH_MS` (default 2000 ms). A
 //! warm-up pass runs before measurement so the allocator and instruction cache
@@ -160,7 +165,9 @@ fn main() {
             )*
         };
     }
-    bench_full!(Json, Json5, Hjson, Yaml, Ron, Sexpr, Cbor, MsgPack, Pickle);
+    bench_full!(
+        Json, Json5, Hjson, Yaml, Ron, Sexpr, Cbor, MsgPack, Pickle, Ubjson, Smile, Ndjson, Edn
+    );
 
     // TOML / BSON: document-shaped, wrap the array in a table root.
     macro_rules! bench_doc {
@@ -181,6 +188,37 @@ fn main() {
         };
     }
     bench_doc!(Toml, Bson);
+
+    // INI: string-scalar config document (no arrays / floats on the wire).
+    #[derive(Clone, Debug, PartialEq, NsonSerialize, NsonDeserialize)]
+    struct IniDoc {
+        title: String,
+        retries: String,
+        owner: IniOwner,
+    }
+    #[derive(Clone, Debug, PartialEq, NsonSerialize, NsonDeserialize)]
+    struct IniOwner {
+        name: String,
+        id: String,
+    }
+    let ini_doc = IniDoc {
+        title: "NextJson benchmark".into(),
+        retries: "3".into(),
+        owner: IniOwner {
+            name: "blueokanna".into(),
+            id: "42".into(),
+        },
+    };
+    let ini_enc = |d: &IniDoc| nextjson::formats::Ini.encode(d).unwrap();
+    let ini_dec = |b: &[u8]| nextjson::formats::Ini.decode::<IniDoc>(b).unwrap();
+    benchmark_pair(
+        <nextjson::formats::Ini as Format>::NAME,
+        duration,
+        &|| ini_enc(&ini_doc),
+        &|b| {
+            black_box(ini_dec(b));
+        },
+    );
 
     // Bencode / Postcard: no float on the wire; use the int/uint fixtures.
     let uint_records: Vec<UintRecord> = int_records

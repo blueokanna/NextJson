@@ -15,7 +15,7 @@ Postcard。它把三个性质做成了一等能力：
    `const SCHEMA: TypeSchema`：一个在 `const` 上下文构建的编译期元数据树，可
    在运行时内省、渲染为 JSON Schema、用于校验进入系统的数据，并与上一版本
    diff 以检测协议破坏。
-2. **multi-format**——同一类型切换线格式是一等操作，而不是适配器。16 种格式
+2. **multi-format**——同一类型切换线格式是一等操作，而不是适配器。21 种格式
    通过格式中立的 `FormatEncoder` / `FormatDecoder` 契约共享同一份
    `NsonSerialize` / `NsonDeserialize` 实现；经由统一事件流的格式间中继被验证
    与直接编码字节完全一致。
@@ -314,7 +314,7 @@ assert_eq!(back, formats::decode_with(&yaml, formats::Yaml)?);
 # Ok::<(), nextjson::Error>(())
 ```
 
-共注册 16 种格式。格式是一等 `Format` 值，携带规范名、MIME 类型、文件扩展名和
+共注册 21 种格式。格式是一等 `Format` 值，携带规范名、MIME 类型、文件扩展名和
 二进制/文本分类，可以按值传递、存储或动态选择：
 
 ```rust
@@ -328,8 +328,8 @@ let json = formats::encode_with(&42_i64, formats::Json)?; // 按值选择格式
 
 | 分组           | 格式                                                                       |
 | -------------- | -------------------------------------------------------------------------- |
-| 文本、自描述   | `json`、`json5`、`hjson`、`yaml`、`toml`、`ron`、`sexpr`、`csv`、`urlform` |
-| 二进制、自描述 | `cbor`、`msgpack`、`bson`、`bencode`、`pickle`                             |
+| 文本、自描述   | `json`、`json5`、`hjson`、`yaml`、`toml`、`ron`、`sexpr`、`csv`、`urlform`、`ndjson`、`ini`、`edn` |
+| 二进制、自描述 | `cbor`、`msgpack`、`ubjson`、`smile`、`bson`、`bencode`、`pickle`           |
 | 二进制、轻模式 | `postcard`                                                                 |
 | 环境           | `envy`（仅反序列化，需要 `std`）                                           |
 
@@ -362,6 +362,11 @@ assert_eq!(json2, json);
 | **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
 | **CBOR** | `null`, `bool`, `int`, `float`, `str` | `array`, `map` | RFC 8949 JSON 兼容 Profile；原生定长容器编解码（兼容读取不定长）；128 位整数走 bignum 标签 2/3；拒绝字节串、非文本键、非有限浮点与未知标签 |
 | **MessagePack** | `nil`, `bool`, `int`, `float`, `str` | `array`, `map` | JSON 兼容标量/容器族；不支持 `bin`/`ext`；拒绝超出 64 位的 128 位整数；非有限浮点线上无损透传，但中继到无法表示它们的格式（JSON、CBOR）时报错 |
+| **UBJSON** | `null`, `bool`, `int`, `float`, `str` | `array`, `object` | UBJSON v5/Draft 12；对象键为 `<整数长度><UTF-8>`（无 `S` 标记）；整数级联最小类型（`i`/`U`/`I`/`l`/`L`），超 63 位走 `H` 高精度十进制；字节串写为 `[ $U #n ]`；解码兼容计数式 `#`、强类型 `$` 容器（无结束标记）；拒绝非有限浮点 |
+| **SMILE** | `null`, `bool`, `int`, `float`, `str` | `array`, `object` | Jackson Smile 1.0（`0x3A 0x29 0x0A` 头）；zigzag VInt 整数、7 位打包浮点、tiny/short/long ASCII/Unicode 字符串；字节串 `0xFD` 原始二进制；解码兼容共享字符串/键名引用；编码禁用共享（自包含）；拒绝非有限浮点 |
+| **NDJSON** | 同 JSON | 每行一个 JSON 值 | 编码：顶层数组逐元素一行；解码：`Vec<T>` 为行流（跳过空行，容忍 `\r`），单值模式解析首行并拒绝尾随 |
+| **INI** | `str`（数字/布尔按文本） | 全局段 + `[section]` 块 | 注释 `;`/`#`、可选引号（`'` 字面 / `"` 转义）；重复键取后者；拒绝数组、`null` 与嵌套段 |
+| **EDN** | `nil`, `bool`, `int`, `float`, `str` | 向量 `[...]`、列表 `(...)`（→ 数组）、映射 `{...}` | Clojure EDN 子集；字符串或关键字键（关键字解码为其名）；支持 `#_` 丢弃；拒绝符号、集合、字符、tagged literal 与高精度 `M`/`N` 数字 |
 | **BSON** | `null`, `bool`, `int32`, `int64`, `double`, `str` | `document`, `array` | 文档形态（拒绝裸标量根） |
 | **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
 | **Postcard** | `null`, `bool`, 无符号整数, `str` | `seq`, `map` | 非自描述：拒绝有符号整数、`float`、`Option`、`Value` 和 `peek` |
@@ -369,8 +374,8 @@ assert_eq!(json2, json);
 | **Envy** | `int`, `float`, `bool`, `str` | 扁平 `map`（环境变量） | 仅反序列化；需要 `std` |
 
 `detect()` 是启发式且刻意保守：只认定强结构签名（pickle 协议头、bencode 开头、
-BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名），有歧义输入
-返回 `None`。
+BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名、SMILE `:)\n`
+头、UBJSON `{S…` / `[$` / `[#` 对象/强类型数组开头），有歧义输入返回 `None`。
 
 #### 跨语言兼容
 
@@ -462,8 +467,8 @@ cargo run -p nextjson --example contract_engine
 
 ### Benchmark
 
-自有 benchmark 比较同一份 128 记录数据在 14 种可表示该数据的线格式上的编码/解码
-吞吐与编码体积（注册的 16 种格式中：`envy` 读取进程环境而非线格式，`urlform`
+自有 benchmark 比较同一份 128 记录数据在 19 种可表示该数据的线格式上的编码/解码
+吞吐与编码体积（注册的 21 种格式中：`envy` 读取进程环境而非线格式，`urlform`
 只能表示扁平 map，故不计入）。工作区不引入任何对比库，也不制造"普遍更快"结论。
 
 ```text

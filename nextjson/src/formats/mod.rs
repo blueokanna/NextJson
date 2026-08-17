@@ -10,8 +10,9 @@
 //! # Registry
 //!
 //! - Text, self-describing: `json`, `json5`, `hjson`, `yaml`, `toml`, `ron`,
-//!   `sexpr`, `csv`, `urlform`.
-//! - Binary, self-describing: `cbor`, `msgpack`, `bson`, `bencode`, `pickle`.
+//!   `sexpr`, `csv`, `urlform`, `ndjson`, `ini`, `edn`.
+//! - Binary, self-describing: `cbor`, `msgpack`, `ubjson`, `smile`, `bson`,
+//!   `bencode`, `pickle`.
 //! - Binary, schema-light: `postcard`.
 //! - Environment: `envy` (deserialization from process environment).
 //!
@@ -60,18 +61,23 @@ mod bencode;
 mod bson;
 mod cbor;
 mod csv;
+mod edn;
 mod envy;
 mod hjson;
+mod ini;
 mod json;
 mod json5;
 mod msgpack;
+mod ndjson;
 mod pickle;
 mod postcard;
 mod ron;
 mod sexpr;
+mod smile;
 mod toml;
 mod tree;
 pub use self::tree::TreeDecoder;
+mod ubjson;
 mod urlform;
 mod yaml;
 
@@ -85,16 +91,22 @@ pub use self::cbor::Cbor;
 pub use self::cbor::{CborDecoder, CborEncoder};
 pub use self::csv::Csv;
 pub use self::csv::{CsvDecoder, CsvEncoder};
+pub use self::edn::Edn;
+pub use self::edn::{EdnDecoder, EdnEncoder};
 pub use self::envy::Envy;
 pub use self::envy::EnvyDecoder;
 pub use self::hjson::Hjson;
 pub use self::hjson::{HjsonDecoder, HjsonEncoder};
+pub use self::ini::Ini;
+pub use self::ini::{IniDecoder, IniEncoder};
 pub use self::json::Json;
 pub use self::json::{JsonDecoder, JsonEncoder};
 pub use self::json5::Json5;
 pub use self::json5::{Json5Decoder, Json5Encoder};
 pub use self::msgpack::MsgPack;
 pub use self::msgpack::{MsgPackDecoder, MsgPackEncoder};
+pub use self::ndjson::Ndjson;
+pub use self::ndjson::NdjsonDecoder;
 pub use self::pickle::Pickle;
 pub use self::pickle::{PickleDecoder, PickleEncoder};
 pub use self::postcard::Postcard;
@@ -103,8 +115,12 @@ pub use self::ron::Ron;
 pub use self::ron::{RonDecoder, RonEncoder};
 pub use self::sexpr::Sexpr;
 pub use self::sexpr::{SexprDecoder, SexprEncoder};
+pub use self::smile::Smile;
+pub use self::smile::{SmileDecoder, SmileEncoder};
 pub use self::toml::Toml;
 pub use self::toml::{TomlDecoder, TomlEncoder};
+pub use self::ubjson::Ubjson;
+pub use self::ubjson::{UbjsonDecoder, UbjsonEncoder};
 pub use self::urlform::UrlForm;
 pub use self::urlform::{UrlFormDecoder, UrlFormEncoder};
 pub use self::yaml::Yaml;
@@ -207,6 +223,10 @@ pub enum FormatKind {
     Cbor,
     /// MessagePack.
     MsgPack,
+    /// Universal Binary JSON.
+    Ubjson,
+    /// Jackson Smile binary JSON.
+    Smile,
     /// BSON (MongoDB documents).
     Bson,
     /// Bencode (BitTorrent).
@@ -215,6 +235,12 @@ pub enum FormatKind {
     Postcard,
     /// Python Pickle (protocol 2 subset).
     Pickle,
+    /// NDJSON / JSONL (newline-delimited JSON).
+    Ndjson,
+    /// INI configuration text.
+    Ini,
+    /// EDN (Clojure data).
+    Edn,
     /// Environment variables (deserialization only).
     Envy,
 }
@@ -300,6 +326,20 @@ pub fn all() -> &'static [FormatInfo] {
             binary: true,
         },
         FormatInfo {
+            kind: FormatKind::Ubjson,
+            name: "ubjson",
+            mime: "application/ubjson",
+            extensions: &["ubj", "ubjson"],
+            binary: true,
+        },
+        FormatInfo {
+            kind: FormatKind::Smile,
+            name: "smile",
+            mime: "application/x-jackson-smile",
+            extensions: &["smile"],
+            binary: true,
+        },
+        FormatInfo {
             kind: FormatKind::Bson,
             name: "bson",
             mime: "application/bson",
@@ -326,6 +366,27 @@ pub fn all() -> &'static [FormatInfo] {
             mime: "application/python-pickle",
             extensions: &["pkl", "pickle"],
             binary: true,
+        },
+        FormatInfo {
+            kind: FormatKind::Ndjson,
+            name: "ndjson",
+            mime: "application/x-ndjson",
+            extensions: &["ndjson", "jsonl"],
+            binary: false,
+        },
+        FormatInfo {
+            kind: FormatKind::Ini,
+            name: "ini",
+            mime: "text/plain",
+            extensions: &["ini", "cfg", "conf"],
+            binary: false,
+        },
+        FormatInfo {
+            kind: FormatKind::Edn,
+            name: "edn",
+            mime: "application/edn",
+            extensions: &["edn"],
+            binary: false,
         },
         FormatInfo {
             kind: FormatKind::Envy,
@@ -373,6 +434,18 @@ pub fn detect(input: &[u8]) -> Option<FormatKind> {
     // BSON: little-endian int32 length that equals the whole input length.
     if input.len() >= 5 && plausible_bson_length(input) {
         return Some(FormatKind::Bson);
+    }
+    // SMILE: fixed 3-byte header `:)\n` (0x3A 0x29 0x0A).
+    if input.len() >= 3 && input[..3] == [0x3A, 0x29, 0x0A] {
+        return Some(FormatKind::Smile);
+    }
+    // UBJSON object/array: `{` is shared with JSON, but a UBJSON object
+    // starts with an `S` string key marker, and `[` followed by `$` / `#`
+    // is a typed/counted array (JSON never has those bytes).
+    if (first == b'{' && input.get(1) == Some(&b'S'))
+        || (first == b'[' && matches!(input.get(1), Some(&b'$') | Some(&b'#')))
+    {
+        return Some(FormatKind::Ubjson);
     }
     // Text formats first: their ASCII starts are far more specific than the
     // ambiguous binary fix encodings. A `---` document marker is YAML before

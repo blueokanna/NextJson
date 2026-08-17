@@ -682,6 +682,12 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
     }
 
     fn unit(&mut self) -> Result<(), Self::Error> {
+        if self.lookahead.is_none() {
+            match self.header()? {
+                0xC0 => return Ok(()),
+                _ => self.cur.rewind(1),
+            }
+        }
         match self.next_token()? {
             Token::Null => Ok(()),
             other => Err(Error::invalid_type("null", token_name(&other))),
@@ -689,6 +695,13 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
     }
 
     fn bool(&mut self) -> Result<bool, Self::Error> {
+        if self.lookahead.is_none() {
+            match self.header()? {
+                0xC2 => return Ok(false),
+                0xC3 => return Ok(true),
+                _ => self.cur.rewind(1),
+            }
+        }
         match self.next_token()? {
             Token::Bool(b) => Ok(b),
             other => Err(Error::invalid_type("bool", token_name(&other))),
@@ -696,6 +709,9 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
     }
 
     fn number(&mut self) -> Result<Number, Self::Error> {
+        if self.lookahead.is_none() {
+            return self.read_number_value();
+        }
         match self.next_token()? {
             Token::Number(n) => Ok(n),
             other => Err(Error::invalid_type("number", token_name(&other))),
@@ -703,6 +719,15 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
     }
 
     fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
+        if self.lookahead.is_none() {
+            match self.header()? {
+                0xA0..=0xBF | 0xD9..=0xDB => {
+                    self.cur.rewind(1);
+                    return self.read_str();
+                }
+                _ => self.cur.rewind(1),
+            }
+        }
         match self.next_token()? {
             Token::Str(s) => Ok(s),
             other => Err(Error::invalid_type("string", token_name(&other))),
@@ -807,8 +832,6 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
                 }
             }
             0x90..=0x9F | 0xDC | 0xDD => {
-                // Legacy encoding: `Vec<u8>` used to be written as an array of
-                // small integers. Keep reading it so old data round-trips.
                 self.cur.rewind(1);
                 self.begin_array()?;
                 let mut out = Vec::with_capacity(self.array_len_hint().unwrap_or(0));

@@ -565,6 +565,16 @@ impl<'de> CborDecoder<'de> {
         Ok(Token::Number(Number::F64(value)))
     }
 
+    /// Wrap a decoded float in a `Number`, rejecting non-finite values.
+    fn finite_number(&self, value: f64) -> Result<Number> {
+        if !value.is_finite() {
+            return Err(Error::custom(
+                "non-finite CBOR float is not representable in the JSON-compatible profile",
+            ));
+        }
+        Ok(Number::F64(value))
+    }
+
     fn read_token(&mut self) -> Result<Token<'de>> {
         let b = self.header()?;
         let major = b >> 5;
@@ -774,6 +784,13 @@ impl<'de> FormatDecoder<'de> for CborDecoder<'de> {
     }
 
     fn unit(&mut self) -> Result<(), Self::Error> {
+        // Byte-direct fast path: `null` is the single simple value 22 (0xF6).
+        if self.lookahead.is_none() {
+            match self.header()? {
+                0xF6 => return Ok(()),
+                _ => self.cur.rewind(1),
+            }
+        }
         match self.next_token()? {
             Token::Null => Ok(()),
             other => Err(Error::invalid_type("null", token_name(&other))),
@@ -781,6 +798,14 @@ impl<'de> FormatDecoder<'de> for CborDecoder<'de> {
     }
 
     fn bool(&mut self) -> Result<bool, Self::Error> {
+        // Byte-direct fast path: `false` / `true` are simple values 20/21.
+        if self.lookahead.is_none() {
+            match self.header()? {
+                0xF4 => return Ok(false),
+                0xF5 => return Ok(true),
+                _ => self.cur.rewind(1),
+            }
+        }
         match self.next_token()? {
             Token::Bool(b) => Ok(b),
             other => Err(Error::invalid_type("bool", token_name(&other))),
@@ -788,6 +813,47 @@ impl<'de> FormatDecoder<'de> for CborDecoder<'de> {
     }
 
     fn number(&mut self) -> Result<Number, Self::Error> {
+        // Byte-direct fast path: integers (major 0/1), bignums (tag 2/3) and
+        // floats (simple values 25/26/27) are read without a `Token`.
+        if self.lookahead.is_none() {
+            let b = self.header()?;
+            let major = b >> 5;
+            let additional = b & 0x1F;
+            match major {
+                0 => return Ok(Number::U64(self.argument(additional)?)),
+                1 => {
+                    let argument = self.argument(additional)?;
+                    return Ok(if argument <= i64::MAX as u64 {
+                        Number::I64(-1 - argument as i64)
+                    } else {
+                        Number::I128(-1 - argument as i128)
+                    });
+                }
+                6 => {
+                    let tag = self.argument(additional)?;
+                    if tag == 2 || tag == 3 {
+                        return self.read_bignum(tag);
+                    }
+                }
+                7 => match additional {
+                    25 => {
+                        let value = half_to_f32(self.read_be_u16()?) as f64;
+                        return self.finite_number(value);
+                    }
+                    26 => {
+                        let value = f32::from_bits(self.read_be_u32()?) as f64;
+                        return self.finite_number(value);
+                    }
+                    27 => {
+                        let value = f64::from_bits(self.read_be_u64()?);
+                        return self.finite_number(value);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            self.cur.rewind(1);
+        }
         match self.next_token()? {
             Token::Number(n) => Ok(n),
             other => Err(Error::invalid_type("number", token_name(&other))),
@@ -795,6 +861,14 @@ impl<'de> FormatDecoder<'de> for CborDecoder<'de> {
     }
 
     fn string(&mut self) -> Result<Cow<'de, str>, Self::Error> {
+        // Byte-direct fast path for text strings (major type 3).
+        if self.lookahead.is_none() {
+            let b = self.header()?;
+            if b >> 5 == 3 {
+                return self.read_text(b & 0x1F);
+            }
+            self.cur.rewind(1);
+        }
         match self.next_token()? {
             Token::Str(s) => Ok(s),
             other => Err(Error::invalid_type("string", token_name(&other))),

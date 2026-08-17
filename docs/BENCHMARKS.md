@@ -169,7 +169,7 @@ Four measurable causes account for the release gap:
    optimized for a decade (lookup-table digits, preallocated buffers, a
    fixed-size serializer state), while nextjson's encoder keeps a container
    frame stack (for separators and pretty-printing) that must stay correct
-   across 13 formats. Two changes closed most of the encode-side validation
+   across 21 formats. Two changes closed most of the encode-side validation
    cost: integer writing now emits two digits per division through a static
    table (`write_u64_into`, ~24% on the int-only fixture), and the top-level
    entry points run a trusted `FastEncoder` that compiles out the per-value
@@ -181,7 +181,7 @@ Four measurable causes account for the release gap:
 The remaining gap for this JSON-only fixture is ~1.9-2.1x on encode (~1.64x
 on the int-only fixture) and ~1.3x on decode. Read these numbers as a
 **baseline for this exact fixture**, not a general ranking: nextjson's encode
-path is a general format-neutral contract that also drives 13 other formats,
+path is a general format-neutral contract that also drives 20 other formats,
 while serde_json is a single, specialized JSON hot path. Cross-check on your
 own hardware and fixtures before drawing conclusions.
 
@@ -229,5 +229,17 @@ than simd-json (whose serde decoder also pays a per-iteration `to_vec()` copy
 for in-place parsing), with decode on par. On the short-string record fixture
 the gap to serde_json remains (~0.6x encode, ~0.76x decode) — serde_json is a
 monomorphic, JSON-specialized hot path, while nextjson's encode path is the
-format-neutral contract driving 14 formats. Absolute numbers drift with CPU
+format-neutral contract driving 21 formats (JSON/JSON5/Hjson/YAML/TOML/RON/
+S-expr/CSV/Urlform/NDJSON/INI/EDN + CBOR/MessagePack/UBJSON/SMILE/BSON/Bencode/
+Pickle/Postcard/Envy). Absolute numbers drift with CPU
 power state; treat this as a single-run record, not a verdict.
+
+The standalone serde comparison benchmarks **every** format on **every**
+data-shape fixture it can represent (a full matrix, not just JSON/MessagePack/
+CBOR): JSON (nextjson/serde_json/simd-json), MessagePack, CBOR, JSON5, YAML,
+RON, NDJSON (serde side via `serde_json` lines) on all nine fixtures, plus the
+document-shaped TOML/BSON/postcard on the `config` fixture. Two honest gaps
+are documented in the report: `serde_ubj` 0.2.0's decoder only supports signed
+32/64-bit integers and `serde-smile` 0.2.2's `u64` round-trip is incomplete,
+so UBJSON and SMILE are reported as nextjson encode+decode rows without a
+serde comparison row — a real ecosystem-crate limitation, not an omission.

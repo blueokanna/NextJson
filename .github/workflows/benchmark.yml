@@ -2,7 +2,7 @@ name: Benchmark
 
 # Full benchmark + report generation.
 #
-# Runs both benchmark suites (the in-workspace 14-format matrix and the
+# Runs both benchmark suites (the in-workspace all-format matrix and the
 # standalone serde/simd-json comparison), merges the CSV results into
 # `benchmarks/results/Github_Action_Benchmark.md`, uploads the raw CSVs and
 # the report as workflow artifacts, and (on push to `main`, manual dispatch,
@@ -57,7 +57,7 @@ jobs:
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
 
-      - name: Run in-workspace 14-format benchmark (with simd)
+      - name: Run in-workspace all-format benchmark (with simd)
         run: |
           mkdir -p benchmarks/results
           cargo bench -p nextjson --bench format_comparison --features simd --locked 2>&1 \
