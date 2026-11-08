@@ -504,6 +504,7 @@ impl<'de> FormatDecoder<'de> for PostcardDecoder<'de> {
             pos: self.cur.pos(),
             depth: self.depth,
             frame_len: self.frames.len(),
+            tag: None,
         }
     }
 

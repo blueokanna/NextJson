@@ -35,7 +35,6 @@ use crate::value::Value;
 /// Parser configuration.
 #[derive(Clone, Debug)]
 pub struct DecodeConfig {
-    /// Maximum nesting depth (protects against stack overflow). Default 128.
     pub max_depth: u32,
 }
 
@@ -63,6 +62,7 @@ pub struct Mark {
     pub(crate) pos: usize,
     pub(crate) depth: u32,
     pub(crate) frame_len: usize,
+    pub(crate) tag: Option<u8>,
 }
 
 impl Mark {
@@ -72,6 +72,7 @@ impl Mark {
             pos,
             depth,
             frame_len: 0,
+            tag: None,
         }
     }
     /// The source offset captured by this mark.
@@ -484,6 +485,7 @@ struct BytesReader<'de> {
     input: &'de [u8],
     pos: usize,
     lookahead: Option<Token<'de>>,
+    lookahead_start: usize,
 }
 
 struct TreeReader<'de> {
@@ -539,6 +541,7 @@ impl<'de> BytesReader<'de> {
 
     fn peek_token(&mut self, scratch: &mut String) -> Result<Token<'de>> {
         if self.lookahead.is_none() {
+            self.lookahead_start = self.pos;
             self.lookahead = Some(self.lex(scratch)?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
@@ -1186,6 +1189,7 @@ impl<'de> Decoder<'de> {
                 input,
                 pos: 0,
                 lookahead: None,
+                lookahead_start: 0,
             }),
             scratch: String::new(),
             depth: 0,
@@ -1238,6 +1242,7 @@ impl<'de> Decoder<'de> {
     /// Save the current position (for untagged-enum backtracking).
     pub fn save(&self) -> Mark {
         let pos = match &self.inner {
+            Inner::Bytes(r) if r.lookahead.is_some() => r.lookahead_start,
             Inner::Bytes(r) => r.pos,
             Inner::Tree(r) => r.pos,
         };
@@ -1245,6 +1250,7 @@ impl<'de> Decoder<'de> {
             pos,
             depth: self.depth,
             frame_len: 0,
+            tag: None,
         }
     }
 
@@ -1438,6 +1444,9 @@ impl<'de> Decoder<'de> {
                 }
                 self.end_array()?;
             }
+            token @ (Token::EndArray | Token::EndObject) => {
+                return Err(self.invalid_type("a JSON value", &token));
+            }
             _ => {
                 self.next_token()?;
             }
@@ -1493,7 +1502,8 @@ impl<'de> Decoder<'de> {
                 self.number()?;
             }
             _ => {
-                self.next_token()?;
+                let token = self.next_token()?;
+                return Err(self.invalid_type("a JSON value", &token));
             }
         }
         Ok(())

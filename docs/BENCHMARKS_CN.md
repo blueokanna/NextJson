@@ -1,5 +1,11 @@
 # 可复现基准测试
 
+当前 JSON 与 CBOR 公开入口校验序列化事件。下文使用免校验入口测得的历史数据
+保留为历史记录，不代表当前性能，需在当前工作区重新运行。基准中的 `json` 是原生
+校验路径；`json-checked-explicit` 与 `json-trusted-explicit` 使用相同 writer
+缓冲方式比较校验策略；`json-reader-limited` 测量带输入配额的读取。显式 writer
+路径包含一次缓冲复制，原生向量入口没有这次复制。
+
 ## 中文
 
 `nextjson/benches/format_comparison.rs` 对同一份 128 条记录数据测量所有能表示该
@@ -144,10 +150,10 @@ release 差距来自四个可测量的原因：
    缓冲、固定大小的 serializer 状态），优化了十年；nextjson 的编码器保留容器
    帧栈（为分隔符与 pretty 输出），且必须在 21 种格式下保持正确。编码侧校验
    成本大部分已被两项改动消除：整数输出改为每次除法经静态表产出两位数字
-   （`write_u64_into`，纯整数 fixture 约 +24%）；顶层入口改用信任型
+   （`write_u64_into`，纯整数 fixture 约 +24%）；历史顶层入口曾改用信任型
    `FastEncoder`，把每值的协议检查在编译期裁掉（同进程 A/B：校验型 `Encoder`
    约 440 MB/s vs 信任型发射器约 877 MB/s——检查本身约占编码的 2x）。校验型
-   `Encoder` 仍是未经核实 serializer 的默认公开类型。
+   `Encoder` 现已成为所有 JSON 公开入口的默认策略，免校验编码器需要显式选择。
 
 当前纯 JSON 数据下编码差距约为 1.9-2.1x（纯整数 fixture 约 1.64x）、解码差距
 约为 1.3x。请把这些数字当作**该数据集的基线**而非普遍排名：nextjson 的编码

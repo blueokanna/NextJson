@@ -389,6 +389,7 @@ struct CFrame {
 pub struct BsonDecoder<'de> {
     cur: Cursor<'de>,
     lookahead: Option<Token<'de>>,
+    lookahead_mark: Mark,
     pending_type: Option<u8>,
     frames: Vec<CFrame>,
     depth: u32,
@@ -401,6 +402,7 @@ impl<'de> BsonDecoder<'de> {
         BsonDecoder {
             cur: Cursor::new(input),
             lookahead: None,
+            lookahead_mark: Mark::new(0, 0),
             pending_type: None,
             frames: Vec::new(),
             depth: 0,
@@ -747,6 +749,7 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
+            self.lookahead_mark = self.save();
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
@@ -760,17 +763,21 @@ impl<'de> FormatDecoder<'de> for BsonDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
+        if self.lookahead.is_some() {
+            return self.lookahead_mark;
+        }
         Mark {
             pos: self.cur.pos(),
             depth: self.depth,
             frame_len: self.frames.len(),
+            tag: self.pending_type,
         }
     }
 
     fn restore(&mut self, mark: Mark) {
         self.cur.seek(mark.pos);
         self.lookahead = None;
-        self.pending_type = None;
+        self.pending_type = mark.tag;
         self.frames.truncate(mark.frame_len);
         self.depth = mark.depth;
     }

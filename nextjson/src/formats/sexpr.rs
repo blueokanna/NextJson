@@ -294,6 +294,7 @@ pub struct SexprDecoder<'de> {
     input: &'de [u8],
     pos: usize,
     lookahead: Option<Token<'de>>,
+    lookahead_mark: Mark,
     scratch: String,
     frames: Vec<DFrame>,
     depth: u32,
@@ -307,6 +308,7 @@ impl<'de> SexprDecoder<'de> {
             input,
             pos: 0,
             lookahead: None,
+            lookahead_mark: Mark::new(0, 0),
             scratch: String::new(),
             frames: Vec::new(),
             depth: 0,
@@ -669,6 +671,9 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
                 self.lookahead = None;
                 Ok(())
             }
+            token @ (Token::EndArray | Token::EndObject) => {
+                Err(Error::invalid_type("a value", token_name(&token)))
+            }
             _ => {
                 self.next_token()?;
                 Ok(())
@@ -678,6 +683,7 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
+            self.lookahead_mark = self.save();
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("set").clone())
@@ -691,10 +697,14 @@ impl<'de> FormatDecoder<'de> for SexprDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
+        if self.lookahead.is_some() {
+            return self.lookahead_mark;
+        }
         Mark {
             pos: self.pos,
             depth: self.depth,
             frame_len: self.frames.len(),
+            tag: None,
         }
     }
 

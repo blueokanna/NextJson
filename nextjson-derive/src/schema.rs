@@ -459,10 +459,8 @@ fn known_type_schema(ty: &str, cp: &str) -> Option<String> {
         }
         return known_type_schema(rest, cp);
     }
-    for name in ["Duration"] {
-        if t == name {
-            return Some(format!("{cp}::TypeSchema::U128"));
-        }
+    if t == "Duration" {
+        return Some(format!("{cp}::TypeSchema::U128"));
     }
     for name in ["PathBuf", "IpAddr", "Ipv4Addr", "Ipv6Addr", "SocketAddr"] {
         if t == name {

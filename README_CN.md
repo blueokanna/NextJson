@@ -84,9 +84,14 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 
 设计是 **data-model-first**（而非 AST-first）：类型化解码直接把字节流解码进
 你的字段，零中间树；`Value` 是同一解码器上的可选消费者。公开两种编码策略：
-`Encoder` 每次调用都校验事件协议；`FastEncoder`（`nextencode` / `to_vec` /
-`to_string` / writer 入口使用）信任派生验证过的调用序列，跳过每值检查以换取
-约 2x 编码吞吐。
+`Encoder` 每次调用都校验事件协议，`nextencode` / `to_vec` / `to_string` /
+writer 入口均使用这一策略。`FastEncoder` 仅供显式选择；使用前需验证完整的事件
+序列，包括嵌套字段的自定义序列化实现。性能差异需要用实际负载测量，历史免校验
+基准不代表当前默认入口。
+
+处理不可信 reader 时，使用 `from_reader_with_limit(reader, max_bytes)` 限制
+输入字节数，空白也计入配额。流式解码为回溯保留已读输入；此配额不等于解码结果的
+堆内存上限，也不负责 I/O 超时。
 
 ```rust
 use nextjson::{NsonDeserialize, NsonSerialize};

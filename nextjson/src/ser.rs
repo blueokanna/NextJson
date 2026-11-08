@@ -20,7 +20,7 @@ use core::ops::{Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive};
 use core::time::Duration;
 
 use crate::error::{Error, ErrorKind, FormatError, Result};
-use crate::event_state::{EventState, Kind};
+use crate::event_state::{EventState, Kind, MAX_ENCODE_DEPTH};
 use crate::map::Map;
 use crate::number::Number;
 use crate::schema::{NsonSchema, TypeSchema};
@@ -476,11 +476,10 @@ pub trait NsonSerialize: NsonSchema {
 
 /// Trusted JSON encoder variant: skips per-value event-protocol validation.
 ///
-/// Use this when the caller provably follows the serialization protocol —
-/// the repository-owned derive macros do — in exchange for ~2x encoding
-/// throughput. Misuse (a hand-written implementation emitting values out of
-/// order) silently produces malformed JSON instead of an error, so this is
-/// the wrong type for unverified callers. See [`Encoder`].
+/// This is an explicit opt-in for callers that have verified the complete
+/// serialization implementation, including all nested fields and custom hooks.
+/// Misuse can produce malformed JSON. Public encoding helpers use [`Encoder`]
+/// with validation enabled. Measure on your workload before choosing this path.
 pub type FastEncoder<W> = Encoder<W, false>;
 
 /// JSON encoder with internal buffering and indentation state.
@@ -493,13 +492,13 @@ pub type FastEncoder<W> = Encoder<W, false>;
 /// - `Encoder<W>` (the default, `VALIDATE = true`) checks every call against
 ///   the serialization event protocol and reports misuse as an error. This
 ///   is the safe surface for hand-written `NsonSerialize` implementations.
-/// - `Encoder<W, false>` trusts the caller to follow the protocol (the
-///   repository-owned derive macros are verified to do so) and skips every
-///   per-value check. The top-level `nextencode` / `to_vec` / `to_string`
-///   entry points use this fast path.
+/// - `Encoder<W, false>` trusts the caller to follow the protocol and skips
+///   per-value checks. It is available explicitly as [`FastEncoder`].
 ///
 /// Both emit byte-identical output for protocol-conforming callers; the
-/// fast path trades misuse diagnostics for ~2x encoding throughput.
+/// fast path trades misuse diagnostics for less validation work.
+/// Both reject container nesting beyond 128 levels. After any encoding or
+/// writer error, discard the encoder; already written bytes are not rolled back.
 pub struct Encoder<W: Write, const VALIDATE: bool = true> {
     writer: W,
     buf: Vec<u8>,
@@ -575,6 +574,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
 
     /// Open an object: write `{`.
     pub fn begin_object(&mut self) -> Result<()> {
+        if self.depth >= MAX_ENCODE_DEPTH {
+            return Err(Error::new(ErrorKind::RecursionLimitExceeded, None, None, 0));
+        }
         if VALIDATE {
             self.start_value()?;
         }
@@ -609,7 +611,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
                 None => return Err(Error::custom("object end without matching start")),
             }
         }
-        self.frames.pop();
+        self.frames
+            .pop()
+            .ok_or_else(|| Error::custom("object end without matching start"))?;
         self.depth -= 1;
         if self.pretty {
             self.buf.push(b'\n');
@@ -621,6 +625,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
 
     /// Open an array: write `[`.
     pub fn begin_array(&mut self) -> Result<()> {
+        if self.depth >= MAX_ENCODE_DEPTH {
+            return Err(Error::new(ErrorKind::RecursionLimitExceeded, None, None, 0));
+        }
         if VALIDATE {
             self.start_value()?;
         }
@@ -651,7 +658,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
                 None => return Err(Error::custom("array end without matching start")),
             }
         }
-        self.frames.pop();
+        self.frames
+            .pop()
+            .ok_or_else(|| Error::custom("array end without matching start"))?;
         self.depth -= 1;
         if self.pretty {
             self.buf.push(b'\n');

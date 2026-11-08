@@ -22,6 +22,9 @@ type IndexMap = BTreeMap<String, usize>;
 const INDEX_THRESHOLD: usize = 16;
 
 /// Insertion-ordered JSON object.
+///
+/// Equality compares ordered entries using [`Value`]'s partial equality.
+/// A map can contain NaN, so it cannot implement reflexive [`Eq`].
 #[derive(Clone, Debug, Default)]
 pub struct Map {
     entries: Vec<(String, Value)>,
@@ -34,7 +37,6 @@ impl PartialEq for Map {
         self.entries == other.entries
     }
 }
-impl Eq for Map {}
 
 impl Map {
     /// Create an empty map.
@@ -162,8 +164,10 @@ impl Map {
     where
         F: FnMut(&str, &mut Value) -> bool,
     {
-        self.entries.retain_mut(|(k, v)| f(k, v));
+        // Invalidate before invoking user code: retain_mut may compact entries
+        // before a predicate panics. Linear lookup remains valid during unwind.
         self.index = None;
+        self.entries.retain_mut(|(k, v)| f(k, v));
         self.build_index();
     }
 }

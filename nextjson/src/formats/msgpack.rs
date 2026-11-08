@@ -372,6 +372,7 @@ struct CFrame {
 pub struct MsgPackDecoder<'de> {
     cur: Cursor<'de>,
     lookahead: Option<Token<'de>>,
+    lookahead_mark: Mark,
     pending: Option<CFrame>,
     frames: Vec<CFrame>,
     depth: u32,
@@ -384,6 +385,7 @@ impl<'de> MsgPackDecoder<'de> {
         MsgPackDecoder {
             cur: Cursor::new(input),
             lookahead: None,
+            lookahead_mark: Mark::new(0, 0),
             pending: None,
             frames: Vec::new(),
             depth: 0,
@@ -778,6 +780,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
+            self.lookahead_mark = self.save();
             self.lookahead = Some(self.read_token()?);
         }
         self.lookahead
@@ -793,10 +796,14 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
+        if self.lookahead.is_some() {
+            return self.lookahead_mark;
+        }
         Mark {
             pos: self.cur.pos(),
             depth: self.depth,
             frame_len: self.frames.len(),
+            tag: None,
         }
     }
 

@@ -8,7 +8,7 @@
 use nextjson::StreamDecoder;   // std feature
 use nextjson::NsonDeserialize;
 
-let mut dec = StreamDecoder::new(reader);
+let mut dec = StreamDecoder::new(reader).with_input_limit(1024 * 1024);
 let value: MyType = dec.nextdecode()?;   // 增量拉取
 let rest = dec.end()?;                   // 消费完整输入后收尾
 ```
@@ -67,6 +67,11 @@ pub fn from_reader<R: std::io::Read, T: NsonDeserialize<'de>>(reader: R) -> Resu
 
 `from_reader` 即 `StreamDecoder::new(reader)` + `nextdecode` + `end` 的封装，且
 `end()` 校验整个输入已消费（尾部有垃圾就报错）。
+
+`from_reader_with_limit(reader, max_bytes)` 进一步限制输入字节总量，包含首尾空白。
+达到限额后最多再读一个字节判断是否真正到达 EOF，额外字节不保留；超限返回错误，
+不会把截断前缀当作完整文档。回溯不能重置配额。结果对象的分配与 I/O 超时仍由应用控制。
+跨分块空白和尾逗号由同一套词法检查处理，`Interrupted` 读取会重试。
 
 ## 相关页面
 

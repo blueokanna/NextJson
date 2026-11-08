@@ -13,7 +13,7 @@
 | **Token** | 词法层与重放层共享的最小单位：`Null/Bool/Number/Str/BeginObject/EndObject/BeginArray/EndArray` | [[Unified Token Stream]] |
 | **Bytes 源 / Tree 源** | `Decoder` 的两种输入：惰性单 token 词法（可借用） / 内容重放（owned） | [[Unified Token Stream]] |
 | **CheckedEncoder** | 在事件到达具体格式前校验事件协议（数组分隔符/键值顺序）的包装器 | [[Architecture]] |
-| **FastEncoder** | `Encoder<W, false>`：顶层入口使用的免校验编码器，信任派生代码的调用序列，编码约 2x | [[Performance]] / [[Design-Decisions]] |
+| **FastEncoder** | `Encoder<W, false>`：显式选择的免校验编码器；默认入口使用校验型 `Encoder` | [[Performance]] / [[Design-Decisions]] |
 | **EventSink** | `cross_format` 的格式中立事件协议，用于 JSON↔CBOR 流式互转、不建 `Value` 树 | [[Cross-Format Relay]] |
 | **CollectEncoder / TreeDecoder** | `formats/tree.rs` 共享中继层：收集事件到 `Value` 树 / 重放树为解码原语（服务 toml/yaml 等文档式格式） | [[Multi-Format Engine]] |
 | **宽度方法** | `write_i8..i32`/`write_u8..u32` 等；默认加宽到 64 位，二进制格式覆写为原生宽度 | [[Core Contracts]] |

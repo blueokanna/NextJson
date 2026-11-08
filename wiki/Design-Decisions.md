@@ -143,15 +143,15 @@
 - **后果**：Wiki 与 README 的所有对比表述均为此纪律（见
   [[Comparison with serde]]）。
 
-## ADR-18：`FastEncoder` 信任策略（校验 vs 免校验）
+## ADR-18：默认校验，显式选择 `FastEncoder`
 
-- **背景**：同进程 A/B 证明 `Encoder` 的每值协议校验 = **2.0x 编码开销**
-  （校验型 440 MB/s vs 免校验发射器 877 MB/s）——这是编码差距的真正大头。
-- **选择**：`Encoder<W, const VALIDATE: bool = true>` 泛型化；顶层
-  `nextencode`/`to_vec`/`to_string`/writer 入口走 `FastEncoder = Encoder<W, false>`
-  （信任派生代码，serde 同款信任模型）；校验型保持为公开默认。
-- **后果**：编码约 2x；`const` 折叠裁掉校验分支；key/separator 快路径仍取
-  first 标志（输出正确性必需）。
+- **背景**：免校验入口曾把空事件流、多根值和未闭合容器作为成功结果返回。
+  外层 derive 无法保证嵌套的手写实现遵守协议。
+- **选择**：保留 `Encoder<W, const VALIDATE: bool = true>`；顶层
+  `nextencode`/`to_vec`/`to_string`/writer 默认启用校验，CBOR 入口同样校验。
+  `FastEncoder = Encoder<W, false>` 仅供调用方显式选择。
+- **后果**：默认入口支付结构校验成本，并拒绝无效事件序列。历史免校验吞吐不能
+  作为当前默认入口的性能指标；基准单独列出两条路径。
 - **踩坑**：裸 `Encoder::new(...)` 调用处必须显式标注
   `Encoder::<_, true>::new(...)`（const 泛型无法从用法推断）。
 

@@ -48,6 +48,7 @@ pub struct HjsonDecoder<'de> {
     input: &'de [u8],
     pos: usize,
     lookahead: Option<Token<'de>>,
+    lookahead_mark: Mark,
     scratch: String,
     depth: u32,
     max_depth: u32,
@@ -60,6 +61,7 @@ impl<'de> HjsonDecoder<'de> {
             input,
             pos: 0,
             lookahead: None,
+            lookahead_mark: Mark::new(0, 0),
             scratch: String::new(),
             depth: 0,
             max_depth: 128,
@@ -183,8 +185,6 @@ impl<'de> HjsonDecoder<'de> {
                             self.pos += 1;
                             let hi = self.read_hex(4)?;
                             if (0xD800..=0xDBFF).contains(&hi) {
-                                // High surrogate: must be followed by `\uXXXX`
-                                // low surrogate to form one scalar.
                                 if self.input.get(self.pos) == Some(&b'\\')
                                     && self.input.get(self.pos + 1) == Some(&b'u')
                                 {
@@ -257,8 +257,6 @@ impl<'de> HjsonDecoder<'de> {
                 break;
             }
             if b == b'#' {
-                // Trailing `#` comment: `skip_ws` (called by the caller after
-                // this value) consumes it up to the line end.
                 break;
             }
             let len = utf8_len(b).ok_or_else(|| Error::custom("hjson: invalid utf-8"))?;
@@ -506,6 +504,9 @@ impl<'de> FormatDecoder<'de> for HjsonDecoder<'de> {
                 }
                 self.end_array()
             }
+            token @ (Token::EndArray | Token::EndObject) => {
+                Err(Error::invalid_type("a value", token_name(&token)))
+            }
             _ => {
                 self.next_token()?;
                 Ok(())
@@ -515,6 +516,7 @@ impl<'de> FormatDecoder<'de> for HjsonDecoder<'de> {
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
+            self.lookahead_mark = self.save();
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("set").clone())
@@ -528,10 +530,14 @@ impl<'de> FormatDecoder<'de> for HjsonDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
+        if self.lookahead.is_some() {
+            return self.lookahead_mark;
+        }
         Mark {
             pos: self.pos,
             depth: self.depth,
             frame_len: 0,
+            tag: None,
         }
     }
 

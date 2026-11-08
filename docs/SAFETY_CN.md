@@ -1,100 +1,68 @@
 # 安全模型
 
-## 中文
+NextJson 默认构建禁止 unsafe Rust。可选的 `simd` 特性仅在 `src/scan.rs` 中
+允许 intrinsic；向量读取前检查长度，AVX2 通过运行时检测后才启用。这些是可检查的
+实现约束，不是“零漏洞”或“无需生产验证”的承诺。
 
-NextJson 在库根启用 `#![deny(unsafe_code)]`。这是可由编译器执行的代码属性，不是
-“任何输入都绝不耗尽内存或 CPU”的虚假承诺。
+## 解码
 
-### 初始化与析构
+`DecodeSlot<T>` 与派生字段槽使用正常初始化的 Rust 值。实现未写入槽位却返回成功
+会被判定为错误；部分解码的值按 Rust 所有权规则析构，不向自定义解码器暴露裸的
+未初始化存储。
 
-`NsonDeserialize::nextdecode_into` 接收安全的 `DecodeSlot<T>`。实现必须先调用
-`DecodeSlot::write` 才能成功返回；`nextdecode` 会检查槽位状态。派生结构体的字段由
-基于 `Option<T>` 的 RAII 槽位管理，错误、缺失字段和重复字段路径均使用正常 Rust
-析构语义。
+JSON 检查 UTF-8、转义、代理项配对、数字语法、容器结构和文档结束位置。忽略字段
+也必须通过语法检查。整数解析使用检查运算，覆盖 `i128` 与 `u128`。JSON 与 CBOR
+的 JSON 兼容配置拒绝非有限浮点；其它格式的数据模型不同：JSON5 接受非有限字面量，
+MessagePack 可以携带非有限值，CSV 与 URL-form 的单元格可能保留为文本。跨格式
+转换前应核对格式矩阵，不能假定所有类型或线格式特性都能保留。
 
-### 输入保证
+解码器默认限制为 128 层嵌套。提高可配置的深度上限前，需要评估目标平台的栈空间。
+Schema 策略由验证 API 在解码后的值上执行，不会自动限制解析期间的分配。
 
-- JSON 字符串验证 UTF-8、转义和 surrogate pair；
-- CBOR 文本验证 UTF-8，map key 必须是文本；
-- JSON 和 CBOR 都拒绝尾随根值或垃圾字节；
-- 整数解析使用检查运算并覆盖 `i128/u128`；
-- CBOR tag 2/3 超过 128 位会报错；
-- 非有限 JSON/CBOR 浮点会报错；
-- 文本解码器（YAML、TOML、RON、Hjson、S 表达式、CSV、urlform）拒绝非有限浮点，
-  包括 `1e999` 这类会被 `str::parse::<f64>()` 接受为无穷的溢出拼写；
-- MessagePack 是唯一的有意例外：其线格式可无损表示 NaN/无穷，非有限浮点在线上
-  透传（符合格式自身语义），仅在中继到无法表示它们的格式时报错；类型化 `f64`
-  解码拒绝它们；
-- 解码器默认拒绝超过 128 层的嵌套。
+预读属于解析位置的一部分。JSON 与流式 JSON 保存待消费 token 的起点；原生文本
+和二进制格式同时保留所需容器信息，BSON 还保存已经读取的字段类型标签。回归测试
+覆盖可选 untagged 枚举，以及某个候选失败后的重试。
 
-### 多格式保证
+## 编码
 
-`nextjson::formats` 中每种格式都服务同一个检查式事件契约。各格式专属保证：
+公开 JSON 入口默认使用校验型 `Encoder`；CBOR 与其它格式入口使用事件校验包装。
+多个根值、缺少值、容器不匹配和未完成的事件流返回错误。JSON 编码器与校验包装
+在进入第 129 层容器之前拒绝继续递归。
 
-- 带长度前缀的二进制格式（MessagePack、BSON、bencode、pickle）拒绝截断的头部，
-  并校验已消费字节数是否与声明长度一致；
-- BSON 校验元素类型字节和以 NUL 结尾的字段名，声明长度与消费输入不一致即报错；
-- Pickle 执行有界栈机子集：`MARK` 帧、栈深度和长整数（`LONG1`/`LONG4`）大小
-  全部做边界检查，未知操作码报错；
-- Postcard 非自描述；无模式窥视会被拒绝，因为线上无法在无目标类型时分类下一
-  token；
-- Bencode、TOML、BSON 拒绝其线格式无法表示的值（TOML/BSON 的裸标量根；
-  bencode 的 null/float）；Bencode 的 bool 明确映射为规范整数 `1/0`；
-- YAML、TOML、JSON5、Hjson 文本解析器验证 UTF-8，并拒绝未闭合的字符串、引号
-  和块结构；
-- URL 表单解码校验百分号编码（`%XX`），非法转义报错。
+`FastEncoder` 保留为显式选项，省略逐值协议检查。使用它需要验证所有嵌套实现和
+自定义钩子，只有外层类型使用 derive 并不足够。历史免校验基准不代表当前默认 API。
 
-任何格式都不做静默有损回退：线格式无法保真的值在 `encode` 或 `decode` 侧一律
-显式报错。
+编码或写入失败后，应丢弃编码器及部分输出。外部写入不是事务，已经发出的字节无法
+回滚。容器深度限制也不约束用户 trait 实现内部任意的递归、循环或计算。
 
-### 跨格式保证
+## 流式读取与资源上限
 
-JSON 和 CBOR 通过 `EventSink` 逐事件转换，不构造文档树。结构状态机拒绝多个根值、
-容器不匹配、缺少 object value 和 object 外的 key。无法无损表示为 JSON 的 CBOR
-byte string、非文本 key、非有限浮点和未知 tag 会明确失败。`formats::transcode`
-先解码为 `Value` 再重新发射；源与目标数据模型兼容时遵循同样的“无有损回退”规则，
-不兼容的组合会返回错误。
+`from_reader` 增量读取，但为回溯保留已消费的字节，不是常量内存接口。输入长度
+没有外部约束时，使用 `from_reader_with_limit(reader, max_bytes)`，或配置
+`StreamDecoder::with_input_limit`。
 
-### 零拷贝边界
+配额包括空白。达到上限后最多额外读取一个字节，以区分真正的 EOF 和超限输入；
+额外字节不保留。超限返回 `input byte limit exceeded`，恢复解析位置也不能重置
+这一状态，因此不会把截断前缀当作完整文档。`Interrupted` 读取会重试，其它 I/O
+错误正常传播。
 
-未转义 JSON 字符串和定长 CBOR 文本直接借用输入范围。JSON 转义处理和 CBOR
-不定长文本拼接必须分配新字符串。任何输出编码都必须向目标写入新字节。
+输入字节配额不等于结果对象的堆内存、输出大小、CPU 时间、reader 内部缓冲或网络
+等待时间上限。应用仍需按实际协议配置这些限制。库中的所有内存分配失败也并非都能
+通过 `Result` 恢复。
 
-### 资源限制
+## 验证
 
-深度限制不等于总资源限制。库不统一限制输入总字节数、字符串长度、集合长度、输出
-长度或执行时间。处理不可信流量时，应用必须在传输层和业务层设置这些配额。
-`from_reader` 会缓冲完整 reader，必须由调用方提供有界 reader。
+```text
+cargo test --workspace --locked
+cargo test --workspace --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo check -p nextjson --no-default-features --locked
+cargo +1.78.0 test --workspace --all-features --locked
+cargo doc --workspace --all-features --no-deps --locked
+```
 
-### 可选的 `simd` 特性
-
-`simd` 是唯一引入 `unsafe` 的特性，其安全模型刻意收窄：
-
-- **隔离**：`unsafe` 代码只在 `nextjson/src/scan.rs` 一个模块中，且仅在 `cfg(feature = "simd")` 下编译。模块带有 `#![cfg_attr(feature = "simd", allow(unsafe_code))]`；未启用该特性时，crate 全库保持 `#![deny(unsafe_code)]`，模块完全安全（可移植 SWAR）。
-- **边界**：每个向量加载前都有显式长度检查（SSE2/NEON 为 `i + 16 <= len`，AVX2 为 `i + 32 <= len`），更短的尾部一律回退到标量参考扫描，不可能越界读。
-- **特性检测**：AVX2 路径只在 `std::is_x86_feature_detected!("avx2")`（基于 CPUID，仅 `std`）通过后进入；SSE2 与 NEON 分别是各自架构的基线，无需检测。不支持的平台直接使用可移植路径。
-- **正确性**：所有加速路径都与标量参考实现对拍：全部 256 个字节值、全部两字节组合、长度 `0..=80` 的头部/中部/尾部扫描、1 MiB 干净缓冲区，以及 2000 个确定性伪随机缓冲区在每个前缀长度上的对拍。aarch64 NEON 路径命中后用标量参考定位（构造上正确），并断言 SIMD 比较与标量参考从不分歧。
-- **诚实的边界**：`unsafe` 块是手写内建指令（intrinsic），不是对第三方 `unsafe` API 的包装。审查范围就是上述单个模块。
-
-### 与 serde 的安全对比
-
-本节如实比较安全相关属性，是**属性对比**，不是"谁绝对更安全"的断言——两者在
-Rust 规则下都内存安全，且都依赖应用层设置部署配额。
-
-| 属性 | serde / serde_json | nextjson |
-| --- | --- | --- |
-| `unsafe` 代码 | serde 内部使用 `unsafe`（反射、`RawValue`）；serde_json 浮点解析历史上使用过 `unsafe` | 默认构建 `#![deny(unsafe_code)]`，crate 内无任何 `unsafe`；可选 `simd` 特性仅在 `scan` 模块引入手写 intrinsic（见上文） |
-| 编译器强制的 unsafe 门禁 | 无（允许 unsafe） | `#![deny(unsafe_code)]` 让任何未来的 `unsafe` 直接编译失败（`simd` 特性开启时仅 `scan` 模块例外） |
-| 错误模型 | `serde_json::Error` 带 line/column；serde 的 `Error` 不透明 | `Error` 带 line/column/offset 与粗粒度 `classification()` |
-| 递归限制 | serde_json 有递归限制（128）；serde 核心依赖 serializer | 所有解码器默认上限 128 层 |
-| 数字溢出 | serde_json 返回溢出错误 | 检查式 `i128/u128` 解析，溢出报错 |
-| 非有限浮点（JSON） | serde_json 在无 feature 时把 `NaN`/`Infinity` 输出为 `null` | 显式报错（无静默有损回退） |
-| UTF-8 / surrogate 校验 | serde_json 校验 | 每条字符串路径都校验 |
-| 派生错误的部分析构安全 | serde visitor 模式把状态放在局部变量 | `InitSlot<T>` 用正常 `Option<T>` 析构语义；重复字段立即报错，已初始化值会正常析构 |
-| `no_std` | serde `no_std`；serde_json 仅 `std` | 核心 `no_std + alloc`；仅流式 IO 依赖 `std` |
-| 零依赖构建图 | serde 本身是依赖；生态格式 crate 更多 | 整个工作区只有两个本地 crate |
-| 格式严格性 | 各 serde 格式 crate 行为不一（如 serde_json `RawValue`、YAML 怪癖） | 每种格式都拒绝其线格式无法保真的值——无静默有损回退 |
-
-本表**不**断言：nextjson 的长期遗留 bug 比经过十年社区 fuzz 的生态更少，也不
-替代外部 fuzzing 或部署配额。`unsafe` 零使用与 `deny(unsafe_code)` 门禁是可
-验证的具体差异。
+`tests/production_regressions.rs` 覆盖读取分块、非法忽略字段、I/O 中断、输入配额、
+预读回溯、自定义序列化协议错误、深层编码，以及筛选函数 panic 后的 Map 一致性。
+其它测试还覆盖外部线格式样本、数值边界、部分初始化析构和 SIMD 与标量对照。
+通过测试只能证明已覆盖用例的行为，不等于独立安全审计；持续模糊测试和实际部署的
+负载验证仍有必要。

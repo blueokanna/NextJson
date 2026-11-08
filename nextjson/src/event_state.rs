@@ -18,8 +18,12 @@
 //! value-concatenated encodings do not, so their arrays never wait for a
 //! separator before a value.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use alloc::vec::Vec;
+
+/// Match the default decoder depth so ordinary encode/decode round trips have
+/// the same nesting boundary and recursive serializers fail before exhaustion.
+pub(crate) const MAX_ENCODE_DEPTH: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Position {
@@ -110,6 +114,9 @@ impl EventState {
     /// Validate that a container may open now, then push its frame.
     /// Returns the position the container belongs to.
     pub(crate) fn begin(&mut self, kind: Kind) -> Result<Position> {
+        if self.frames.len() >= MAX_ENCODE_DEPTH {
+            return Err(Error::new(ErrorKind::RecursionLimitExceeded, None, None, 0));
+        }
         let position = self.value()?;
         self.frames.push(match kind {
             Kind::Array => Frame::Array { ready: false },

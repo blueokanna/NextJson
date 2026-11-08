@@ -1,152 +1,85 @@
-# Safety Model
+# Safety model
 
-NextJson enables `#![deny(unsafe_code)]` at the crate root. This is a
-compiler-enforced code property, not a claim that arbitrary input can never
-exhaust memory or CPU.
+NextJson's default build denies unsafe Rust. The optional `simd` feature permits
+intrinsics only in `src/scan.rs`; vector loads have length guards and AVX2 uses
+runtime detection. These are reviewable implementation properties, not a claim
+that the library has no bugs or needs no deployment testing.
 
-## Initialization and destruction
+## Decoding
 
-`NsonDeserialize::nextdecode_into` receives checked `DecodeSlot<T>` storage,
-not a public uninitialized-memory contract. An implementation must call
-`DecodeSlot::write` before it returns success; `nextdecode` checks this state.
-Derived field slots use normal `Option<T>` drop semantics on errors, missing
-fields, and duplicate-field replacement.
+`DecodeSlot<T>` and derived field slots use ordinary initialized Rust values.
+Returning success without writing a slot is an error. Partially decoded values
+are dropped through normal Rust ownership; no raw uninitialized storage is
+exposed to a custom deserializer.
 
-## Input guarantees
+JSON validates UTF-8, escapes, surrogate pairs, number syntax, container syntax,
+and the end of the document. Ignored fields still undergo syntax checks. Integer
+parsing uses checked arithmetic through `i128` and `u128`. JSON and the CBOR
+JSON-compatible profile reject non-finite floats. Other formats have distinct
+data models: JSON5 accepts non-finite literals, MessagePack can carry non-finite
+values, and CSV or URL-form cells can remain text. Consult the format matrix
+before assuming a conversion preserves types or supports every wire feature.
 
-- JSON strings validate UTF-8, escapes, and surrogate pairs.
-- CBOR text validates UTF-8, and map keys must be text.
-- JSON and CBOR reject trailing root values and trailing bytes.
-- Checked integer parsing covers the complete Rust `i128`/`u128` domain.
-- CBOR tag 2/tag 3 values wider than 128 bits are errors.
-- Non-finite JSON and CBOR floats are errors.
-- Text decoders (YAML, TOML, RON, Hjson, S-expression, CSV, urlform) reject
-  non-finite floats, including overflow spellings such as `1e999` that
-  `str::parse::<f64>()` would accept as infinity.
-- MessagePack is the one deliberate exception: its wire format can represent
-  NaN / infinity losslessly, so non-finite floats pass through on the wire
-  (matching the format's own semantics) and error only when relayed to a
-  format that cannot represent them. Typed `f64` decode rejects them.
-- Decoders reject nesting deeper than 128 levels by default.
+Decoders default to a 128-level nesting limit. Raising a configurable decoder
+limit requires evaluating stack use on the deployment target. Schema policies
+are enforced by the validation APIs on decoded values; they do not automatically
+limit allocations during parsing.
 
-## Multi-format guarantees
+Lookahead is part of a saved parser position. JSON and streaming JSON save the
+start of a pending token; native text and binary codecs also preserve required
+container metadata. BSON saves a field's already-consumed type tag. Regressions
+cover optional untagged variants and failed variant retries.
 
-Every format in `nextjson::formats` serves the same checked event contract.
-Format-specific guarantees:
+## Encoding
 
-- Length-prefixed binary formats (MessagePack, BSON, bencode, pickle) reject
-  truncated headers and buffers that do not consume the declared length.
-- BSON documents validate element type bytes and null-terminated field names,
-  and reject a document whose declared length differs from the consumed input.
-- Pickle executes a bounded stack-machine subset: `MARK` framing, stack depth,
-  and long-integer (`LONG1`/`LONG4`) sizes are bounds-checked; unknown opcodes
-  are errors.
-- Postcard is non-self-describing; schema-less peeking is rejected because the
-  wire cannot classify the next token without a target type.
-- Bencode, TOML, and BSON reject values their wire models cannot represent
-  (a bare scalar root for TOML/BSON; `null`/float for bencode). Bencode maps
-  booleans explicitly to canonical integers `1` and `0`.
-- The YAML, TOML, JSON5, and Hjson text parsers validate UTF-8 and reject
-  unterminated strings, quotes, and block constructs.
-- URL-form decoding validates percent-encoding (`%XX`) pairs; malformed
-  escapes are errors.
+Public JSON helpers use the validated `Encoder`. CBOR and other format
+helpers use the checked event wrapper. Invalid root counts, missing values,
+mismatched containers, and incomplete event streams return errors. The JSON
+encoder and checked wrapper reject container nesting beyond 128 levels before
+descending further into a recursive serializer.
 
-No format performs a silent lossy fallback: a value that a wire format cannot
-preserve is an explicit error on the `encode` or `decode` side.
+`FastEncoder` remains an explicit opt-in that omits per-value protocol checks.
+It requires verifying every nested serializer and custom hook. Deriving the
+outer type alone does not establish that condition. Historical unchecked
+benchmarks do not measure the validated default API.
 
-## Cross-format guarantees
+After an encoding or writer error, discard the encoder and any partial output.
+Writing to an external sink is not transactional: bytes already delivered cannot
+be rolled back. The nesting guard bounds container recursion, not arbitrary
+recursion or work performed inside user-provided trait implementations.
 
-JSON and CBOR relay events through `EventSink` without building a document
-tree. Structural state rejects multiple roots, mismatched containers, missing
-object values, and keys outside objects. CBOR byte strings, non-text keys,
-non-finite floats, and unknown tags fail instead of being converted lossily.
-`formats::transcode` decodes to a `Value` and re-emits; the same no-lossy-
-fallback rule applies to every source/destination pair.
+## Streaming and resource limits
 
-## Zero-copy boundary
+`from_reader` reads incrementally but retains consumed bytes for backtracking.
+It is not a constant-memory API. Use `from_reader_with_limit(reader, max_bytes)`
+or `StreamDecoder::with_input_limit` when input size is not already bounded.
 
-Unescaped JSON strings and definite CBOR text borrow their source range.
-Escapes and indefinite text require owned materialization. Output always writes
-new bytes.
+The limit includes whitespace. At the boundary the reader may consume one
+additional byte to distinguish EOF from oversized input; that byte is not
+retained. Exceeding the limit returns `input byte limit exceeded` and cannot be
+undone by restoring a parser mark. This avoids accepting a valid prefix from a
+truncated stream. Interrupted reads are retried; other I/O failures propagate.
 
-## Resource limits
-
-The nesting limit is not a total resource limit. The library does not impose a
-single global limit on input bytes, string length, collection length, output
-bytes, or execution time. Applications handling untrusted input must enforce
-those quotas at transport and application boundaries. `from_reader` buffers its
-complete reader and therefore requires a caller-provided bounded reader.
+An input byte quota does not bound decoded allocations, output size, CPU time,
+reader-internal buffering, or network wait time. Applications need limits for
+their actual protocol and payloads. Allocation failure is not universally
+recoverable through this library's `Result` type.
 
 ## Verification
 
 ```text
+cargo test --workspace --locked
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo check -p nextjson --no-default-features --locked
+cargo +1.78.0 test --workspace --all-features --locked
 cargo doc --workspace --all-features --no-deps --locked
-cargo tree --workspace --all-features --edges normal,build,dev
 ```
 
-The regression suite covers malformed input, depth limits, integer boundaries,
-partial-drop behavior, invalid custom decoders, writer failures, RFC 8949
-fixtures, 128-bit bignums, structural event errors, pointer-level borrowing,
-all registered format entry points, and explicit foreign-wire fixtures for the
-formats named in the README. These checks are evidence for the covered
-contracts, not a replacement for deployment-specific quotas or continuous
-fuzzing.
-
-## The opt-in `simd` feature
-
-`simd` is the only feature that introduces `unsafe` into the crate. Its safety
-model is deliberately narrow:
-
-- **Containment.** The `unsafe` code lives in exactly one module,
-  `nextjson/src/scan.rs`, and only under `cfg(feature = "simd")`. The module
-  carries `#![cfg_attr(feature = "simd", allow(unsafe_code))]`; without the
-  feature the crate keeps `#![deny(unsafe_code)]` crate-wide and the module is
-  fully safe (portable SWAR only).
-- **Bounds.** Every vector load is guarded by an explicit length check
-  (`i + 16 <= len` for SSE2/NEON, `i + 32 <= len` for AVX2) before the load;
-  shorter tails always fall back to the scalar reference scan. An
-  out-of-bounds read is not possible.
-- **Feature detection.** The AVX2 path is only entered after
-  `std::is_x86_feature_detected!("avx2")` (a CPUID-backed check, `std` only).
-  SSE2 and NEON are baseline on their respective architectures and need no
-  detection. Unsupported targets simply use the portable path.
-- **Correctness.** Every accelerated path is tested against a scalar reference
-  implementation over all 256 byte values, all two-byte pairs, all lengths
-  `0..=80` with every interesting byte at head/middle/tail, 1 MiB clean
-  buffers, and 2000 deterministic pseudo-random buffers across every prefix
-  length. The aarch64 NEON path resolves hit positions with the scalar
-  reference (correct by construction) and asserts that the SIMD compare never
-  disagrees with it.
-- **Honest boundary.** The `unsafe` blocks are hand-written intrinsics, not
-  `unsafe`-wrapped safe APIs from a third party. Review scope is the single
-  module above.
-
-## Safety comparison with serde
-
-This section compares safety-relevant properties honestly. It is a *property*
-comparison, not a claim that one library is universally safer — both are memory
-safe under Rust's rules, and both rely on applications enforcing deployment
-quotas.
-
-| Property | serde / serde_json | nextjson |
-| --- | --- | --- |
-| `unsafe` code | serde uses internal `unsafe` (reflection, `RawValue`); serde_json float parsing historically used `unsafe` | default build is `#![deny(unsafe_code)]` with no `unsafe` in the crate; the opt-in `simd` feature confines hand-written intrinsics to the `scan` module (see above) |
-| Compiler-enforced unsafe gate | none (unsafe is allowed) | `#![deny(unsafe_code)]` makes any future `unsafe` a compile error (with `simd` enabled, only the `scan` module is exempt) |
-| Error model | `serde_json::Error` carries line/column; serde `Error` is opaque | `Error` carries line/column/offset and a coarse `classification()` |
-| Recursion limits | serde_json has a recursion limit (128); serde core relies on serializer | all decoders cap nesting at 128 by default |
-| Number overflow | serde_json returns overflow errors | checked `i128`/`u128` parsing with overflow errors |
-| Non-finite floats (JSON) | serde_json emits `null` for `NaN`/`Infinity` unless feature flags | explicit error (no silent lossy fallback) |
-| UTF-8 / surrogate validation | serde_json validates | validated in every string path |
-| Partial-drop safety on derive errors | serde visitor pattern keeps state in locals | `InitSlot<T>` uses normal `Option<T>` drop semantics; duplicate fields are rejected and already initialized values are dropped |
-| `no_std` | serde `no_std`; serde_json is `std`-only | core is `no_std + alloc`; only streaming IO is `std` |
-| Zero-dependency build graph | serde is one dependency; ecosystem formats add many | the whole workspace has only the two local crates |
-| Format-specific strictness | serde format crates vary (e.g., serde_json `RawValue`, YAML quirks) | every format rejects values its wire model cannot preserve — no silent lossy fallback |
-
-What this table does *not* claim: it does not assert nextjson has fewer
-long-tail bugs than a decade-old, community-fuzzed ecosystem, and it does not
-replace external fuzzing or deployment quotas. The `unsafe`-free property (in
-default builds) and the `deny(unsafe_code)` gate are the concrete, verifiable
-differences.
+`tests/production_regressions.rs` exercises chunk boundaries, malformed ignored
+values, interrupted I/O, input quotas, lookahead/backtracking, invalid custom
+serializers, deep encoding, and map consistency after a predicate panic. The
+rest of the suite includes wire fixtures, numeric boundaries, partial drops,
+and scalar-versus-SIMD comparisons. Passing these checks is evidence for the
+tested cases; it is not an independent security audit or a substitute for
+continuous fuzzing and deployment-specific load testing.

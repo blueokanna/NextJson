@@ -36,6 +36,8 @@ pub(crate) enum ErrorKind {
     InvalidSurrogate,
     InvalidUtf8,
     RecursionLimitExceeded,
+    #[cfg(feature = "std")]
+    InputLimitExceeded,
     UnknownField(String),
     DuplicateField(&'static str),
     MissingField(&'static str),
@@ -140,6 +142,8 @@ impl Error {
             ErrorKind::InvalidSurrogate => "invalid surrogate pair",
             ErrorKind::InvalidUtf8 => "invalid utf-8",
             ErrorKind::RecursionLimitExceeded => "recursion limit exceeded",
+            #[cfg(feature = "std")]
+            ErrorKind::InputLimitExceeded => "input byte limit exceeded",
             ErrorKind::UnknownField(_) => "unknown field",
             ErrorKind::DuplicateField(_) => "duplicate field",
             ErrorKind::MissingField(_) => "missing field",
@@ -178,6 +182,8 @@ impl fmt::Display for Error {
             }
             ErrorKind::InvalidUtf8 => write!(f, "invalid utf-8 sequence in string"),
             ErrorKind::RecursionLimitExceeded => write!(f, "recursion limit exceeded"),
+            #[cfg(feature = "std")]
+            ErrorKind::InputLimitExceeded => write!(f, "input byte limit exceeded"),
             ErrorKind::UnknownField(field) => write!(f, "unknown field `{field}`"),
             ErrorKind::DuplicateField(field) => write!(f, "duplicate field `{field}`"),
             ErrorKind::MissingField(field) => write!(f, "missing field `{field}`"),

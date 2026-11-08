@@ -169,6 +169,52 @@ fn main() {
         Json, Json5, Hjson, Yaml, Ron, Sexpr, Cbor, MsgPack, Pickle, Ubjson, Smile, Ndjson, Edn
     );
 
+    // Keep the optional unchecked policy visible as a separate measurement;
+    // it must never be reported as the throughput of the validated API.
+    let trusted_encode = || {
+        let mut encoder = nextjson::FastEncoder::new(Vec::new());
+        records.nextencode(&mut encoder).unwrap();
+        encoder.finish().unwrap()
+    };
+    let json = nextjson::nextencode(&records).unwrap();
+    assert_eq!(trusted_encode(), json);
+    let checked_encode = || {
+        let mut encoder = nextjson::Encoder::<Vec<u8>>::new(Vec::new());
+        records.nextencode(&mut encoder).unwrap();
+        encoder.finish().unwrap()
+    };
+    assert_eq!(checked_encode(), json);
+    benchmark_pair(
+        "json-checked-explicit",
+        duration,
+        &checked_encode,
+        &|bytes| {
+            black_box(nextjson::nextdecode::<Vec<Record>>(bytes).unwrap());
+        },
+    );
+    benchmark_pair(
+        "json-trusted-explicit",
+        duration,
+        &trusted_encode,
+        &|bytes| {
+            black_box(nextjson::nextdecode::<Vec<Record>>(bytes).unwrap());
+        },
+    );
+    assert_eq!(
+        nextjson::from_reader_with_limit::<_, Vec<Record>>(json.as_slice(), json.len()).unwrap(),
+        records
+    );
+    benchmark_pair(
+        "json-reader-limited",
+        duration,
+        &|| nextjson::nextencode(&records).unwrap(),
+        &|bytes| {
+            black_box(
+                nextjson::from_reader_with_limit::<_, Vec<Record>>(bytes, bytes.len()).unwrap(),
+            );
+        },
+    );
+
     // TOML / BSON: document-shaped, wrap the array in a table root.
     macro_rules! bench_doc {
         ($($mod:ident),* $(,)?) => {

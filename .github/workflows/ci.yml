@@ -114,6 +114,8 @@ jobs:
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal
       - name: Run all tests
         run: cargo +${{ matrix.rust }} test --workspace --all-features --locked
+      - name: Run default feature tests (portable scanning)
+        run: cargo +${{ matrix.rust }} test --workspace --locked
       - name: Run no_std library tests
         run: cargo +${{ matrix.rust }} test -p nextjson --no-default-features --lib --locked
       - name: Run no_std plus derive library tests

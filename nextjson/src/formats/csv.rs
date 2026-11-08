@@ -691,6 +691,7 @@ impl FormatDecoder<'_> for CsvDecoder {
             pos: self.row_index,
             depth: 0,
             frame_len: self.cell_index,
+            tag: None,
         }
     }
 
@@ -733,9 +734,6 @@ fn classify_cell(cell: &str) -> Token<'static> {
     if let Ok(v) = cell.parse::<u64>() {
         return Token::Number(Number::from(v));
     }
-    // Non-finite floats (`inf`, `1e999`) are outside the JSON data model;
-    // the lossy cell classifier leaves them as strings rather than
-    // fabricating a number that cannot round-trip.
     if let Some(v) = tree::parse_float(cell) {
         return Token::Number(Number::F64(v));
     }

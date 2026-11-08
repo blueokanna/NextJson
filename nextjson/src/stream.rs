@@ -45,9 +45,13 @@ pub struct StreamDecoder<R> {
     /// previously saved position, and there is no error channel in
     /// [`FormatDecoder::restore`].
     buf: Vec<u8>,
+    eof: bool,
+    input_limit: Option<usize>,
+    limit_exceeded: bool,
     /// Absolute read position into `buf`.
     pos: usize,
     lookahead: Option<Token<'static>>,
+    lookahead_start: usize,
     scratch: String,
     depth: u32,
     max_depth: u32,
@@ -68,8 +72,12 @@ impl<R> StreamDecoder<R> {
         StreamDecoder {
             reader,
             buf: Vec::new(),
+            eof: false,
+            input_limit: None,
+            limit_exceeded: false,
             pos: 0,
             lookahead: None,
+            lookahead_start: 0,
             scratch: String::new(),
             depth: 0,
             max_depth: config.max_depth,
@@ -80,6 +88,18 @@ impl<R> StreamDecoder<R> {
     /// The maximum nesting depth.
     pub fn max_depth(&self) -> u32 {
         self.max_depth
+    }
+
+    /// Limit the total input bytes retained by this decoder, including whitespace.
+    ///
+    /// At the limit, one additional byte is read to distinguish EOF from an
+    /// oversized input. That byte is not retained. Exceeding the limit returns
+    /// an error, including after backtracking; it never becomes a successful
+    /// parse of a truncated prefix. This bounds input storage, not the heap
+    /// size of the decoded value or the reader's own buffering.
+    pub fn with_input_limit(mut self, max_bytes: usize) -> Self {
+        self.input_limit = Some(max_bytes);
+        self
     }
 
     /// Consume the decoder and return the underlying reader.
@@ -126,19 +146,40 @@ impl<R> StreamDecoder<R> {
         self.depth += 1;
         Ok(())
     }
+
+    pub(crate) fn check_input_limit(&self) -> Result<()> {
+        if self.limit_exceeded || self.input_limit.is_some_and(|limit| self.buf.len() > limit) {
+            return Err(self.err_at(ErrorKind::InputLimitExceeded, self.buf.len()));
+        }
+        Ok(())
+    }
 }
 
 impl<R: std::io::Read> StreamDecoder<R> {
     /// Read more bytes until `buf.len() >= upto` or the reader hits EOF.
     fn fill(&mut self, upto: usize) -> Result<()> {
-        while self.buf.len() < upto {
+        self.check_input_limit()?;
+        while self.buf.len() < upto && !self.eof {
             let mut chunk = [0u8; CHUNK];
-            let n = self
-                .reader
-                .read(&mut chunk)
-                .map_err(|e| Error::custom(alloc::format!("io error: {e}")))?;
+            let remaining = self
+                .input_limit
+                .map_or(CHUNK, |limit| limit - self.buf.len());
+            let read_len = remaining.clamp(1, CHUNK);
+            let n = match self.reader.read(&mut chunk[..read_len]) {
+                Ok(n) => n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(Error::io(err)),
+            };
+            if n > read_len {
+                return Err(Error::custom("reader returned more bytes than requested"));
+            }
             if n == 0 {
+                self.eof = true;
                 break;
+            }
+            if remaining == 0 {
+                self.limit_exceeded = true;
+                return Err(self.err_at(ErrorKind::InputLimitExceeded, self.buf.len()));
             }
             self.buf.extend_from_slice(&chunk[..n]);
         }
@@ -163,14 +204,15 @@ impl<R: std::io::Read> StreamDecoder<R> {
 
     // -- token machinery ---------------------------------------------------
 
-    fn skip_ws(&mut self) -> usize {
+    fn skip_ws(&mut self) -> Result<usize> {
         loop {
-            let Some(&b) = self.buf.get(self.pos) else {
-                return self.pos;
-            };
-            match b {
-                b' ' | b'\t' | b'\n' | b'\r' => self.pos += 1,
-                _ => return self.pos,
+            self.fill(self.pos + 1)?;
+            if self.pos == self.buf.len() {
+                return Ok(self.pos);
+            }
+            self.pos = crate::scan::skip_whitespace(&self.buf, self.pos);
+            if self.pos < self.buf.len() {
+                return Ok(self.pos);
             }
         }
     }
@@ -184,13 +226,14 @@ impl<R: std::io::Read> StreamDecoder<R> {
 
     fn lex_peek(&mut self) -> Result<Token<'static>> {
         if self.lookahead.is_none() {
+            self.lookahead_start = self.pos;
             self.lookahead = Some(self.lex()?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
     }
 
     fn lex(&mut self) -> Result<Token<'static>> {
-        let pos = self.skip_ws();
+        let pos = self.skip_ws()?;
         self.pos = pos;
         let b = self.byte(pos)?;
         match b {
@@ -260,6 +303,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
 
     /// Read a JSON string; always produces an owned value.
     fn lex_string(&mut self) -> Result<Token<'static>> {
+        self.scratch.clear();
         let start = self.pos + 1;
         let mut i = start;
         loop {
@@ -425,7 +469,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
     }
 
     fn key_impl(&mut self) -> Result<Option<Cow<'static, str>>> {
-        let pos = self.skip_ws();
+        let pos = self.skip_ws()?;
         self.pos = pos;
         // Ensure the key byte (or `}`) is present before deciding; the
         // reader may not have delivered it yet.
@@ -448,7 +492,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
         }
         self.pos = pos;
         let key = self.lex_string()?;
-        let p2 = self.skip_ws();
+        let p2 = self.skip_ws()?;
         self.pos = p2;
         self.fill(p2 + 1)?;
         let Some(&c) = self.buf.get(p2) else {
@@ -471,7 +515,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
     }
 
     fn obj_sep_impl(&mut self) -> Result<bool> {
-        let pos = self.skip_ws();
+        let pos = self.skip_ws()?;
         self.pos = pos;
         self.fill(pos + 1)?;
         let Some(&b) = self.buf.get(pos) else {
@@ -480,7 +524,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
         match b {
             b',' => {
                 self.pos = pos + 1;
-                let next = self.skip_ws();
+                let next = self.skip_ws()?;
                 if self.buf.get(next) == Some(&b'}') {
                     return Err(self.err_at(
                         ErrorKind::Expected {
@@ -504,7 +548,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
     }
 
     fn arr_more_impl(&mut self) -> Result<bool> {
-        let pos = self.skip_ws();
+        let pos = self.skip_ws()?;
         self.pos = pos;
         self.fill(pos + 1)?;
         let Some(&b) = self.buf.get(pos) else {
@@ -514,7 +558,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
     }
 
     fn arr_sep_impl(&mut self) -> Result<bool> {
-        let pos = self.skip_ws();
+        let pos = self.skip_ws()?;
         self.pos = pos;
         self.fill(pos + 1)?;
         let Some(&b) = self.buf.get(pos) else {
@@ -523,7 +567,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
         match b {
             b',' => {
                 self.pos = pos + 1;
-                let next = self.skip_ws();
+                let next = self.skip_ws()?;
                 if self.buf.get(next) == Some(&b']') {
                     return Err(self.err_at(
                         ErrorKind::Expected {
@@ -547,7 +591,7 @@ impl<R: std::io::Read> StreamDecoder<R> {
     }
 
     fn end_impl(&mut self) -> Result<()> {
-        let pos = self.skip_ws();
+        let pos = self.skip_ws()?;
         self.pos = pos;
         if self.lookahead.is_none() && !self.has_more(pos)? {
             Ok(())
@@ -584,6 +628,9 @@ impl<R: std::io::Read> StreamDecoder<R> {
                     }
                 }
                 self.end_array_impl()?;
+            }
+            token @ (Token::EndArray | Token::EndObject) => {
+                return Err(self.invalid_type("a JSON value", &token));
             }
             _ => {
                 self.lex_next()?;
@@ -757,7 +804,12 @@ impl<'de, R: std::io::Read> FormatDecoder<'de> for StreamDecoder<R> {
     }
 
     fn save(&self) -> Mark {
-        Mark::new(self.pos, self.depth)
+        let pos = if self.lookahead.is_some() {
+            self.lookahead_start
+        } else {
+            self.pos
+        };
+        Mark::new(pos, self.depth)
     }
 
     fn restore(&mut self, mark: Mark) {

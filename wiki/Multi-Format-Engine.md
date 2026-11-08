@@ -91,8 +91,8 @@ formats::to_value(bytes, format)       // 解码为 Value
 - 收益：新增格式只需要实现 `FormatEncoder`/`FormatDecoder`，已有类型**零改动**。
 
 > 性能注记：库内是纯泛型单态化（零 `dyn`），所以"通用契约拖慢 JSON"的代价是
-> 每值协议检查，而不是动态派发。编码入口走免校验的 `FastEncoder` 后，这个代价
-> 已经大幅压缩（见 [[Performance]]）。
+> 包含每值协议检查，而不是动态派发。默认编码入口保留校验；显式选择
+> `FastEncoder` 的数据必须单独报告（见 [[Performance]]）。
 
 ## 格式注册表（16 种）
 

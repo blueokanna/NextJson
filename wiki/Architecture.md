@@ -45,15 +45,15 @@ flowchart LR
 
 假设你写 `nextjson::nextencode(&user)`，内部发生的事：
 
-1. `nextencode` 创建一个 **`FastEncoder<Vec<u8>>`**（`Encoder<W, false>`，见
-   [[Performance]]），你的 `User::nextencode(&user, &mut encoder)` 被调用；
+1. `nextencode` 创建一个 **`Encoder<Vec<u8>>`**，启用事件校验，然后调用
+   `User::nextencode(&user, &mut encoder)`；
 2. `User` 的派生代码按字段顺序发射事件：`begin_object` → `key("user_id")` →
    `write_u64(7)` → `key("name")` → `write_str("Ada")` → ... → `end_object`；
 3. 事件落到 **JSON 编码器**：`begin_object` 写 `{`，`key` 写 `"user_id":`，
    `write_str` 做字符串转义后写入……最终得到
    `{"user_id":7,"name":"Ada","tags":["compiler"]}`。
 
-如果你显式使用 **`CheckedEncoder`**（校验型包装，公开 API），事件会先经过它：
+多格式入口内部使用 **`CheckedEncoder`** 包装具体编码器，事件会先经过它：
 `CheckedEncoder` 不产出任何字节，只盯着事件顺序——数组元素之前必须有
 `separator`、对象值之前必须有 `key`。这是给"自定义/第三方编码器"上的保险：
 如果某个 `NsonSerialize` 实现把事件顺序搞错了，会在协议层立刻报错，而不是让
@@ -63,10 +63,8 @@ flowchart LR
 MessagePack 编码器，得到的就是二进制 msgpack。这就是"一套实现驱动 16 种格式"
 的落点（详见 [[Multi-Format Engine]]）。
 
-> 注意：`nextencode` 顶层入口走免校验的 `FastEncoder`（信任派生代码，serde 同款
-> 信任模型），因为派生代码的调用序列是编译期确定的，再校验一遍是白付 ~2x 编码
-> 开销；`CheckedEncoder` 留给手写 impl 与自定义编码器场景。两种策略的选择逻辑见
-> [[Design-Decisions]] 与 [[Performance]]。
+> 默认入口校验整个事件流。派生类型也可能包含手写实现或自定义字段钩子，不能仅凭
+> 外层使用 derive 就省略校验。`FastEncoder` 保留为显式选项，性能需单独测量。
 
 ## 解码：JSON 字节是怎么变回 `User` 的
 

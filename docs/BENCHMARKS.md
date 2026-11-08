@@ -1,5 +1,13 @@
 # Reproducible Benchmark
 
+Current public JSON and CBOR entry points validate serialization events.
+Historical measurements below that used unchecked entry points are retained
+as historical observations, not current performance claims. Re-run the harness
+for the current checkout. It reports `json` for the validated native path,
+`json-checked-explicit` and `json-trusted-explicit` with identical writer
+buffering for a policy comparison, and `json-reader-limited` for bounded input.
+The explicit writer rows include a buffer copy that the native vector path avoids.
+
 `nextjson/benches/format_comparison.rs` measures encode and decode throughput
 plus encoded size for every format that can represent the fixture, over the
 same 128-record fixture.
@@ -171,12 +179,12 @@ Four measurable causes account for the release gap:
    frame stack (for separators and pretty-printing) that must stay correct
    across 21 formats. Two changes closed most of the encode-side validation
    cost: integer writing now emits two digits per division through a static
-   table (`write_u64_into`, ~24% on the int-only fixture), and the top-level
-   entry points run a trusted `FastEncoder` that compiles out the per-value
+   table (`write_u64_into`, ~24% on the int-only fixture), and historical top-level
+   entry points ran a trusted `FastEncoder` that compiled out the per-value
    event-protocol checks (an in-process A/B measured the validated `Encoder`
    at ~440 MB/s vs the trusted emitter at ~877 MB/s on this fixture — the
-   checks were ~2x of encode). The validated `Encoder` remains the default
-   public type for unverified serializers.
+   checks were ~2x of encode). Current entry points use the validated `Encoder`;
+   the trusted variant must be selected explicitly.
 
 The remaining gap for this JSON-only fixture is ~1.9-2.1x on encode (~1.64x
 on the int-only fixture) and ~1.3x on decode. Read these numbers as a

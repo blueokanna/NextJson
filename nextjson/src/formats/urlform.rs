@@ -446,6 +446,7 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
             pos: self.pos,
             depth: 0,
             frame_len: 0,
+            tag: None,
         }
     }
 
@@ -456,10 +457,6 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
 
 impl<'de> UrlFormDecoder<'de> {
     fn take_value(&mut self) -> Result<String> {
-        // The value belongs to the current entry. `peek_token` may have
-        // cloned it into the lookahead (it never consumes `pending_value`);
-        // prefer the lookahead, then the pending value, and never read a
-        // further pair here.
         if let Some(Token::Str(s)) = self.lookahead.take() {
             return Ok(s.into_owned());
         }

@@ -940,6 +940,7 @@ impl<'de> FormatDecoder<'de> for SmileDecoder<'de> {
             pos: self.pos,
             depth: self.depth,
             frame_len: self.shared_keys.len(),
+            tag: None,
         }
     }
 

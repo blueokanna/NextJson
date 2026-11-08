@@ -31,7 +31,7 @@ use crate::error::{Error, Result};
 use crate::formats::bin::{patch_prefix, Cursor, MAX_CONTAINER_PREALLOC};
 use crate::formats::Format;
 use crate::number::Number;
-use crate::ser::{FormatEncoder, NsonSerialize};
+use crate::ser::{CheckedEncoder, FormatEncoder, NsonSerialize};
 use crate::write::Write;
 
 /// CBOR format marker.
@@ -46,11 +46,9 @@ impl Format for Cbor {
 
     fn encode<T: NsonSerialize + ?Sized>(self, value: &T) -> Result<Vec<u8>> {
         let mut encoder = CborEncoder::new(Vec::new());
-        // Trust model matches the top-level JSON `FastEncoder`: derive code
-        // emits a well-formed event stream, and the encoder still counts
-        // container entries (required for definite-length headers), so
-        // unbalanced containers are rejected rather than producing garbage.
-        T::nextencode(value, &mut encoder)?;
+        let mut checked = CheckedEncoder::new(&mut encoder);
+        T::nextencode(value, &mut checked)?;
+        checked.finish()?;
         Ok(encoder.finish_vec())
     }
 
@@ -385,6 +383,7 @@ struct DFrame {
 pub struct CborDecoder<'de> {
     cur: Cursor<'de>,
     lookahead: Option<Token<'de>>,
+    lookahead_mark: Mark,
     pending: Option<DFrame>,
     frames: Vec<DFrame>,
     depth: u32,
@@ -397,6 +396,7 @@ impl<'de> CborDecoder<'de> {
         CborDecoder {
             cur: Cursor::new(input),
             lookahead: None,
+            lookahead_mark: Mark::new(0, 0),
             pending: None,
             frames: Vec::new(),
             depth: 0,
@@ -919,6 +919,7 @@ impl<'de> FormatDecoder<'de> for CborDecoder<'de> {
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
+            self.lookahead_mark = self.save();
             self.lookahead = Some(self.read_token()?);
         }
         self.lookahead
@@ -934,10 +935,14 @@ impl<'de> FormatDecoder<'de> for CborDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
+        if self.lookahead.is_some() {
+            return self.lookahead_mark;
+        }
         Mark {
             pos: self.cur.pos(),
             depth: self.depth,
             frame_len: self.frames.len(),
+            tag: None,
         }
     }
 

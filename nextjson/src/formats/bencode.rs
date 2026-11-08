@@ -321,6 +321,7 @@ struct CFrame {
 pub struct BencodeDecoder<'de> {
     cur: Cursor<'de>,
     lookahead: Option<Token<'de>>,
+    lookahead_mark: Mark,
     frames: Vec<CFrame>,
     depth: u32,
     max_depth: u32,
@@ -332,6 +333,7 @@ impl<'de> BencodeDecoder<'de> {
         BencodeDecoder {
             cur: Cursor::new(input),
             lookahead: None,
+            lookahead_mark: Mark::new(0, 0),
             frames: Vec::new(),
             depth: 0,
             max_depth: 128,
@@ -654,6 +656,9 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
                 }
                 self.end_array()
             }
+            token @ (Token::EndArray | Token::EndObject) => {
+                Err(Error::invalid_type("a value", token_name(&token)))
+            }
             _ => {
                 self.next_token()?;
                 Ok(())
@@ -663,6 +668,7 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
         if self.lookahead.is_none() {
+            self.lookahead_mark = self.save();
             self.lookahead = Some(self.read_token()?);
         }
         Ok(self.lookahead.as_ref().expect("just set").clone())
@@ -676,10 +682,14 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
+        if self.lookahead.is_some() {
+            return self.lookahead_mark;
+        }
         Mark {
             pos: self.cur.pos(),
             depth: self.depth,
             frame_len: self.frames.len(),
+            tag: None,
         }
     }
 
@@ -691,9 +701,6 @@ impl<'de> FormatDecoder<'de> for BencodeDecoder<'de> {
     }
 
     fn bytes(&mut self) -> Result<Cow<'de, [u8]>, Self::Error> {
-        // bencode byte strings are length-prefixed raw bytes (`len:bytes`),
-        // with no UTF-8 requirement. Reuse the string length parser, then
-        // take the raw slice without validating UTF-8.
         let mut len: usize = 0;
         let mut digits = 0usize;
         let mut leading_zero = false;

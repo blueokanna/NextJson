@@ -112,13 +112,17 @@
 //!
 //! ## Safety and resource limits
 //!
-//! This crate denies unsafe Rust. Decode slots use checked state, numeric
+//! Default builds deny unsafe Rust; `simd` permits intrinsics in `scan` only.
+//! Decode slots use checked state, numeric
 //! conversions use checked arithmetic, and decoders cap nesting at 128 by
 //! default.
 //! Applications must still enforce total input bytes, collection sizes, CPU
 //! time, and output quotas. `from_slice` / `from_str` operate on a complete
 //! in-memory input; `from_reader` (std) pulls incrementally from any
 //! `std::io::Read` source.
+//! [`from_reader_with_limit`] additionally bounds total input bytes. Streamed
+//! input is retained for backtracking, so an unbounded reader needs an explicit
+//! quota. Public JSON and format encoding helpers cap container depth at 128.
 //!
 //! See the repository's [English README], [Chinese README], [safety model], and
 //! [benchmark protocol] for the complete supported surface and reproducibility
@@ -208,14 +212,11 @@ use alloc::vec::Vec;
 /// This is the canonical native encoding entry point. Unescaped string data is
 /// copied directly into the output buffer without an intermediate JSON value.
 ///
-/// The top-level entry points use the trusted [`FastEncoder`] variant: the
-/// caller's `NsonSerialize` implementation (typically derived) is trusted to
-/// follow the event protocol, skipping per-value validation for throughput.
-/// Hand-written implementations that emit events out of order produce
-/// malformed JSON instead of an error; use the validated [`Encoder`] directly
-/// when that guarantee matters.
+/// The top-level entry points validate the serialization event protocol,
+/// including hand-written implementations nested inside derived types.
+/// Invalid event order or an incomplete document returns an error.
 pub fn nextencode<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut encoder = FastEncoder::for_vec(EncodeConfig::compact());
+    let mut encoder = Encoder::<Vec<u8>>::for_vec(EncodeConfig::compact());
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish_vec()
 }
@@ -239,7 +240,7 @@ pub fn to_string_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<String> 
 
 /// Serialize a value into a pretty-printed JSON byte vector.
 pub fn to_vec_pretty<T: NsonSerialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
-    let mut encoder = FastEncoder::for_vec(EncodeConfig::pretty());
+    let mut encoder = Encoder::<Vec<u8>>::for_vec(EncodeConfig::pretty());
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish_vec()
 }
@@ -250,7 +251,7 @@ where
     W: Write,
     T: NsonSerialize + ?Sized,
 {
-    let mut encoder = FastEncoder::new(writer);
+    let mut encoder = Encoder::<W>::new(writer);
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
@@ -262,7 +263,7 @@ where
     W: Write,
     T: NsonSerialize + ?Sized,
 {
-    let mut encoder = FastEncoder::with_config(writer, EncodeConfig::pretty());
+    let mut encoder = Encoder::<W>::with_config(writer, EncodeConfig::pretty());
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
@@ -275,7 +276,7 @@ where
     W: std::io::Write,
     T: NsonSerialize + ?Sized,
 {
-    let mut encoder = FastEncoder::new(crate::write::StdWriter(writer));
+    let mut encoder = Encoder::<_>::new(crate::write::StdWriter(writer));
     NsonSerialize::nextencode(value, &mut encoder)?;
     encoder.finish()?;
     Ok(())
@@ -320,6 +321,28 @@ where
 {
     let mut decoder = StreamDecoder::new(reader);
     let value = T::nextdecode(&mut decoder)?;
+    decoder.end()?;
+    Ok(value)
+}
+
+/// Deserialize one complete JSON value with an explicit input byte limit.
+///
+/// The limit includes leading and trailing whitespace. An oversized input is
+/// rejected rather than silently truncated. The decoder may consume one byte
+/// beyond the limit to check for EOF; see [`StreamDecoder::with_input_limit`].
+/// Applications must separately bound decoded allocations and I/O timeouts.
+#[cfg(feature = "std")]
+pub fn from_reader_with_limit<R, T>(reader: R, max_bytes: usize) -> Result<T>
+where
+    R: std::io::Read,
+    T: for<'de> NsonDeserialize<'de>,
+{
+    let mut decoder = StreamDecoder::new(reader).with_input_limit(max_bytes);
+    let value = T::nextdecode(&mut decoder);
+    // Untagged variants can replace a reader error with a generic mismatch.
+    // Preserve the resource-limit diagnosis at this public boundary.
+    decoder.check_input_limit()?;
+    let value = value?;
     decoder.end()?;
     Ok(value)
 }

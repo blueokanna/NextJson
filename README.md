@@ -100,10 +100,16 @@ available as focused helpers.
 The design is **data-model-first** (not AST-first): typed decode streams
 directly into your fields with zero intermediate tree, and `Value` is an
 opt-in consumer of the same decoder. Two encoder policies are exposed:
-`Encoder` validates the event protocol on every call, while `FastEncoder`
-(the `nextencode` / `to_vec` / `to_string` / writer entry points) trusts the
-derive-verified call sequence and skips per-value checks for ~2x encoding
-throughput.
+`Encoder` validates the event protocol on every call and is used by
+`nextencode`, `to_vec`, `to_string`, and the writer helpers. `FastEncoder`
+is an explicit opt-in for implementations whose entire event sequence has
+been verified, including custom serializers on nested fields. Measure that
+tradeoff on your workload; historical unchecked benchmarks do not describe
+the validated defaults.
+
+For untrusted readers, `from_reader_with_limit(reader, max_bytes)` enforces
+an input byte quota, including whitespace. The stream decoder retains input
+for backtracking; this quota does not bound decoded allocations or I/O time.
 
 ```rust
 use nextjson::{NsonDeserialize, NsonSerialize};
