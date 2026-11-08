@@ -73,6 +73,8 @@
 //! NextJson uses schema-driven derives, a unified token stream, checked decode
 //! slots, and a format-neutral [`cross_format::EventSink`] protocol. The whole
 //! workspace build graph contains only its two local crates.
+//! Decimal conversion uses independently implemented integer intervals and
+//! byte formatting, with Rust core handling subnormals and ambiguous bounds.
 //!
 //! The following properties are implemented directly in this repository and
 //! are enforced by its tests and build configuration:
@@ -166,6 +168,7 @@ pub mod de;
 pub mod encoding;
 pub mod error;
 mod event_state;
+mod float;
 pub mod formats;
 mod json_schema;
 mod lex;

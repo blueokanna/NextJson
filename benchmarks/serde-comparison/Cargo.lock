@@ -406,6 +406,7 @@ dependencies = [
  "postcard",
  "rmp-serde",
  "ron",
+ "ryu",
  "serde",
  "serde-smile",
  "serde_json",

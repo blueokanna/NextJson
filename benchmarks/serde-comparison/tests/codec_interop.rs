@@ -2,6 +2,33 @@
 use nextjson::formats::{Format, MsgPack, Ron};
 
 #[test]
+fn shared_float_notation_is_accepted_by_yaml_and_toml() {
+    #[derive(nextjson::NsonSerialize, serde::Deserialize)]
+    struct Field {
+        value: f64,
+    }
+    for value in [
+        0.0,
+        -0.0,
+        1e-6,
+        1e16,
+        1e100,
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::MIN,
+    ] {
+        let field = Field { value };
+        let yaml = nextjson::formats::Yaml.encode(&field).unwrap();
+        let actual: Field = serde_yaml::from_slice(&yaml).unwrap();
+        assert_eq!(actual.value.to_bits(), value.to_bits());
+        let toml = nextjson::formats::Toml.encode(&field).unwrap();
+        let actual: Field = toml::from_str(std::str::from_utf8(&toml).unwrap()).unwrap();
+        assert_eq!(actual.value.to_bits(), value.to_bits());
+    }
+}
+
+#[test]
 fn ron_options_and_string_escapes_cross_decode() {
     for value in [
         'a', '\'', '\\', '"', '\0', '\u{8}', '\n', '\r', '\t', '中', '🙂',

@@ -130,8 +130,8 @@ fn config_fixture() -> Config {
     }
 }
 
-/// Float-dense fixture: isolates float formatting (nextjson `flt2dec` vs
-/// serde_json `ryu` vs simd-json). Mixed magnitudes, signs, and decimal
+/// Float-dense fixture: exercises each library's float formatting path
+/// (the locked serde_json uses Zmij). Mixed magnitudes, signs, and decimal
 /// shapes. Values are kept in the range every library's float formatter can
 /// serialize: simd-json rejects subnormals and values beyond its formatting
 /// buffer (e.g. `5e-324`, `-1.797e308`), so extremes are excluded and the

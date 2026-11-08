@@ -38,6 +38,12 @@ change breaks the other side.
 
 ### Guarantees
 
+Floating-point text encoding uses independently implemented integer intervals
+and safe byte formatting. JSON and NDJSON batch both `f32` and `f64` slices.
+Rust core handles subnormals and ambiguous boundaries. See the
+[implementation and mathematical bounds](nextjson/src/float/README.md) and
+[measurements](benchmarks/results/float-independent-2026-11-08/report.md).
+
 - The workspace contains only the local `nextjson` and `nextjson-derive` crates.
 - The only dependency entry is the local workspace derive crate. There are no
   registry, Git, or external path dependencies.

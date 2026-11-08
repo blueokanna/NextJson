@@ -25,15 +25,7 @@ use crate::value::Value;
 /// Non-finite values are rejected: the JSON data model has no NaN or
 /// infinity, and silently emitting `NaN` / `inf` text would corrupt the wire.
 pub(crate) fn float_string(v: f64) -> Result<String> {
-    if !v.is_finite() {
-        return Err(Error::custom("non-finite float cannot be represented"));
-    }
-    let s = v.to_string();
-    if s.contains(['.', 'e', 'E']) {
-        Ok(s)
-    } else {
-        Ok(alloc::format!("{s}.0"))
-    }
+    Ok(String::from(crate::float::Buffer::format(v)?.as_str()))
 }
 
 /// Format a [`Number`] as a plain decimal string (the shared scalar

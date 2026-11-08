@@ -2,7 +2,7 @@
 //! implementations for core and alloc types.
 //!
 //! Design points:
-//! - hand-written stack-buffer integer and float output;
+//! - stack-buffer integer and float output;
 //! - single-pass string escaping with bulk copy for unescaped input;
 //! - per-container first-element flag stack for zero-cost separators.
 
@@ -15,13 +15,13 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use core::fmt::{self, Write as _};
 use core::marker::PhantomData;
 use core::ops::{Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive};
 use core::time::Duration;
 
 use crate::error::{Error, ErrorKind, FormatError, Result};
 use crate::event_state::{EventState, Kind, MAX_ENCODE_DEPTH};
+pub(crate) use crate::float::write_float_into;
 use crate::map::Map;
 use crate::number::Number;
 use crate::schema::{NsonSchema, TypeSchema};
@@ -119,6 +119,16 @@ pub trait FormatEncoder {
         for &value in values {
             self.separator()?;
             self.write_f64(value)?;
+        }
+        self.end_array()
+    }
+
+    /// Emit binary32 values without widening their decimal representation.
+    fn write_f32_array(&mut self, values: &[f32]) -> Result<(), Self::Error> {
+        self.begin_array_len(values.len())?;
+        for &value in values {
+            self.separator()?;
+            self.write_f32(value)?;
         }
         self.end_array()
     }
@@ -309,6 +319,12 @@ impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
         self.state.end(Kind::Array).map_err(Into::into)
     }
 
+    fn write_f32_array(&mut self, values: &[f32]) -> Result<(), E::Error> {
+        self.state.begin(Kind::Array)?;
+        self.inner.write_f32_array(values)?;
+        self.state.end(Kind::Array).map_err(Into::into)
+    }
+
     fn begin_array_len(&mut self, len: usize) -> Result<(), E::Error> {
         self.state.begin(Kind::Array).map(drop)?;
         self.inner.begin_array_len(len)
@@ -484,12 +500,11 @@ impl<W: Write, const VALIDATE: bool, const JSON_LINES: bool> FormatEncoder
     }
 
     fn write_f64_array(&mut self, values: &[f64]) -> Result<()> {
-        self.primitive_array(values, |buffer, value| {
-            if !value.is_finite() {
-                return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
-            }
-            write_float_into(buffer, value)
-        })
+        self.float_array(values)
+    }
+
+    fn write_f32_array(&mut self, values: &[f32]) -> Result<()> {
+        self.float_array(values)
     }
 
     fn begin_array(&mut self) -> Result<(), Self::Error> {
@@ -694,6 +709,26 @@ impl<W: Write, const VALIDATE: bool, const JSON_LINES: bool> Encoder<W, VALIDATE
             self.buf.clear();
         }
         Ok(())
+    }
+
+    fn float_array<T: crate::float::Float>(&mut self, values: &[T]) -> Result<()> {
+        if self.pretty
+            || self.flush_threshold != usize::MAX
+            || values.len() < crate::float::BATCH_SIZE
+        {
+            return self.primitive_array(values, write_float_into);
+        }
+        self.begin_array()?;
+        if let Some(EncodeFrame::Array { first, .. }) = self.frames.last_mut() {
+            *first = values.is_empty();
+        }
+        let separator = if JSON_LINES && self.depth == 1 && self.line_stream {
+            b'\n'
+        } else {
+            b','
+        };
+        crate::float::write_many(&mut self.buf, values, separator)?;
+        self.end_array()
     }
 
     fn primitive_array<T: Copy>(
@@ -1160,16 +1195,11 @@ fn write_escaped_str(buf: &mut Vec<u8>, s: &str, escape_non_ascii: bool) {
                 buf.push(HEX[(b & 0xF) as usize]);
             }
             _ if escape_non_ascii && b >= 0x80 => {
-                // `b` is the leading byte of a UTF-8 scalar (the input is
-                // valid UTF-8), so the char always decodes here.
                 let ch = s[p..].chars().next().expect("valid utf-8");
                 write_unicode_escape(buf, ch);
                 i = p + ch.len_utf8();
                 continue;
             }
-            // Defensive: `find_escape` only reports escape-class bytes; this
-            // arm preserves the old behavior (plain copy) should the set ever
-            // change.
             _ => buf.push(b),
         }
         i = p + 1;
@@ -1282,81 +1312,6 @@ pub(crate) fn write_signed_integer_into(buf: &mut Vec<u8>, value: i128) {
     }
 }
 
-struct FloatBuffer {
-    bytes: [u8; 64],
-    len: usize,
-}
-
-impl FloatBuffer {
-    fn new() -> Self {
-        FloatBuffer {
-            bytes: [0; 64],
-            len: 0,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-}
-
-impl fmt::Write for FloatBuffer {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        let end = self.len.checked_add(value.len()).ok_or(fmt::Error)?;
-        let output = self.bytes.get_mut(self.len..end).ok_or(fmt::Error)?;
-        output.copy_from_slice(value.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
-#[inline]
-pub(crate) fn write_float_into<T: fmt::Display + fmt::LowerExp + Copy + Into<f64>>(
-    buf: &mut Vec<u8>,
-    value: T,
-) -> Result<()> {
-    // Integer, half, quarter and eighth values need no general decimal
-    // conversion. Multiplication by eight is exact in binary. Conservative
-    // bounds keep distinct three-decimal spellings distinguishable for the
-    // source width, so this path also preserves shortest fixed-point output.
-    let number = value.into();
-    // Clearing the sign bit also handles -0.0 without requiring float
-    // methods that were unavailable in core on the minimum Rust version.
-    let magnitude = f64::from_bits(number.to_bits() & 0x7fff_ffff_ffff_ffff);
-    let bound = if core::mem::size_of::<T>() == 4 {
-        16_384.0
-    } else {
-        1e12
-    };
-    if magnitude < bound {
-        let scaled = magnitude * 8.0;
-        let integer = scaled as u64;
-        if scaled == integer as f64 {
-            if number.is_sign_negative() {
-                buf.push(b'-');
-            }
-            write_u64_into(buf, integer / 8);
-            const FRACTIONS: [&[u8]; 8] = [
-                b".0", b".125", b".25", b".375", b".5", b".625", b".75", b".875",
-            ];
-            buf.extend_from_slice(FRACTIONS[(integer % 8) as usize]);
-            return Ok(());
-        }
-    }
-    let mut formatted = FloatBuffer::new();
-    if core::write!(&mut formatted, "{value}").is_err() {
-        formatted.len = 0;
-        core::write!(&mut formatted, "{value:e}")
-            .map_err(|_| Error::custom("internal float formatting buffer exhausted"))?;
-    }
-    let bytes = formatted.as_bytes();
-    buf.extend_from_slice(bytes);
-    if !bytes.iter().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
-        buf.extend_from_slice(b".0");
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // core / alloc NsonSchema + NsonSerialize implementations
 // ---------------------------------------------------------------------------
@@ -1388,7 +1343,6 @@ impl_scalar! {
 
     u128 => TypeSchema::U128 => write_u128 => u128,
     usize => TypeSchema::Usize => write_u64 => u64,
-    f32 => TypeSchema::F32 => write_f32 => f32,
 
 }
 
@@ -1433,6 +1387,21 @@ impl NsonSerialize for i64 {
 
 impl NsonSchema for f64 {
     const SCHEMA: TypeSchema = TypeSchema::F64;
+}
+
+impl NsonSchema for f32 {
+    const SCHEMA: TypeSchema = TypeSchema::F32;
+}
+impl NsonSerialize for f32 {
+    fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error> {
+        encoder.write_f32(*self)
+    }
+    fn nextencode_slice<E: FormatEncoder>(
+        values: &[Self],
+        encoder: &mut E,
+    ) -> Result<(), E::Error> {
+        encoder.write_f32_array(values)
+    }
 }
 impl NsonSerialize for f64 {
     fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error> {

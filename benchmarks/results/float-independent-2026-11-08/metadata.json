@@ -1,0 +1,346 @@
+{
+  "session_date": "2026-11-08",
+  "session_timezone": "Asia/Shanghai",
+  "baseline_revision": "b95769817e2b7e2d753175a06012f1cd7ff47a56",
+  "baseline": "Isolated archive of HEAD, using the identical standalone benchmark harness and lockfile",
+  "after": "Uncommitted working tree; runtime source hashes below",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "platform": "Windows-10-10.0.19045-SP0",
+  "processor_identifier": "Intel64 Family 6 Model 141 Stepping 1, GenuineIntel",
+  "logical_cpus": 16,
+  "rustflags": "",
+  "profile": "release; opt-level=3; lto=thin; codegen-units=1",
+  "command": "float_encoding --fixture=<fixture> --threads=<1|4|8> --samples=5 --millis=250",
+  "order": [
+    [
+      "before",
+      "ordinary",
+      1
+    ],
+    [
+      "after",
+      "ordinary",
+      1
+    ],
+    [
+      "after",
+      "ordinary",
+      4
+    ],
+    [
+      "before",
+      "ordinary",
+      4
+    ],
+    [
+      "before",
+      "ordinary",
+      8
+    ],
+    [
+      "after",
+      "ordinary",
+      8
+    ],
+    [
+      "after",
+      "varied",
+      1
+    ],
+    [
+      "before",
+      "varied",
+      1
+    ],
+    [
+      "before",
+      "varied",
+      4
+    ],
+    [
+      "after",
+      "varied",
+      4
+    ],
+    [
+      "after",
+      "varied",
+      8
+    ],
+    [
+      "before",
+      "varied",
+      8
+    ],
+    [
+      "before",
+      "wide",
+      1
+    ],
+    [
+      "after",
+      "wide",
+      1
+    ],
+    [
+      "after",
+      "wide",
+      4
+    ],
+    [
+      "before",
+      "wide",
+      4
+    ],
+    [
+      "before",
+      "wide",
+      8
+    ],
+    [
+      "after",
+      "wide",
+      8
+    ],
+    [
+      "after",
+      "f32",
+      1
+    ],
+    [
+      "before",
+      "f32",
+      1
+    ],
+    [
+      "before",
+      "f32",
+      4
+    ],
+    [
+      "after",
+      "f32",
+      4
+    ],
+    [
+      "after",
+      "f32",
+      8
+    ],
+    [
+      "before",
+      "f32",
+      8
+    ],
+    [
+      "before",
+      "exact",
+      1
+    ],
+    [
+      "after",
+      "exact",
+      1
+    ],
+    [
+      "after",
+      "exact",
+      4
+    ],
+    [
+      "before",
+      "exact",
+      4
+    ],
+    [
+      "before",
+      "exact",
+      8
+    ],
+    [
+      "after",
+      "exact",
+      8
+    ],
+    [
+      "after",
+      "dense",
+      1
+    ],
+    [
+      "before",
+      "dense",
+      1
+    ],
+    [
+      "before",
+      "dense",
+      4
+    ],
+    [
+      "after",
+      "dense",
+      4
+    ],
+    [
+      "after",
+      "dense",
+      8
+    ],
+    [
+      "before",
+      "dense",
+      8
+    ]
+  ],
+  "elapsed_seconds": 351.7402099000028,
+  "metric": "aggregate wall time / completed allocating encodes; not per-request latency",
+  "executable_sha256": {
+    "before": "4feb9160e9e0972ce1ac7a2e6fef2acf54a32a84756d6d05236d0e6081398243",
+    "after": "0fd95a0d6a05cf53305afe11e46c8f91fac6395b714ece29871ebdef394943c9",
+    "core-before": "19568cd975de22d3ebdc56121b481d890c2dd27e8d853dcb52915143994b5ace",
+    "core-after": "b73d7d5e32419eed466afd7be602b82d2e6660a1d5ec37ee0b88d071a9964364"
+  },
+  "source_sha256": {
+    "nextjson/src/bytes.rs": "0e1e880513d32846e17b9e8cd3892915e6c5fb403bec0339f6ea791ebfb0cfe3",
+    "nextjson/src/compat.rs": "4f8ba54ea210816c2b646e69087ede8e741f39597d6b74f4855a48205b8d7393",
+    "nextjson/src/cross_format/cbor.rs": "85fb1c0685f9640fefc706f8a560021bab115024e5d6797f08105bb7baaaef00",
+    "nextjson/src/cross_format/json.rs": "98df4e678d48846bb45660190cca175f9afd5a17df78e8637dbec47d045d27b4",
+    "nextjson/src/cross_format/mod.rs": "7263a04875b746b0f91db4b3d60f4ade392eab851bab27a0abdeb1085e987d99",
+    "nextjson/src/de.rs": "632af0f2116bff2d351ac553ae6eaa2bfcc82f604a425516ed6ace9792eb5c3b",
+    "nextjson/src/encoding.rs": "9a3d01f3fa0e4515034ea1099c88dcf16d2dfda38044560c8eecd1f064369e5d",
+    "nextjson/src/error.rs": "b117b2b97a042147361f19139ba5ed27c083c6a56ce8390391d205118a43b112",
+    "nextjson/src/event_state.rs": "960b8362bebadce6274b91b66459a7656fd1ae8165030026485d75ed74ab235e",
+    "nextjson/src/float/decimal.rs": "30dd7cb9dc3a4a89822f9a67e7b13b03d565aadab6eaf7d7762962014b153a83",
+    "nextjson/src/float/mod.rs": "4889a1aaa924cb2445aba4f0685671fa3060621ecee4d3581cb13f1e5e9c93f2",
+    "nextjson/src/float/powers.rs": "e0e52eac30865e0e0fadfb0d21e9f97249313ef668f966da74509bdfb56f7f4a",
+    "nextjson/src/float/tests.rs": "e89066427184a6b8e0f503bde0ee0832eab254d2c0dbd99e30d386de5849b5d3",
+    "nextjson/src/formats/bencode.rs": "e047d614e3ce39d8efadc3d6dff0399bdc0b3bff401ae2b168e75f9924a10554",
+    "nextjson/src/formats/bin.rs": "ef78c53fe6dfbb201ae08869bca2c6062a2e8324cbf7d64e626d45bf2cb36ae1",
+    "nextjson/src/formats/bson.rs": "cd16b8320b498ae4f1194e17d41cda9060e590241fe7a12214c4c0d749bac809",
+    "nextjson/src/formats/cbor.rs": "4e60781bd8acd4b59d123518f9829bb63d2fe0f254a5263da5790eae9c8bdb48",
+    "nextjson/src/formats/csv.rs": "a0eac933c4579153b5992e9ed6316a6d81b707656234b13dd6cf3cf38d8b9915",
+    "nextjson/src/formats/edn.rs": "31214eee62ddd12d8dae28faad43fa9bea1278ffd62d8809ccf2428fd8bdc7dd",
+    "nextjson/src/formats/envy.rs": "677fc727429e0d776cbe8f7cabcdbe641757365da552a06fc8ca11812964eafc",
+    "nextjson/src/formats/hjson.rs": "bb676e02608146cc6987b25304b8d2a5762749b581fa0e2fea26f340ade6940f",
+    "nextjson/src/formats/ini.rs": "dce09e214673431d93d7b0868e1f9beb5df53256ea8fb4b36052f7a2ae19f4e7",
+    "nextjson/src/formats/json.rs": "83f82b122a010f0e975608e58b6325bea860afcc1f2e73cbf0c5838736159aef",
+    "nextjson/src/formats/json5.rs": "bd1a18c8309c6665bb2bb64127432f430372f9cd2c86e2cf7e277ff57eee62ec",
+    "nextjson/src/formats/mod.rs": "5fe90049e67a1fa3479265e8e3953c0cd5efd3cec645d3b837d351edbce32a70",
+    "nextjson/src/formats/msgpack.rs": "2b3bc381e77e3eaf85ef4c87982b840b124cf1ed00fbeb2e1ee869749097f86e",
+    "nextjson/src/formats/ndjson.rs": "245692884d61ca4dba9b4b1cdb85ad3ec49eee41ce5a8929e110d1d9c5cbf454",
+    "nextjson/src/formats/pickle.rs": "580f4b47a74e9eab84e87754fb096f0aa625ae4fe8b9a6521e2fae89204b6d3d",
+    "nextjson/src/formats/postcard.rs": "00a8cb12b2a94835d411370cfc457ca14cf9cd3f732698f1ca2387bb28c47110",
+    "nextjson/src/formats/ron.rs": "b516ce2de6df2268fd32500d122238c0e6934fe28c827157e09a31c32f050562",
+    "nextjson/src/formats/sexpr.rs": "14859a20e932afaae5c16de4326b35a866ceffe52b9f379ada9990be473768e2",
+    "nextjson/src/formats/smile.rs": "69dce8e462c31c38928d06599f5f1b918ebf34b0f694963416df36354153791f",
+    "nextjson/src/formats/toml.rs": "7dfb1f326c56222299bbdc47cb55f0035f8f800250289f171710a49d3fb5b2e7",
+    "nextjson/src/formats/tree.rs": "b1603510969d855478e1f4432a0153175d40794413b56f30eece0a391b10799f",
+    "nextjson/src/formats/ubjson.rs": "dddb310db6112c4acf4f7f735bd65ada9fcb1e56887b258a99b3dbbe2b6046af",
+    "nextjson/src/formats/urlform.rs": "8a96f2566d0569018f13bd39836283013bd8bd930e0f42e8cccca7af8ab28e3d",
+    "nextjson/src/formats/yaml.rs": "0c2daa421baf1dda95f647304bb89467025f7f45ff0794d41bc00d80536c5eeb",
+    "nextjson/src/json_schema.rs": "2098f8aabe1efee81cebebb9b8adabba0f2dfc997cc68cd77a9be75d089733c3",
+    "nextjson/src/lex.rs": "759aacc7690ca5f2427c6e95c4265f2c38ca9f10fad0817f0e004a3e23f1ff1f",
+    "nextjson/src/lib.rs": "c543baecda491ff08b26a7cd1716f77f8f3734413e7edd5a604ccae9f14fbe22",
+    "nextjson/src/map.rs": "1c7a892fdffc26a1efad177fe91edb36bffc25017e9df1b9b8ff8da5a9d13879",
+    "nextjson/src/number.rs": "e668368177a2f7096d8a58cd3feb27b4fa2e59ee1bd118f53ef4bfa5d267d631",
+    "nextjson/src/private.rs": "0f408242c9d46b67dffa382290e20317254287b86ae516fb0f7a7c03fd7982e0",
+    "nextjson/src/read.rs": "3b9f67c9381e47eacf03772f072475fb5cf4fc0bf575512a064477561ba0d24a",
+    "nextjson/src/scan.rs": "fd2eb00afb5912666d0b3d58c9f335db4e86b4c2e34aff0bc011b6049973a7cd",
+    "nextjson/src/schema.rs": "3646bfc2436ba0219c976cfabf01188b89ae1f1286993dcfd17ac1b51475fc40",
+    "nextjson/src/ser.rs": "ca3851cdbb199162f707e2b0144e181a0d318d96a95a773438e50292f89bc8cf",
+    "nextjson/src/stack.rs": "1d89bcc8864cb7c2ec0e885d44014f98449df9ee86a35fcf2ac0e9989045e4f8",
+    "nextjson/src/stream.rs": "a64d3a0d6b4f13ee83366d8bc2b124412aa3ffb707ab37e1b7af65c5b7970e41",
+    "nextjson/src/validate.rs": "7ce9cfd214a70eff45bab195296ccc4a09d41d2fc43fcf5b031a62f976e2719d",
+    "nextjson/src/value.rs": "cf7c7a9b092d477030315bc77f7b8e2cc883daa09d398a65cab27bd602f9761f",
+    "nextjson/src/write.rs": "e0710e9587eaa3f8a2f963f4179f3d40f25402d17a47716c0f5606db181e3721",
+    "nextjson-derive/src/attr.rs": "815335f93570c500549525fa5f2110024accaccf37513df6b7490dfa4a354e83",
+    "nextjson-derive/src/case.rs": "057b766a1e1e2f8e1de7b7a95f30d1d0692d40c75f83d222a8604e73d5f90864",
+    "nextjson-derive/src/de.rs": "bb016541710c9a45c0ca315b20b25ed56794b71f3f10877767b0ef10092b21fd",
+    "nextjson-derive/src/lib.rs": "8ca45ce39f79f62085385309b7800020766656d1c401412912b324f49d530e0f",
+    "nextjson-derive/src/schema.rs": "be69d0217a03c15e81f20b29e34d6f2065b8c47e68acea6dc6bd4f8796d9a5dd",
+    "nextjson-derive/src/ser.rs": "b400b0446ffc1a233b374b053b8e93daf643118ac1f4e47fe8190f694a1336e3",
+    "Cargo.toml": "7cbb1ca6bffbe975a3e0bd6f1ed587ab499b8d4b6d4a1f3a5491c91cff2556f0",
+    "Cargo.lock": "99aa954f0ba4840345021c7edfd661b49d75c20f365136185e10e23a83980c9b",
+    "nextjson/Cargo.toml": "567716da5316cdcbbc36ea6eb5203bffc892335ba0be5760f16d3b77d2cdfcb0",
+    "nextjson-derive/Cargo.toml": "cabe9a35cd5e09ca76d5bd2a49f19d8f21e007d33158fb73890a432a2941e7ba",
+    "benchmarks/serde-comparison/Cargo.toml": "18ca20ed87d9ff10ee486030af92d8d4f474207338822f671461b81efbc3f075",
+    "benchmarks/serde-comparison/Cargo.lock": "ba116e83a2c0eef9538338fbcba899deae4865222e45d56ab87bf9f68a3f4800",
+    "benchmarks/serde-comparison/src/bin/float_encoding.rs": "41f11ca635ed4839e1b03b7cc6d6c134b63f0c44466a79ec3f389dffa5b0ca53",
+    "benchmarks/serde-comparison/src/bin/core_formats.rs": "2fda0ea85ffae4d9a6e6cd4e91aa9a5fffa812e69f499e6993429848598b9b30",
+    "benchmarks/serde-comparison/tests/float_oracle.rs": "a84c3f4d0ddcc4ba66050a9b946a74063ca7aa667b48ac07f48a2fa4963ed0da",
+    "benchmarks/generate_float_powers.py": "e0573e623c7e5f195efbc2f4bac91343f17c86ea583a97da3c2e597c769b8e9a",
+    "benchmarks/summarize_float.py": "7bf1c6a8c5d26527da1fe26127c71a3a5c5d17da2121698763b538b26dbb4b39",
+    "nextjson/tests/float_encoding.rs": "4e4a3362a4cd76db9c39a30abd8cedf2bbdefea139a82010486e4ca22df617c8"
+  },
+  "artifact_sha256": {
+    "after.csv": "54e766fcef7f59bab242e8c8df38f672ea67f062c88c9e4311c17c5023e616ac",
+    "before.csv": "c35264861a3fa00abc416dddb76c670d490d73f0a1a4956cc924b8cecb99447b",
+    "core-after.csv": "ce408959238622ca6e85a24278689aea28de93f91013f15f7792c58ed889d31e",
+    "core-before.csv": "930e03cdcaa8eb80cb9d318398d40b97f9a5ce6ed620ccea769c1d4e862a4312",
+    "core-repeat-after.csv": "f2edb13933a4bc902897884ad4126034ae7b93c8af1eb74de0fe7e7819dd16b8",
+    "core-repeat-before.csv": "261ad39e77392b4b39bb8f769bdf7404a0d6ebfd6c993d9d3033cd703f13f040",
+    "serial-after.csv": "a11ddf02f680937447132b15ef8c1c1f16a6c6f148af2246ce17686e6ad2e6fb",
+    "serial-before.csv": "c0e6276acbd4dd923268eded2908c752c96c0fb81aa3fb98439ea5c6a82c62a4"
+  },
+  "serial_confirmation": {
+    "reason": "Large timing variation in the first matrix and its Serde controls",
+    "command": "float_encoding --fixture=<fixture> --threads=1 --samples=5 --millis=500",
+    "order": [
+      [
+        "after",
+        "ordinary"
+      ],
+      [
+        "before",
+        "ordinary"
+      ],
+      [
+        "before",
+        "varied"
+      ],
+      [
+        "after",
+        "varied"
+      ],
+      [
+        "after",
+        "wide"
+      ],
+      [
+        "before",
+        "wide"
+      ],
+      [
+        "before",
+        "f32"
+      ],
+      [
+        "after",
+        "f32"
+      ],
+      [
+        "after",
+        "exact"
+      ],
+      [
+        "before",
+        "exact"
+      ],
+      [
+        "before",
+        "dense"
+      ],
+      [
+        "after",
+        "dense"
+      ]
+    ],
+    "elapsed_seconds": 262.27191660000244,
+    "core_order": [
+      "after",
+      "before"
+    ],
+    "same_executables": true
+  }
+}

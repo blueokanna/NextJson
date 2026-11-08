@@ -1,5 +1,9 @@
 # 可复现基准测试
 
+[浮点独立实现复测](../benchmarks/results/float-independent-2026-11-08/report.md)记录当前
+转换路径在普通小数、高有效位小数、量化值、随机有限位模式和 f32 数组上的前后对照，
+包含 1、4、8 线程及原始配对样本。当前锁定的 serde_json 1.0.151 使用 Zmij。
+
 当前 JSON 与 CBOR 公开入口校验序列化事件。下文使用免校验入口测得的历史数据
 保留为历史记录，不代表当前性能，需在当前工作区重新运行。基准中的 `json` 是原生
 校验路径；`json-checked-explicit` 与 `json-trusted-explicit` 使用相同 writer
@@ -144,8 +148,8 @@ release 差距来自四个可测量的原因：
    源字节分派并直接词法化载荷，仅在类型不匹配时回退 token 路径，诊断保持
    逐字节一致。同进程 A/B（各 2 秒）实测 `Decoder::number` 22.0 → 18.0
    ns/次、`Decoder::string` 25.9 → 23.5 ns/次。
-3. **浮点格式化**走 `fmt::Display`/`core::write!`，而 serde_json 用 Ryū。
-   去掉浮点只占差距的约 16%，所以这是次要因素。
+3. **历史浮点路径**使用 `fmt::Display`/`core::write!`。该路径现已替换，当前
+   实现、性能差距和回退条件见页首专项报告。这里的历史记录中，去掉浮点仅解释约 16% 的差距。
 4. **结构性**：serde_json 是单态化、专精 JSON 的热路径（查表数字、预分配
    缓冲、固定大小的 serializer 状态），优化了十年；nextjson 的编码器保留容器
    帧栈（为分隔符与 pretty 输出），且必须在 21 种格式下保持正确。编码侧校验

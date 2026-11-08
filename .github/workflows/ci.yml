@@ -61,6 +61,8 @@ jobs:
             exit 1
           fi
           cargo tree --workspace --all-features --edges normal,build,dev --locked
+      - name: Verify decimal interval multipliers with exact integers
+        run: python3 benchmarks/generate_float_powers.py
 
   # ---------------------------------------------------------------------------
   # Formatting gate: fails the pipeline on any rustfmt drift.

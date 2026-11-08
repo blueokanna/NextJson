@@ -29,6 +29,11 @@ Postcard。它把三个性质做成了一等能力：
 
 ### 当前保证
 
+浮点文本编码使用独立实现的整数区间计算和安全字节格式化，JSON、NDJSON 支持
+`f32`、`f64` 切片批量写出。次正规数和无法确定的边界使用 Rust core 回退。
+实现不包含移植的第三方转换代码；数学边界见[实现说明](nextjson/src/float/README.md)，
+性能和适用范围见[实测报告](benchmarks/results/float-independent-2026-11-08/report.md)。
+
 - 工作区仅包含自有的 `nextjson` 和 `nextjson-derive` 两个 crate。
 - `[dependencies]` 中唯一项目是工作区内的 `nextjson-derive`，没有 crates.io、Git 或外部路径依赖。
 - `nextjson-derive` 只使用 Rust 标准 `proc_macro` API，同样没有外部依赖。

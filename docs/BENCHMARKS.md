@@ -1,5 +1,10 @@
 # Reproducible Benchmark
 
+The [2026-11-08 independent decimal implementation](../benchmarks/results/float-independent-2026-11-08/report.md)
+measures ordinary decimals, dense significands, quantized values, random finite bit
+patterns, and f32 arrays at 1, 4 and 8 threads. It supersedes
+the earlier float-encoding figures; raw paired samples are included.
+
 The [2026-11-08 no_std measurements](../benchmarks/results/nostd-2026-11-08/report.md)
 compare checked JSON, MessagePack, RON and NDJSON paths with the pre-change
 working tree and locked Serde codecs. Raw samples accompany the report.
@@ -174,9 +179,11 @@ Four measurable causes account for the release gap:
    in-process A/B on the primitive (2 s per side) measures `Decoder::number`
    dropping from 22.0 to 18.0 ns/call and `Decoder::string` from 25.9 to
    23.5 ns/call.
-3. **Float formatting** goes through `fmt::Display`/`core::write!` while
-   serde_json uses Ryū. Removing floats from the fixture accounts for only
-   ~16% of the gap, so this is secondary.
+3. **Historical float formatting** used `fmt::Display`/`core::write!`.
+   The current path uses the shared decimal conversion module. The locked
+   serde_json 1.0.151 reference uses Zmij. See the decimal follow-up linked
+   above for current measurements; the earlier ~16% attribution is specific
+   to that historical fixture and implementation.
 4. **Structural**: serde_json is a monomorphic, JSON-specialized hot path
    optimized for a decade (lookup-table digits, preallocated buffers, a
    fixed-size serializer state), while nextjson's encoder keeps a container
