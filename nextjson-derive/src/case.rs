@@ -1,6 +1,9 @@
 //! Field / variant rename rules.
 
 /// Apply a rename strategy to an identifier.
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 pub fn apply(rule: &str, name: &str) -> String {
     let words = split_words(name);
     match rule {
@@ -44,7 +47,7 @@ fn split_words(s: &str) -> Vec<String> {
         let c = chars[i];
         if c == '_' || c == '-' || c == ' ' {
             if !cur.is_empty() {
-                words.push(std::mem::take(&mut cur));
+                words.push(core::mem::take(&mut cur));
             }
             i += 1;
             continue;
@@ -58,7 +61,7 @@ fn split_words(s: &str) -> Vec<String> {
                 _ => false,
             };
             if boundary && !cur.is_empty() {
-                words.push(std::mem::take(&mut cur));
+                words.push(core::mem::take(&mut cur));
             }
             cur.push(c);
         } else {

@@ -1,8 +1,18 @@
 # 安全模型
 
 NextJson 默认构建禁止 unsafe Rust。可选的 `simd` 特性仅在 `src/scan.rs` 中
-允许 intrinsic；向量读取前检查长度，AVX2 通过运行时检测后才启用。这些是可检查的
+允许 intrinsic；向量读取前检查长度，AVX2 仅在编译目标显式启用时使用。这些是可检查的
 实现约束，不是“零漏洞”或“无需生产验证”的承诺。
+
+## no_std 边界
+
+运行库没有 std 特性，所有配置仅依赖 core 和 alloc。流式输入使用
+`nextjson::Read`，输出使用 `nextjson::Write`，设备适配由调用方实现。`Arc` 与原子
+类型实现按目标的原子能力编译。应用负责全局分配器、启动代码与 panic 策略。
+
+derive 源码也使用 core 和 alloc，但 `proc_macro` 属于编译器宿主接口，不是目标
+程序的运行依赖。Rust 自带测试运行器在宿主运行；库、测试主体与示例均声明
+`#![no_std]`。计时、Serde 对照和宿主 unwind 检查仅放在 benchmark 项目中。
 
 ## 解码
 
@@ -52,7 +62,7 @@ token。CSV 与 URL-form 的整数字面量支持完整 128 位范围，越界�
 
 配额包括空白。达到上限后最多额外读取一个字节，以区分真正的 EOF 和超限输入；
 额外字节不保留。超限返回 `input byte limit exceeded`，恢复解析位置也不能重置
-这一状态，因此不会把截断前缀当作完整文档。`Interrupted` 读取会重试，其它 I/O
+这一状态，因此不会把截断前缀当作完整文档。`Error::interrupted()` 会重试，其它 I/O
 错误正常传播。
 
 输入字节配额不等于结果对象的堆内存、输出大小、CPU 时间、reader 内部缓冲或网络
@@ -71,7 +81,8 @@ cargo doc --workspace --all-features --no-deps --locked
 ```
 
 `tests/production_regressions.rs` 覆盖读取分块、非法忽略字段、I/O 中断、输入配额、
-预读回溯、自定义序列化协议错误、深层编码，以及筛选函数 panic 后的 Map 一致性。
+预读回溯、自定义序列化协议错误和深层编码。筛选函数 panic 后的 Map 一致性
+在 `benchmarks/serde-comparison/tests/host_unwind.rs` 中验证。
 其它测试还覆盖外部线格式样本、数值边界、部分初始化析构和 SIMD 与标量对照。
 `tests/extreme_regressions.rs` 补充跨行与字段回溯、整数溢出、恶意长度提示，以及
 大型 UTF-8 字符串跨读取边界的测试。

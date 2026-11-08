@@ -1,19 +1,25 @@
-//! Round trips for every standard-library `NsonSerialize` / `NsonDeserialize`
-//! implementation (smart pointers, collections, ranges, durations). These
-//! impls are exercised nowhere else, so they dominate the `ser.rs` / `de.rs`
-//! coverage gap.
+//! Round trips for core and alloc types: smart pointers, collections,
+//! ranges and durations.
 
+#![no_std]
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use alloc::borrow::Cow;
+use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque};
+use alloc::rc::Rc;
+use alloc::sync::Arc;
+use core::cell::{Cell, RefCell};
+use core::time::Duration;
 use nextjson::{NsonDeserialize, NsonSerialize};
-use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque};
-use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Duration;
 
 fn rt<T>(value: &T)
 where
-    T: NsonSerialize + for<'de> NsonDeserialize<'de> + PartialEq + std::fmt::Debug,
+    T: NsonSerialize + for<'de> NsonDeserialize<'de> + PartialEq + core::fmt::Debug,
 {
     let bytes = nextjson::nextencode(value).unwrap();
     let back: T = nextjson::nextdecode(&bytes).unwrap();

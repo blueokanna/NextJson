@@ -1,6 +1,13 @@
 //! Integration tests: schema-declared safety policies flow from derive
 //! attributes into `SCHEMA` and are enforced by `nextjson::validate`.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::{NsonDeserialize, NsonSchema, NsonSerialize, Policy, TypeSchema};
 
 #[derive(NsonSerialize, NsonDeserialize)]

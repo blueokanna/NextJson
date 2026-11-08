@@ -17,6 +17,13 @@
 //! - **validation recursion / arithmetic**: `max_str_len = u64::MAX` must not
 //!   overflow; a hand-built deep tree must be bounded, not crash.
 
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats;
 use nextjson::Value;
 

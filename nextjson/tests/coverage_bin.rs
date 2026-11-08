@@ -3,6 +3,11 @@
 //! asserts the codec *rejects* the construct (or errors), which executes the
 //! parser/VM `other => Err` branches that round-trip tests never reach.
 
+#![no_std]
+extern crate alloc;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats;
 use nextjson::Value;
 
@@ -19,8 +24,6 @@ fn bson_doc(ty: u8) -> Vec<u8> {
 
 #[test]
 fn bson_rejects_extension_type_bytes() {
-    // Undefined, ObjectId, datetime, regex, dbpointer, code, symbol,
-    // code-with-scope, timestamp, decimal128, min-key, max-key.
     for ty in [
         0x06u8, 0x07, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x11, 0x13, 0x7F, 0xFF,
     ] {

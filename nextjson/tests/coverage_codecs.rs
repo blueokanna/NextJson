@@ -3,6 +3,10 @@
 //! cut lands exactly on a complete document). This exercises the parser EOF /
 //! boundary branches that round-trip tests never reach.
 
+#![no_std]
+extern crate alloc;
+use alloc::vec;
+
 use nextjson::formats::{self, Format};
 use nextjson::{json, Value};
 

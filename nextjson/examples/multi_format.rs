@@ -1,6 +1,6 @@
 //! 多格式引擎：同一个值走遍 14 种线格式（示例 2/6）。
 //!
-//! 运行：`cargo run -p nextjson --example multi_format`
+//! 运行：`cargo check -p nextjson --example multi_format`
 //!
 //! 演示 NextJson 的第二根支柱——多格式是一等能力：一份类型定义，通过
 //! `nextjson::formats` 里统一的 `Format` trait 即可在任意线格式之间切换，
@@ -10,6 +10,13 @@
 //! 说明：某些格式对数据模型有硬约束（TOML/BSON 需要表根、bencode 无浮点、
 //! postcard 拒绝有符号标量、CSV 只支持扁平行），示例用与 bench 相同的
 //! 包装类型如实呈现这些约束，而不是伪造"所有格式都装得下"。
+
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use nextjson::formats::Format;
 use nextjson::{from_str, nextdecode, nextencode, NsonDeserialize, NsonSerialize};
@@ -75,7 +82,16 @@ fn records() -> Vec<Record> {
         .collect()
 }
 
-fn main() -> nextjson::Result<()> {
+/// Execute the checks and return their diagnostic text without host I/O.
+pub fn run() -> nextjson::Result<String> {
+    let mut diagnostic_text = String::new();
+    macro_rules! record {
+        ($($arg:tt)*) => {{
+            diagnostic_text.push_str(&alloc::format!($($arg)*));
+            diagnostic_text.push('\n');
+        }}
+    }
+
     let data = records();
     let doc = Doc {
         records: data.clone(),
@@ -107,8 +123,8 @@ fn main() -> nextjson::Result<()> {
         })
         .collect();
 
-    println!("{:<10} {:>10}  round-trip", "format", "size(B)");
-    println!("{}", "-".repeat(44));
+    record!("{:<10} {:>10}  round-trip", "format", "size(B)");
+    record!("{}", "-".repeat(44));
 
     // 全模型格式。
     macro_rules! bench_full {
@@ -116,7 +132,7 @@ fn main() -> nextjson::Result<()> {
             $(
                 let bytes = nextjson::formats::$mod.encode(&data)?;
                 let back: Vec<Record> = nextjson::formats::$mod.decode(&bytes)?;
-                println!(
+                record!(
                     "{:<10} {:>10}  {}",
                     <nextjson::formats::$mod as Format>::NAME,
                     bytes.len(),
@@ -133,7 +149,7 @@ fn main() -> nextjson::Result<()> {
             $(
                 let bytes = nextjson::formats::$mod.encode(&doc)?;
                 let back: Doc<Record> = nextjson::formats::$mod.decode(&bytes)?;
-                println!(
+                record!(
                     "{:<10} {:>10}  {}",
                     <nextjson::formats::$mod as Format>::NAME,
                     bytes.len(),
@@ -147,7 +163,7 @@ fn main() -> nextjson::Result<()> {
     // 约束型格式：如实使用各自的 fixture。
     let b = nextjson::formats::Bencode.encode(&ints)?;
     let back: Vec<IntRecord> = nextjson::formats::Bencode.decode(&b)?;
-    println!(
+    record!(
         "{:<10} {:>10}  {}",
         <nextjson::formats::Bencode as Format>::NAME,
         b.len(),
@@ -156,7 +172,7 @@ fn main() -> nextjson::Result<()> {
 
     let b = nextjson::formats::Postcard.encode(&uints)?;
     let back: Vec<UintRecord> = nextjson::formats::Postcard.decode(&b)?;
-    println!(
+    record!(
         "{:<10} {:>10}  {}",
         <nextjson::formats::Postcard as Format>::NAME,
         b.len(),
@@ -165,7 +181,7 @@ fn main() -> nextjson::Result<()> {
 
     let b = nextjson::formats::Csv.encode(&rows)?;
     let back: Vec<FlatRow> = nextjson::formats::Csv.decode(&b)?;
-    println!(
+    record!(
         "{:<10} {:>10}  {}",
         <nextjson::formats::Csv as Format>::NAME,
         b.len(),
@@ -173,7 +189,7 @@ fn main() -> nextjson::Result<()> {
     );
 
     // 跨格式转码：JSON -> MsgPack -> CBOR -> JSON，全程不出现中间类型。
-    println!("\n== 跨格式转码链（不构造中间类型） ==");
+    record!("\n== 跨格式转码链（不构造中间类型） ==");
     let json_bytes = nextjson::formats::Json.encode(&data)?;
     let msgpack = nextjson::formats::transcode(
         &json_bytes,
@@ -189,7 +205,7 @@ fn main() -> nextjson::Result<()> {
         nextjson::formats::transcode(&cbor, nextjson::formats::Cbor, nextjson::formats::Json)?;
     let first: Vec<Record> = nextjson::formats::Json.decode(&json_bytes)?;
     let last: Vec<Record> = nextjson::formats::Json.decode(&json_again)?;
-    println!(
+    record!(
         "json {:<6} -> msgpack {:<6} -> cbor {:<6} -> json {:<6}  data_equal = {}",
         json_bytes.len(),
         msgpack.len(),
@@ -199,7 +215,7 @@ fn main() -> nextjson::Result<()> {
     );
 
     // 二进制格式对同一数据的体积优势（对比演示）。
-    println!("\n== 体积对比（同一条 128 条记录数据集） ==");
+    record!("\n== 体积对比（同一条 128 条记录数据集） ==");
     let sizes = [
         ("json", nextjson::formats::Json.encode(&data)?.len()),
         ("cbor", nextjson::formats::Cbor.encode(&data)?.len()),
@@ -208,7 +224,7 @@ fn main() -> nextjson::Result<()> {
     ];
     let base = sizes[0].1 as f64;
     for (name, size) in sizes {
-        println!(
+        record!(
             "  {name:<8} {size:>8} B  ({:.1}% of json)",
             size as f64 / base * 100.0
         );
@@ -219,7 +235,15 @@ fn main() -> nextjson::Result<()> {
     // 顺带演示从字符串直接解析。
     let one: Record =
         from_str(r#"{"id":1,"active":true,"score":1.25,"name":"r","tags":[],"samples":[]}"#)?;
-    println!("\n单条 JSON 解析: id = {}", one.id);
+    record!("\n单条 JSON 解析: id = {}", one.id);
 
-    Ok(())
+    Ok(diagnostic_text)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exercise_no_std_api() {
+        super::run().unwrap();
+    }
 }

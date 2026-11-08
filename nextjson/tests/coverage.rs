@@ -7,7 +7,13 @@
 //! never constructed, so dead-code is allowed at the crate level.
 //!
 
+#![no_std]
 #![allow(dead_code)]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+
 use nextjson::formats::{Format, FormatKind};
 use nextjson::{
     to_json_schema, Bytes, Decoder, Error, FormatDecoder, NsonDeserialize, NsonSerialize, Value,
@@ -98,7 +104,7 @@ fn json_schema_unit_bytes_optional_seq_map_tuple() {
         bytes: Bytes<'static>,
         opt: Option<i32>,
         seq: Vec<String>,
-        map: std::collections::BTreeMap<String, u8>,
+        map: alloc::collections::BTreeMap<String, u8>,
         pair: (i32, String),
         #[njson(skip_serializing)]
         hidden: u64,
@@ -248,26 +254,20 @@ fn write_impls_cover_all_sinks() {
     v2.flush().unwrap();
 }
 
-#[cfg(feature = "std")]
 #[test]
-fn io_writer_adapter_maps_io_errors() {
+fn device_writer_propagates_errors() {
     let mut underlying = Vec::new();
-    nextjson::to_io_writer(&mut underlying, &7_u32).unwrap();
+    nextjson::to_writer(&mut underlying, &7_u32).unwrap();
     assert_eq!(underlying.as_slice(), b"7");
 
     struct Failing;
-    impl std::io::Write for Failing {
-        fn write(&mut self, _b: &[u8]) -> std::io::Result<usize> {
-            // MSRV 1.71：`std::io::Error::other` 需 1.74+，用兼容写法。
-            #[allow(clippy::io_other_error)]
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"));
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    impl nextjson::Write for Failing {
+        fn write_all(&mut self, _b: &[u8]) -> nextjson::Result<()> {
+            Err(nextjson::Error::custom("device write failed"))
         }
     }
-    let err = nextjson::to_io_writer(Failing, &7_u32).unwrap_err();
-    assert!(err.to_string().contains("io error"));
+    let err = nextjson::to_writer(Failing, &7_u32).unwrap_err();
+    assert!(err.to_string().contains("device write failed"));
 }
 
 // ---------------------------------------------------------------------------
@@ -617,17 +617,8 @@ fn format_decode_rejects_malformed_input() {
 // Environment variable deserialization
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "std")]
 #[test]
-fn envy_decodes_from_environment() {
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap();
-
-    std::env::set_var("NX_ENV_COUNT", "42");
-    std::env::set_var("NX_ENV_FLAG", "true");
-    std::env::set_var("NX_ENV_NAME", "nextjson");
-
+fn envy_decodes_supplied_pairs() {
     #[derive(NsonDeserialize)]
     struct Loose {
         #[njson(rename = "NX_ENV_COUNT")]
@@ -637,7 +628,9 @@ fn envy_decodes_from_environment() {
         #[njson(rename = "NX_ENV_NAME")]
         name: String,
     }
-    let cfg: Loose = nextjson::formats::Envy.decode(&[]).unwrap();
+    let cfg: Loose = nextjson::formats::Envy
+        .decode(b"NX_ENV_COUNT=42\nNX_ENV_FLAG=true\nNX_ENV_NAME=nextjson")
+        .unwrap();
     assert_eq!(cfg.count, 42);
     assert!(cfg.flag);
     assert_eq!(cfg.name, "nextjson");
@@ -683,8 +676,8 @@ fn option_and_map_key_primitives() {
     let json = br#"{"key":1,"other":null}"#;
     let mut d = Decoder::new(json);
     // Option：null → None。
-    let m: std::collections::BTreeMap<String, Option<i32>> =
-        <std::collections::BTreeMap<String, Option<i32>> as NsonDeserialize>::nextdecode(&mut d)
+    let m: alloc::collections::BTreeMap<String, Option<i32>> =
+        <alloc::collections::BTreeMap<String, Option<i32>> as NsonDeserialize>::nextdecode(&mut d)
             .unwrap();
     assert_eq!(m.get("key"), Some(&Some(1)));
     assert_eq!(m.get("other"), Some(&None));
@@ -694,13 +687,12 @@ fn option_and_map_key_primitives() {
 // Streaming decoder
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "std")]
 #[test]
 fn stream_decoder_chunked_and_errors() {
     use nextjson::StreamDecoder;
     struct OneByte<'a>(&'a [u8], usize);
-    impl std::io::Read for OneByte<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    impl nextjson::Read for OneByte<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
             if self.1 >= self.0.len() {
                 return Ok(0);
             }

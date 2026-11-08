@@ -1,7 +1,14 @@
 //! Regressions for public entry points and adversarial reader boundaries.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use nextjson::{self as io, Read};
 use nextjson::{FormatEncoder, NsonDeserialize, NsonSchema, NsonSerialize, TypeSchema, Value};
-use std::io::{self, Read};
 
 struct Chunked<'a> {
     input: &'a [u8],
@@ -102,7 +109,7 @@ impl Read for Interrupted<'_> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         self.interrupt = !self.interrupt;
         if self.interrupt {
-            Err(io::ErrorKind::Interrupted.into())
+            Err(nextjson::Error::interrupted())
         } else {
             let len = out.len().min(1);
             self.input.read(&mut out[..len])
@@ -145,7 +152,14 @@ fn stream_input_limit_covers_whitespace_and_exact_boundaries() {
             }
         }
     }
-    let mut reader = io::repeat(b' ');
+    struct Spaces;
+    impl Read for Spaces {
+        fn read(&mut self, out: &mut [u8]) -> nextjson::Result<usize> {
+            out.fill(b' ');
+            Ok(out.len())
+        }
+    }
+    let mut reader = Spaces;
     let err = nextjson::from_reader_with_limit::<_, Value>(&mut reader, 8192).unwrap_err();
     assert_eq!(err.classification(), "input byte limit exceeded");
 }
@@ -171,16 +185,18 @@ fn stream_limit_diagnosis_survives_untagged_variant_retries() {
 
 #[test]
 fn stream_propagates_io_failure_while_reading_trailing_whitespace() {
-    struct Failing;
+    struct Failing(bool);
     impl Read for Failing {
-        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "connection lost",
-            ))
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if !self.0 {
+                self.0 = true;
+                out[..7].copy_from_slice(b"true   ");
+                return Ok(7);
+            }
+            Err(nextjson::Error::custom("connection lost"))
         }
     }
-    let reader = (&b"true   "[..]).chain(Failing);
+    let reader = Failing(false);
     let err = nextjson::from_reader::<_, bool>(reader).unwrap_err();
     assert!(err.to_string().contains("connection lost"));
 }
@@ -343,24 +359,6 @@ fn public_json_encoders_reject_invalid_event_sequences() {
         assert!(nextjson::to_vec_pretty(&value).is_err());
         assert!(nextjson::to_writer(Vec::new(), &value).is_err());
         assert!(nextjson::to_writer_pretty(Vec::new(), &value).is_err());
-        assert!(nextjson::to_io_writer(Vec::new(), &value).is_err());
+        assert!(nextjson::to_writer(Vec::new(), &value).is_err());
     }
-}
-
-#[test]
-fn map_remains_consistent_when_retain_predicate_panics() {
-    let mut map: nextjson::Map = (0..32).map(|i| (i.to_string(), Value::from(i))).collect();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        map.retain(|key, _| {
-            assert_ne!(key, "20", "predicate failure");
-            key.parse::<u32>().unwrap() % 2 == 0
-        });
-    }));
-    assert!(result.is_err());
-    for (key, value) in map.iter() {
-        assert_eq!(map.get(key), Some(value), "stale index for {key}");
-    }
-    assert!(!map.contains_key("1"));
-    map.insert("new".into(), Value::Null);
-    assert_eq!(map.remove("new"), Some(Value::Null));
 }

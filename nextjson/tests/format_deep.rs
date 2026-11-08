@@ -1,5 +1,9 @@
 //! Intensive syntax and error branch coverage for toml/msgpack/json5/yaml
 
+#![no_std]
+extern crate alloc;
+use alloc::vec;
+
 use nextjson::formats::Format;
 use nextjson::Value;
 
@@ -71,7 +75,6 @@ fn json5_syntax_and_error_branches() {
     assert_eq!(v.as_f64(), Some(1000.0));
     let v: Value = Json5.decode(b"Infinity").unwrap();
     assert!(v.is_number());
-    // 错误分支。
     assert!(Json5.decode::<Value>(b"{\"a\": }").is_err()); // Missing Values
     assert!(Json5.decode::<Value>(b"\"unterminated").is_err()); // Unclosed string
     assert!(Json5.decode::<Value>(b"'\\u12'").is_err()); // truncation of Unicode escape sequences
@@ -84,12 +87,10 @@ fn json5_syntax_and_error_branches() {
 #[test]
 fn yaml_flow_and_error_branches() {
     use nextjson::formats::Yaml;
-    // 合法分支：流式、锚点式、多行。
     let v: Value = Yaml.decode(b"a: {b: 1, c: [1, 2]}").unwrap();
     assert_eq!(v["a"]["b"], Value::from(1_i64));
     let v: Value = Yaml.decode(b"- one\n- two\n").unwrap();
     assert_eq!(v.as_array().unwrap().len(), 2);
-    // 错误分支。
     assert!(Yaml.decode::<Value>(b"a: [1, 2").is_err()); // Unclosed flow cytometry
     assert!(Yaml.decode::<Value>(b"{a: 1").is_err()); // Unclosed flow objects
     assert!(Yaml.decode::<Value>(b"a:").is_err()); // Missing values

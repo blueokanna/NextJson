@@ -1,6 +1,13 @@
 //! Miscellaneous entry coverage: TypeSchema::name full variant, top-level pretty/slice/reader entry,
 //! Value Display, Map operations.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::{schema_of, Bytes, NsonSerialize, Value};
 
 #[test]
@@ -26,7 +33,7 @@ fn type_schema_name_all_variants() {
     assert_eq!(schema_of::<Bytes<'static>>().name(), "bytes");
     assert_eq!(schema_of::<Vec<i32>>().name(), "sequence");
     assert_eq!(
-        schema_of::<std::collections::BTreeMap<String, i32>>().name(),
+        schema_of::<alloc::collections::BTreeMap<String, i32>>().name(),
         "map"
     );
     assert_eq!(schema_of::<Option<i32>>().name(), "i32");

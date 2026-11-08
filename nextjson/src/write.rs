@@ -5,8 +5,8 @@ use crate::error::{Error, Result};
 /// A minimal byte sink.
 ///
 /// This is the library's own abstraction so the core stays `no_std` and
-/// dependency-free. Implementations are provided for `alloc` buffers, and
-/// (behind the `std` feature) a wrapper for any `std::io::Write` type.
+/// dependency-free. Implementations are provided for `alloc` buffers and
+/// fixed-size slices. Device adapters implement this trait in the application.
 pub trait Write {
     /// Write all bytes.
     fn write_all(&mut self, buf: &[u8]) -> Result<()>;
@@ -53,19 +53,5 @@ impl Write for &mut [u8] {
         head.copy_from_slice(buf);
         *self = tail;
         Ok(())
-    }
-}
-
-/// Adapter from `std::io::Write` to this library's `Write`.
-#[cfg(feature = "std")]
-pub struct StdWriter<W>(pub W);
-
-#[cfg(feature = "std")]
-impl<W: std::io::Write> Write for StdWriter<W> {
-    fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        self.0.write_all(buf).map_err(Error::io)
-    }
-    fn flush(&mut self) -> Result<()> {
-        self.0.flush().map_err(Error::io)
     }
 }

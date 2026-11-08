@@ -1,6 +1,12 @@
 //! Depth / skip / option / map-key coverage for the native decoder and the
 //! Value / Map / Number public APIs.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+
 use nextjson::{DecodeConfig, Decoder, FormatDecoder, Map, NsonDeserialize, Number, Value};
 
 #[test]

@@ -1,5 +1,8 @@
 //! Codegen for the `const SCHEMA: TypeSchema` expression.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use crate::attr::{self, ContainerAttrs, FieldAttrs};
 use crate::{Data, Fields, Input};
 
@@ -532,7 +535,7 @@ fn split_commas(s: &str) -> Vec<String> {
                 cur.push(c);
             }
             ',' if depth == 0 => {
-                out.push(std::mem::take(&mut cur));
+                out.push(core::mem::take(&mut cur));
             }
             _ => cur.push(c),
         }

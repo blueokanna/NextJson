@@ -53,12 +53,12 @@
 //!
 //! ## Features
 //!
-//! - `std` (default): standard I/O adapters and standard-library integrations.
+//! All configurations use `no_std` with `alloc`; there is no `std` feature.
 //! - `derive` (default): repository-owned `NsonSerialize` and
 //!   `NsonDeserialize` procedural macros.
 //! - `simd` (opt-in): architecture-accelerated JSON string scanning. On
-//!   x86-64 this uses SSE2 (always present) plus AVX2 after a runtime CPUID
-//!   check; on aarch64 it uses NEON; everywhere else (and whenever `simd` is
+//!   x86-64 this uses SSE2, or AVX2 when enabled in the compilation target;
+//!   on aarch64 it uses NEON; everywhere else (and whenever `simd` is
 //!   off) a portable 8/16-byte register-width SWAR fallback is used. The
 //!   `unsafe` code lives only in the private `scan` module and only when
 //!   `simd` is enabled; default builds keep the crate-wide
@@ -97,8 +97,7 @@
 //!    is hand-rolled with overflow detection.
 //! 7. **Safety boundary** - the library is `#![deny(unsafe_code)]`, including
 //!    nextdecode slots and partial-initialization cleanup. `no_std` is fully
-//!    supported: the core uses only `core` + `alloc`, with `std`-only types
-//!    behind the `std` feature.
+//!    supported: every target configuration uses only `core` + `alloc`.
 //! 8. **Streaming cross-format relay** - JSON and the JSON-compatible CBOR
 //!    profile exchange borrowed structural events without an intermediate
 //!    [`Value`].
@@ -119,7 +118,7 @@
 //! Applications must still enforce total input bytes, collection sizes, CPU
 //! time, and output quotas. `from_slice` / `from_str` operate on a complete
 //! in-memory input; `from_reader` (std) pulls incrementally from any
-//! `std::io::Read` source.
+//! `Read` source.
 //! [`from_reader_with_limit`] additionally bounds total input bytes. Streamed
 //! input is retained for backtracking, so an unbounded reader needs an explicit
 //! quota. Public JSON and format encoding helpers cap container depth at 128.
@@ -135,9 +134,6 @@
 
 extern crate alloc;
 
-#[cfg(feature = "std")]
-extern crate std;
-
 #[cfg(feature = "derive")]
 pub use nextjson_derive::{NsonDeserialize, NsonSerialize};
 
@@ -150,11 +146,11 @@ pub use crate::encoding::{EncodeConfig, Encoder, FastEncoder};
 pub use crate::error::{Error, FormatError, Result};
 pub use crate::map::Map;
 pub use crate::number::Number;
+pub use crate::read::Read;
 pub use crate::schema::{
     EnumSchema, FieldSchema, NsonSchema, Policy, StructSchema, TypeSchema, VariantSchema,
 };
 pub use crate::ser::{FormatEncoder, NsonSerialize};
-#[cfg(feature = "std")]
 pub use crate::stream::StreamDecoder;
 pub use crate::validate::{
     validate, validate_value, validate_value_with, validate_with, Report, ValidateConfig,
@@ -177,10 +173,11 @@ pub mod map;
 mod number;
 #[doc(hidden)]
 pub mod private;
+mod read;
 mod scan;
 mod schema;
 mod ser;
-#[cfg(feature = "std")]
+mod stack;
 pub mod stream;
 mod validate;
 mod value;
@@ -269,19 +266,6 @@ where
     Ok(())
 }
 
-/// Serialize a value to a `std::io::Write` sink (requires the `std` feature).
-#[cfg(feature = "std")]
-pub fn to_io_writer<W, T>(writer: W, value: &T) -> Result<()>
-where
-    W: std::io::Write,
-    T: NsonSerialize + ?Sized,
-{
-    let mut encoder = Encoder::<_>::new(crate::write::StdWriter(writer));
-    NsonSerialize::nextencode(value, &mut encoder)?;
-    encoder.finish()?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Top-level deserialization entry points
 // ---------------------------------------------------------------------------
@@ -307,16 +291,15 @@ pub fn from_slice<'de, T: NsonDeserialize<'de>>(slice: &'de [u8]) -> Result<T> {
     nextdecode(slice)
 }
 
-/// Deserialize from a `std::io::Read` (requires the `std` feature).
+/// Deserialize from a `Read`.
 ///
 /// The input is pulled incrementally (see [`StreamDecoder`]), so decoding
 /// starts before the whole payload has arrived. The target type must be
 /// deserializable for any lifetime (owned): borrowed inputs (`&str`, `&[u8]`,
 /// `nextjson::Bytes`) cannot come from a stream.
-#[cfg(feature = "std")]
 pub fn from_reader<R, T>(reader: R) -> Result<T>
 where
-    R: std::io::Read,
+    R: Read,
     T: for<'de> NsonDeserialize<'de>,
 {
     let mut decoder = StreamDecoder::new(reader);
@@ -331,10 +314,9 @@ where
 /// rejected rather than silently truncated. The decoder may consume one byte
 /// beyond the limit to check for EOF; see [`StreamDecoder::with_input_limit`].
 /// Applications must separately bound decoded allocations and I/O timeouts.
-#[cfg(feature = "std")]
 pub fn from_reader_with_limit<R, T>(reader: R, max_bytes: usize) -> Result<T>
 where
-    R: std::io::Read,
+    R: Read,
     T: for<'de> NsonDeserialize<'de>,
 {
     let mut decoder = StreamDecoder::new(reader).with_input_limit(max_bytes);

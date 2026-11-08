@@ -4,6 +4,12 @@
 //! These tests exercise lexer/parser/protocol failure paths that round-trip
 //! tests do not reach, so the coverage gate sees the error branches executed.
 
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats;
 use nextjson::formats::Format;
 use nextjson::{Decoder, Encoder, Error, NsonDeserialize, Number, Token, Value, Write};
@@ -188,8 +194,8 @@ fn checked_encoder_protocol_errors() {
 // ---------------------------------------------------------------------------
 
 struct OneByte<R>(R);
-impl<R: std::io::Read> std::io::Read for OneByte<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+impl<R: nextjson::Read> nextjson::Read for OneByte<R> {
+    fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }

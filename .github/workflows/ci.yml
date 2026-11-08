@@ -20,6 +20,29 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  bare-metal:
+    name: no_std (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-none, thumbv6m-none-eabi]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Rust and bare-metal target
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - name: Reject standard-library source dependencies
+        shell: bash
+        run: |
+          if grep -R -n -E 'std::|extern crate std' nextjson/src nextjson-derive/src nextjson/tests nextjson/examples; then
+            echo 'std is permitted only in benchmark targets'
+            exit 1
+          fi
+      - name: Build core and full feature configurations without an OS
+        run: |
+          cargo build -p nextjson --release --no-default-features --target ${{ matrix.target }} --locked
+          cargo build -p nextjson --release --all-features --target ${{ matrix.target }} --locked
+          cargo build -p nextjson --examples --release --target ${{ matrix.target }} --locked
+
   # ---------------------------------------------------------------------------
   # Dependency gate: the lockfile must never reference a third-party source.
   # ---------------------------------------------------------------------------
@@ -94,6 +117,11 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy
       - name: Run clippy
         run: cargo clippy ${{ matrix.args }} --locked -- -D warnings
+      - name: Check the compile-time AVX2 path
+        if: matrix.name == 'all-features'
+        env:
+          RUSTFLAGS: -C target-feature=+avx2
+        run: cargo clippy -p nextjson --lib --all-features --locked -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Test gate: full test suite on stable and MSRV (rust-version = 1.78) across
@@ -185,3 +213,6 @@ jobs:
       - name: Compile serde comparison benchmark (out-of-workspace)
         working-directory: benchmarks/serde-comparison
         run: cargo build --release --locked
+      - name: Run benchmark-only interoperability and host unwind checks
+        working-directory: benchmarks/serde-comparison
+        run: cargo test --locked

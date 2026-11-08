@@ -5,6 +5,10 @@
 //! - Safety policy: schema-declared limits are enforced on decoded values.
 //! - Contract inspection: derived types expose their full policy tree.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+
 use nextjson::{
     check, check_between, CompatKind, NsonDeserialize, NsonSchema, NsonSerialize, Severity,
 };

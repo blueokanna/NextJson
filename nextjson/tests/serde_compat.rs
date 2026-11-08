@@ -8,6 +8,11 @@
 //! - Schema downgrade for `serialize_with` / `deserialize_with` / `with` fields
 //! - `Opaque` (field type does not need to implement `NsonSchema`, compileable)
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, TypeSchema};
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
 #[njson(default = "default_config")]
@@ -233,14 +238,14 @@ fn custom_serializer_schema_is_opaque() {
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
 struct WithMarker<T> {
     value: T,
-    _marker: std::marker::PhantomData<T>,
+    _marker: core::marker::PhantomData<T>,
 }
 
 #[test]
 fn phantom_data_field_auto_skipped() {
     let v = WithMarker {
         value: 5_i32,
-        _marker: std::marker::PhantomData,
+        _marker: core::marker::PhantomData,
     };
     assert_eq!(to_string(&v).unwrap(), r#"{"value":5}"#);
     let back: WithMarker<i32> = from_str(r#"{"value":5}"#).unwrap();

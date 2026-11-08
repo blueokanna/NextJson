@@ -1,5 +1,8 @@
 //! Codegen for `NsonDeserialize` implementations.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use crate::attr::{self, ContainerAttrs, FieldAttrs};
 use crate::{Fields, Input};
 

@@ -1,5 +1,5 @@
 //! Serialization: buffered [`Encoder`], the [`NsonSerialize`] trait, and
-//! standard-library implementations.
+//! implementations for core and alloc types.
 //!
 //! Design points:
 //! - hand-written stack-buffer integer and float output;
@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque};
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
+#[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -91,8 +92,45 @@ pub trait FormatEncoder {
     /// [`crate::error::Error`].
     type Error: FormatError;
 
+    /// Emit an array of unsigned integers. The default uses ordinary events;
+    /// codecs may batch this primitive-only sequence without per-element state dispatch.
+    fn write_u64_array(&mut self, values: &[u64]) -> Result<(), Self::Error> {
+        self.begin_array_len(values.len())?;
+        for &value in values {
+            self.separator()?;
+            self.write_u64(value)?;
+        }
+        self.end_array()
+    }
+
+    /// Emit an array of signed integers. See [`Self::write_u64_array`].
+    fn write_i64_array(&mut self, values: &[i64]) -> Result<(), Self::Error> {
+        self.begin_array_len(values.len())?;
+        for &value in values {
+            self.separator()?;
+            self.write_i64(value)?;
+        }
+        self.end_array()
+    }
+
+    /// Emit an array of floats, preserving this codec's non-finite-value policy.
+    fn write_f64_array(&mut self, values: &[f64]) -> Result<(), Self::Error> {
+        self.begin_array_len(values.len())?;
+        for &value in values {
+            self.separator()?;
+            self.write_f64(value)?;
+        }
+        self.end_array()
+    }
+
     /// Begin an array container.
     fn begin_array(&mut self) -> Result<(), Self::Error>;
+    /// Begin an array whose element count is known before writing.
+    /// Codecs may emit its length prefix immediately, but must validate the
+    /// actual count if they use `len` on the wire. The default ignores the hint.
+    fn begin_array_len(&mut self, _len: usize) -> Result<(), Self::Error> {
+        self.begin_array()
+    }
     /// Emit the separator preceding a subsequent array element.
     ///
     /// Called once per element, including the first, so binary codecs can use
@@ -102,6 +140,10 @@ pub trait FormatEncoder {
     fn end_array(&mut self) -> Result<(), Self::Error>;
     /// Begin an object container.
     fn begin_object(&mut self) -> Result<(), Self::Error>;
+    /// Begin an object with a known entry count. See [`Self::begin_array_len`].
+    fn begin_object_len(&mut self, _len: usize) -> Result<(), Self::Error> {
+        self.begin_object()
+    }
     /// Emit an object key.
     ///
     /// Called once per entry, including the first, so binary codecs can use it
@@ -191,6 +233,12 @@ pub trait FormatEncoder {
         Ok(())
     }
 
+    /// Finish the payload introduced by [`Self::write_some`]. Formats with
+    /// explicit option delimiters close them here; other formats do nothing.
+    fn end_some(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Emit a map key.
     ///
     /// The default serializes the key to a string and emits it with
@@ -242,6 +290,34 @@ impl<'a, E: FormatEncoder + ?Sized> CheckedEncoder<'a, E> {
 
 impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
     type Error = E::Error;
+
+    fn write_u64_array(&mut self, values: &[u64]) -> Result<(), E::Error> {
+        self.state.begin(Kind::Array)?;
+        self.inner.write_u64_array(values)?;
+        self.state.end(Kind::Array).map_err(Into::into)
+    }
+
+    fn write_i64_array(&mut self, values: &[i64]) -> Result<(), E::Error> {
+        self.state.begin(Kind::Array)?;
+        self.inner.write_i64_array(values)?;
+        self.state.end(Kind::Array).map_err(Into::into)
+    }
+
+    fn write_f64_array(&mut self, values: &[f64]) -> Result<(), E::Error> {
+        self.state.begin(Kind::Array)?;
+        self.inner.write_f64_array(values)?;
+        self.state.end(Kind::Array).map_err(Into::into)
+    }
+
+    fn begin_array_len(&mut self, len: usize) -> Result<(), E::Error> {
+        self.state.begin(Kind::Array).map(drop)?;
+        self.inner.begin_array_len(len)
+    }
+
+    fn begin_object_len(&mut self, len: usize) -> Result<(), E::Error> {
+        self.state.begin(Kind::Object).map(drop)?;
+        self.inner.begin_object_len(len)
+    }
 
     fn begin_array(&mut self) -> Result<(), E::Error> {
         self.state.begin(Kind::Array).map(drop)?;
@@ -374,6 +450,10 @@ impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
         self.inner.write_some()
     }
 
+    fn end_some(&mut self) -> Result<(), E::Error> {
+        self.inner.end_some()
+    }
+
     fn map_key<K: NsonSerialize>(&mut self, key: &K) -> Result<(), E::Error> {
         self.state.key()?;
         self.inner.map_key(key)
@@ -384,8 +464,33 @@ impl<E: FormatEncoder + ?Sized> FormatEncoder for CheckedEncoder<'_, E> {
     }
 }
 
-impl<W: Write, const VALIDATE: bool> FormatEncoder for Encoder<W, VALIDATE> {
+impl<W: Write, const VALIDATE: bool, const JSON_LINES: bool> FormatEncoder
+    for Encoder<W, VALIDATE, JSON_LINES>
+{
     type Error = crate::error::Error;
+
+    fn write_u64_array(&mut self, values: &[u64]) -> Result<()> {
+        self.primitive_array(values, |buffer, value| {
+            write_u64_into(buffer, value);
+            Ok(())
+        })
+    }
+
+    fn write_i64_array(&mut self, values: &[i64]) -> Result<()> {
+        self.primitive_array(values, |buffer, value| {
+            write_i64_into(buffer, value);
+            Ok(())
+        })
+    }
+
+    fn write_f64_array(&mut self, values: &[f64]) -> Result<()> {
+        self.primitive_array(values, |buffer, value| {
+            if !value.is_finite() {
+                return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
+            }
+            write_float_into(buffer, value)
+        })
+    }
 
     fn begin_array(&mut self) -> Result<(), Self::Error> {
         Encoder::begin_array(self)
@@ -472,6 +577,20 @@ pub trait NsonSerialize: NsonSchema {
     /// Errors are produced in the target format's own error type
     /// ([`FormatEncoder::Error`]).
     fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error>;
+
+    /// Encode a contiguous sequence of this type. Primitive implementations
+    /// can select a codec's batch operation; custom types retain checked events.
+    fn nextencode_slice<E: FormatEncoder>(values: &[Self], encoder: &mut E) -> Result<(), E::Error>
+    where
+        Self: Sized,
+    {
+        encoder.begin_array_len(values.len())?;
+        for value in values {
+            encoder.separator()?;
+            value.nextencode(encoder)?;
+        }
+        encoder.end_array()
+    }
 }
 
 /// Trusted JSON encoder variant: skips per-value event-protocol validation.
@@ -499,18 +618,24 @@ pub type FastEncoder<W> = Encoder<W, false>;
 /// fast path trades misuse diagnostics for less validation work.
 /// Both reject container nesting beyond 128 levels. After any encoding or
 /// writer error, discard the encoder; already written bytes are not rolled back.
-pub struct Encoder<W: Write, const VALIDATE: bool = true> {
+///
+/// `JSON_LINES = true` selects compact NDJSON framing at compile time: the
+/// root array becomes one JSON value per line, other roots become one line.
+/// Pretty printing is disabled in that mode; nested values retain JSON syntax.
+pub struct Encoder<W: Write, const VALIDATE: bool = true, const JSON_LINES: bool = false> {
     writer: W,
     buf: Vec<u8>,
     depth: usize,
-    frames: Vec<EncodeFrame>,
+    frames: crate::stack::Stack<EncodeFrame>,
     root_written: bool,
+    line_stream: bool,
     pretty: bool,
     indent: &'static str,
     escape_non_ascii: bool,
     flush_threshold: usize,
 }
 
+#[derive(Clone, Copy)]
 enum EncodeFrame {
     Array { first: bool, ready: bool },
     Object { first: bool, pending_value: bool },
@@ -518,7 +643,7 @@ enum EncodeFrame {
 
 const FLUSH_THRESHOLD: usize = 8192;
 
-impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
+impl<W: Write, const VALIDATE: bool, const JSON_LINES: bool> Encoder<W, VALIDATE, JSON_LINES> {
     /// Create an encoder with the default (compact) config.
     pub fn new(writer: W) -> Self {
         Encoder::with_config(writer, EncodeConfig::default())
@@ -530,11 +655,11 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
             writer,
             buf: Vec::with_capacity(1024),
             depth: 0,
-            // Preallocate for the common nesting depth so deeply nested
-            // containers do not reallocate on every `begin_*` push.
-            frames: Vec::with_capacity(32),
+            // Shallow values need no container-stack allocation.
+            frames: crate::stack::Stack::new(),
             root_written: false,
-            pretty: config.pretty,
+            line_stream: false,
+            pretty: config.pretty && !JSON_LINES,
             indent: config.indent,
             escape_non_ascii: config.escape_non_ascii,
             flush_threshold: FLUSH_THRESHOLD,
@@ -545,6 +670,9 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     pub fn finish(mut self) -> Result<W> {
         if VALIDATE {
             self.validate_finished()?;
+        }
+        if JSON_LINES && !self.line_stream {
+            self.buf.push(b'\n');
         }
         self.writer.write_all(&self.buf)?;
         self.buf.clear();
@@ -566,6 +694,29 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
             self.buf.clear();
         }
         Ok(())
+    }
+
+    fn primitive_array<T: Copy>(
+        &mut self,
+        values: &[T],
+        mut write: impl FnMut(&mut Vec<u8>, T) -> Result<()>,
+    ) -> Result<()> {
+        self.begin_array()?;
+        if let Some(EncodeFrame::Array { first, .. }) = self.frames.last_mut() {
+            *first = values.is_empty();
+        }
+        for (index, &value) in values.iter().enumerate() {
+            if index != 0 {
+                if JSON_LINES && self.depth == 1 && self.line_stream {
+                    self.buf.push(b'\n');
+                } else {
+                    self.write_separator(false);
+                }
+            }
+            write(&mut self.buf, value)?;
+            self.maybe_flush()?;
+        }
+        self.end_array()
     }
 
     // -----------------------------------------------------------------
@@ -631,7 +782,11 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
         if VALIDATE {
             self.start_value()?;
         }
-        self.buf.push(b'[');
+        if JSON_LINES && self.depth == 0 {
+            self.line_stream = true;
+        } else {
+            self.buf.push(b'[');
+        }
         self.frames.push(EncodeFrame::Array {
             first: true,
             ready: false,
@@ -658,7 +813,8 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
                 None => return Err(Error::custom("array end without matching start")),
             }
         }
-        self.frames
+        let frame = self
+            .frames
             .pop()
             .ok_or_else(|| Error::custom("array end without matching start"))?;
         self.depth -= 1;
@@ -666,11 +822,18 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
             self.buf.push(b'\n');
             self.write_indent();
         }
-        self.buf.push(b']');
+        if JSON_LINES && self.depth == 0 {
+            if matches!(frame, EncodeFrame::Array { first: false, .. }) {
+                self.buf.push(b'\n');
+            }
+        } else {
+            self.buf.push(b']');
+        }
         self.maybe_flush()
     }
 
     /// Write an object key: separator + `"key":`.
+    #[inline]
     pub fn key(&mut self, key: &str) -> Result<()> {
         let first = if VALIDATE {
             match self.frames.last_mut() {
@@ -705,6 +868,7 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     ///
     /// The first entry of a container produces nothing; subsequent entries
     /// produce `,` (plus newline and indent in pretty mode).
+    #[inline]
     pub fn separator(&mut self) -> Result<()> {
         let first = if VALIDATE {
             match self.frames.last_mut() {
@@ -723,7 +887,13 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
                 _ => return Err(Error::custom("fast encoder: array separator outside array")),
             }
         };
-        self.write_separator(first);
+        if JSON_LINES && self.depth == 1 && self.line_stream {
+            if !first {
+                self.buf.push(b'\n');
+            }
+        } else {
+            self.write_separator(first);
+        }
         Ok(())
     }
 
@@ -804,6 +974,7 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     }
 
     /// Write a string (auto-escaped).
+    #[inline]
     pub fn write_str(&mut self, s: &str) -> Result<()> {
         if VALIDATE {
             self.start_value()?;
@@ -862,6 +1033,7 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     }
 
     /// Write an `i64`.
+    #[inline]
     pub fn write_i64(&mut self, v: i64) -> Result<()> {
         if VALIDATE {
             self.start_value()?;
@@ -871,6 +1043,7 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     }
 
     /// Write a `u64`.
+    #[inline]
     pub fn write_u64(&mut self, v: u64) -> Result<()> {
         if VALIDATE {
             self.start_value()?;
@@ -901,6 +1074,7 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     ///
     /// Integral floats are written as `1.0` rather than `1` so float-ness
     /// survives round-trips.
+    #[inline]
     pub fn write_f64(&mut self, v: f64) -> Result<()> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
@@ -913,6 +1087,7 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     }
 
     /// Write an `f32` using its shortest round-trip representation.
+    #[inline]
     pub fn write_f32(&mut self, v: f32) -> Result<()> {
         if !v.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, None, None, 0));
@@ -925,7 +1100,8 @@ impl<W: Write, const VALIDATE: bool> Encoder<W, VALIDATE> {
     }
 }
 
-impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
+impl<const VALIDATE: bool, const JSON_LINES: bool> Encoder<Vec<u8>, VALIDATE, JSON_LINES> {
+    #[inline]
     pub(crate) fn for_vec(config: EncodeConfig) -> Self {
         let mut encoder = Encoder::with_config(Vec::new(), config);
         encoder.flush_threshold = usize::MAX;
@@ -935,6 +1111,9 @@ impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
     pub(crate) fn finish_vec(mut self) -> Result<Vec<u8>> {
         if VALIDATE {
             self.validate_finished()?;
+        }
+        if JSON_LINES && !self.line_stream {
+            self.buf.push(b'\n');
         }
         debug_assert!(self.writer.is_empty());
         Ok(core::mem::take(&mut self.buf))
@@ -953,6 +1132,7 @@ impl<const VALIDATE: bool> Encoder<Vec<u8>, VALIDATE> {
 /// `extend_from_slice`, and only the escape itself is emitted byte-by-byte.
 /// A long string whose escapes sit near the tail is therefore almost pure
 /// `memcpy` instead of a per-byte dispatch loop.
+#[inline]
 fn write_escaped_str(buf: &mut Vec<u8>, s: &str, escape_non_ascii: bool) {
     buf.push(b'"');
     let bytes = s.as_bytes();
@@ -1030,7 +1210,8 @@ static DIGITS2: &[u8; 200] = b"0001020304050607080910111213141516171819202122232
 /// `__udivti3` libcall on x86-64 (u128 division has no single hardware
 /// instruction), several times slower than the native `u64` `div`. Integer
 /// values dominate JSON payloads, so the native-width path is the hot one.
-fn write_u64_into(buf: &mut Vec<u8>, mut value: u64) {
+#[inline]
+pub(crate) fn write_u64_into(buf: &mut Vec<u8>, mut value: u64) {
     // Fast single-digit path for the most common small values: no table
     // load, no pair-cleanup branch.
     if value < 10 {
@@ -1059,7 +1240,8 @@ fn write_u64_into(buf: &mut Vec<u8>, mut value: u64) {
     buf.extend_from_slice(&digits[cursor..]);
 }
 
-fn write_i64_into(buf: &mut Vec<u8>, value: i64) {
+#[inline]
+pub(crate) fn write_i64_into(buf: &mut Vec<u8>, value: i64) {
     if value < 0 {
         buf.push(b'-');
         write_u64_into(buf, value.wrapping_neg() as u64);
@@ -1069,7 +1251,7 @@ fn write_i64_into(buf: &mut Vec<u8>, value: i64) {
 }
 
 /// Integer output for the wide (128-bit) path only.
-fn write_unsigned_integer_into(buf: &mut Vec<u8>, mut value: u128) {
+pub(crate) fn write_unsigned_integer_into(buf: &mut Vec<u8>, mut value: u128) {
     let mut digits = [0_u8; 39];
     let mut cursor = digits.len();
     while value >= 100 {
@@ -1091,7 +1273,7 @@ fn write_unsigned_integer_into(buf: &mut Vec<u8>, mut value: u128) {
     buf.extend_from_slice(&digits[cursor..]);
 }
 
-fn write_signed_integer_into(buf: &mut Vec<u8>, value: i128) {
+pub(crate) fn write_signed_integer_into(buf: &mut Vec<u8>, value: i128) {
     if value < 0 {
         buf.push(b'-');
         write_unsigned_integer_into(buf, value.wrapping_neg() as u128);
@@ -1128,10 +1310,45 @@ impl fmt::Write for FloatBuffer {
     }
 }
 
-fn write_float_into<T: fmt::Display>(buf: &mut Vec<u8>, value: T) -> Result<()> {
+#[inline]
+pub(crate) fn write_float_into<T: fmt::Display + fmt::LowerExp + Copy + Into<f64>>(
+    buf: &mut Vec<u8>,
+    value: T,
+) -> Result<()> {
+    // Integer, half, quarter and eighth values need no general decimal
+    // conversion. Multiplication by eight is exact in binary. Conservative
+    // bounds keep distinct three-decimal spellings distinguishable for the
+    // source width, so this path also preserves shortest fixed-point output.
+    let number = value.into();
+    // Clearing the sign bit also handles -0.0 without requiring float
+    // methods that were unavailable in core on the minimum Rust version.
+    let magnitude = f64::from_bits(number.to_bits() & 0x7fff_ffff_ffff_ffff);
+    let bound = if core::mem::size_of::<T>() == 4 {
+        16_384.0
+    } else {
+        1e12
+    };
+    if magnitude < bound {
+        let scaled = magnitude * 8.0;
+        let integer = scaled as u64;
+        if scaled == integer as f64 {
+            if number.is_sign_negative() {
+                buf.push(b'-');
+            }
+            write_u64_into(buf, integer / 8);
+            const FRACTIONS: [&[u8]; 8] = [
+                b".0", b".125", b".25", b".375", b".5", b".625", b".75", b".875",
+            ];
+            buf.extend_from_slice(FRACTIONS[(integer % 8) as usize]);
+            return Ok(());
+        }
+    }
     let mut formatted = FloatBuffer::new();
-    core::write!(&mut formatted, "{value}")
-        .map_err(|_| Error::custom("internal float formatting buffer exhausted"))?;
+    if core::write!(&mut formatted, "{value}").is_err() {
+        formatted.len = 0;
+        core::write!(&mut formatted, "{value:e}")
+            .map_err(|_| Error::custom("internal float formatting buffer exhausted"))?;
+    }
     let bytes = formatted.as_bytes();
     buf.extend_from_slice(bytes);
     if !bytes.iter().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
@@ -1141,7 +1358,7 @@ fn write_float_into<T: fmt::Display>(buf: &mut Vec<u8>, value: T) -> Result<()> 
 }
 
 // ---------------------------------------------------------------------------
-// std / alloc NsonSchema + NsonSerialize implementations
+// core / alloc NsonSchema + NsonSerialize implementations
 // ---------------------------------------------------------------------------
 
 macro_rules! impl_scalar {
@@ -1162,17 +1379,17 @@ impl_scalar! {
     i8 => TypeSchema::I8 => write_i8 => i8,
     i16 => TypeSchema::I16 => write_i16 => i16,
     i32 => TypeSchema::I32 => write_i32 => i32,
-    i64 => TypeSchema::I64 => write_i64 => i64,
+
     i128 => TypeSchema::I128 => write_i128 => i128,
     isize => TypeSchema::Isize => write_i64 => i64,
     u8 => TypeSchema::U8 => write_u8 => u8,
     u16 => TypeSchema::U16 => write_u16 => u16,
     u32 => TypeSchema::U32 => write_u32 => u32,
-    u64 => TypeSchema::U64 => write_u64 => u64,
+
     u128 => TypeSchema::U128 => write_u128 => u128,
     usize => TypeSchema::Usize => write_u64 => u64,
     f32 => TypeSchema::F32 => write_f32 => f32,
-    f64 => TypeSchema::F64 => write_f64 => f64,
+
 }
 
 impl NsonSchema for char {
@@ -1184,6 +1401,50 @@ impl NsonSerialize for char {
     }
 }
 
+impl NsonSchema for u64 {
+    const SCHEMA: TypeSchema = TypeSchema::U64;
+}
+impl NsonSerialize for u64 {
+    fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error> {
+        encoder.write_u64(*self)
+    }
+    fn nextencode_slice<E: FormatEncoder>(
+        values: &[Self],
+        encoder: &mut E,
+    ) -> Result<(), E::Error> {
+        encoder.write_u64_array(values)
+    }
+}
+
+impl NsonSchema for i64 {
+    const SCHEMA: TypeSchema = TypeSchema::I64;
+}
+impl NsonSerialize for i64 {
+    fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error> {
+        encoder.write_i64(*self)
+    }
+    fn nextencode_slice<E: FormatEncoder>(
+        values: &[Self],
+        encoder: &mut E,
+    ) -> Result<(), E::Error> {
+        encoder.write_i64_array(values)
+    }
+}
+
+impl NsonSchema for f64 {
+    const SCHEMA: TypeSchema = TypeSchema::F64;
+}
+impl NsonSerialize for f64 {
+    fn nextencode<E: FormatEncoder>(&self, encoder: &mut E) -> Result<(), E::Error> {
+        encoder.write_f64(*self)
+    }
+    fn nextencode_slice<E: FormatEncoder>(
+        values: &[Self],
+        encoder: &mut E,
+    ) -> Result<(), E::Error> {
+        encoder.write_f64_array(values)
+    }
+}
 impl NsonSchema for str {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
@@ -1247,9 +1508,11 @@ impl<T: NsonSerialize> NsonSerialize for Rc<T> {
     }
 }
 
+#[cfg(target_has_atomic = "ptr")]
 impl<T: NsonSerialize> NsonSchema for Arc<T> {
     const SCHEMA: TypeSchema = T::SCHEMA;
 }
+#[cfg(target_has_atomic = "ptr")]
 impl<T: NsonSerialize> NsonSerialize for Arc<T> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         T::nextencode(self, e)
@@ -1282,7 +1545,8 @@ impl<T: NsonSerialize> NsonSerialize for Option<T> {
         match self {
             Some(v) => {
                 e.write_some()?;
-                T::nextencode(v, e)
+                T::nextencode(v, e)?;
+                e.end_some()
             }
             None => e.write_none(),
         }
@@ -1348,12 +1612,7 @@ impl<T: NsonSerialize> NsonSchema for Vec<T> {
 }
 impl<T: NsonSerialize> NsonSerialize for Vec<T> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
-        for item in self {
-            e.separator()?;
-            T::nextencode(item, e)?;
-        }
-        e.end_array()
+        T::nextencode_slice(self, e)
     }
 }
 
@@ -1362,12 +1621,7 @@ impl<T: NsonSerialize> NsonSchema for [T] {
 }
 impl<T: NsonSerialize> NsonSerialize for [T] {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
-        for item in self {
-            e.separator()?;
-            T::nextencode(item, e)?;
-        }
-        e.end_array()
+        T::nextencode_slice(self, e)
     }
 }
 
@@ -1376,12 +1630,7 @@ impl<T: NsonSerialize, const N: usize> NsonSchema for [T; N] {
 }
 impl<T: NsonSerialize, const N: usize> NsonSerialize for [T; N] {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
-        for item in self {
-            e.separator()?;
-            T::nextencode(item, e)?;
-        }
-        e.end_array()
+        T::nextencode_slice(self, e)
     }
 }
 
@@ -1399,7 +1648,7 @@ impl<T: NsonSerialize> NsonSchema for VecDeque<T> {
 }
 impl<T: NsonSerialize> NsonSerialize for VecDeque<T> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
+        e.begin_array_len(self.len())?;
         for item in self {
             e.separator()?;
             T::nextencode(item, e)?;
@@ -1413,7 +1662,7 @@ impl<T: NsonSerialize> NsonSchema for LinkedList<T> {
 }
 impl<T: NsonSerialize> NsonSerialize for LinkedList<T> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
+        e.begin_array_len(self.len())?;
         for item in self {
             e.separator()?;
             T::nextencode(item, e)?;
@@ -1427,7 +1676,7 @@ impl<T: NsonSerialize> NsonSchema for BTreeSet<T> {
 }
 impl<T: NsonSerialize> NsonSerialize for BTreeSet<T> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
+        e.begin_array_len(self.len())?;
         for item in self {
             e.separator()?;
             T::nextencode(item, e)?;
@@ -1441,7 +1690,7 @@ impl<T: NsonSerialize + Ord> NsonSchema for BinaryHeap<T> {
 }
 impl<T: NsonSerialize + Ord> NsonSerialize for BinaryHeap<T> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
+        e.begin_array_len(self.len())?;
         for item in self {
             e.separator()?;
             T::nextencode(item, e)?;
@@ -1455,48 +1704,12 @@ impl<K: NsonSerialize, V: NsonSerialize> NsonSchema for BTreeMap<K, V> {
 }
 impl<K: NsonSerialize, V: NsonSerialize> NsonSerialize for BTreeMap<K, V> {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_object()?;
+        e.begin_object_len(self.len())?;
         for (k, v) in self {
             e.map_key(k)?;
             V::nextencode(v, e)?;
         }
         e.end_object()
-    }
-}
-
-#[cfg(feature = "std")]
-impl<K: NsonSerialize + core::hash::Hash + Eq, V: NsonSerialize> NsonSchema
-    for std::collections::HashMap<K, V>
-{
-    const SCHEMA: TypeSchema = TypeSchema::Map(&V::SCHEMA);
-}
-#[cfg(feature = "std")]
-impl<K: NsonSerialize + core::hash::Hash + Eq, V: NsonSerialize> NsonSerialize
-    for std::collections::HashMap<K, V>
-{
-    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_object()?;
-        for (k, v) in self {
-            e.map_key(k)?;
-            V::nextencode(v, e)?;
-        }
-        e.end_object()
-    }
-}
-
-#[cfg(feature = "std")]
-impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSchema for std::collections::HashSet<T> {
-    const SCHEMA: TypeSchema = TypeSchema::Seq(&T::SCHEMA);
-}
-#[cfg(feature = "std")]
-impl<T: NsonSerialize + core::hash::Hash + Eq> NsonSerialize for std::collections::HashSet<T> {
-    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.begin_array()?;
-        for item in self {
-            e.separator()?;
-            T::nextencode(item, e)?;
-        }
-        e.end_array()
     }
 }
 
@@ -1553,63 +1766,34 @@ impl NsonSerialize for Duration {
     }
 }
 
-#[cfg(feature = "std")]
-impl NsonSchema for std::path::Path {
+impl NsonSchema for core::net::IpAddr {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
-#[cfg(feature = "std")]
-impl NsonSerialize for std::path::Path {
-    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        e.write_str(&self.to_string_lossy())
-    }
-}
-#[cfg(feature = "std")]
-impl NsonSchema for std::path::PathBuf {
-    const SCHEMA: TypeSchema = TypeSchema::Str;
-}
-#[cfg(feature = "std")]
-impl NsonSerialize for std::path::PathBuf {
-    fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
-        self.as_path().nextencode(e)
-    }
-}
-
-#[cfg(feature = "std")]
-impl NsonSchema for std::net::IpAddr {
-    const SCHEMA: TypeSchema = TypeSchema::Str;
-}
-#[cfg(feature = "std")]
-impl NsonSerialize for std::net::IpAddr {
+impl NsonSerialize for core::net::IpAddr {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         e.write_str(&self.to_string())
     }
 }
-#[cfg(feature = "std")]
-impl NsonSchema for std::net::Ipv4Addr {
+impl NsonSchema for core::net::Ipv4Addr {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
-#[cfg(feature = "std")]
-impl NsonSerialize for std::net::Ipv4Addr {
+impl NsonSerialize for core::net::Ipv4Addr {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         e.write_str(&self.to_string())
     }
 }
-#[cfg(feature = "std")]
-impl NsonSchema for std::net::Ipv6Addr {
+impl NsonSchema for core::net::Ipv6Addr {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
-#[cfg(feature = "std")]
-impl NsonSerialize for std::net::Ipv6Addr {
+impl NsonSerialize for core::net::Ipv6Addr {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         e.write_str(&self.to_string())
     }
 }
-#[cfg(feature = "std")]
-impl NsonSchema for std::net::SocketAddr {
+impl NsonSchema for core::net::SocketAddr {
     const SCHEMA: TypeSchema = TypeSchema::Str;
 }
-#[cfg(feature = "std")]
-impl NsonSerialize for std::net::SocketAddr {
+impl NsonSerialize for core::net::SocketAddr {
     fn nextencode<E: FormatEncoder>(&self, e: &mut E) -> Result<(), E::Error> {
         e.write_str(&self.to_string())
     }
@@ -1679,6 +1863,13 @@ impl<T: NsonSerialize> NsonSerialize for RangeToInclusive<T> {
     }
 }
 
+#[cfg(any(
+    target_has_atomic = "8",
+    target_has_atomic = "16",
+    target_has_atomic = "32",
+    target_has_atomic = "64",
+    target_has_atomic = "ptr"
+))]
 macro_rules! impl_atomic {
     ($($t:ty => $inner:ty),* $(,)?) => {$(
         impl NsonSchema for $t {
@@ -1692,17 +1883,34 @@ macro_rules! impl_atomic {
         }
     )*};
 }
+#[cfg(target_has_atomic = "8")]
 impl_atomic! {
     core::sync::atomic::AtomicBool => bool,
     core::sync::atomic::AtomicI8 => i8,
-    core::sync::atomic::AtomicI16 => i16,
-    core::sync::atomic::AtomicI32 => i32,
-    core::sync::atomic::AtomicI64 => i64,
-    core::sync::atomic::AtomicIsize => isize,
     core::sync::atomic::AtomicU8 => u8,
+}
+
+#[cfg(target_has_atomic = "16")]
+impl_atomic! {
+    core::sync::atomic::AtomicI16 => i16,
     core::sync::atomic::AtomicU16 => u16,
+}
+
+#[cfg(target_has_atomic = "32")]
+impl_atomic! {
+    core::sync::atomic::AtomicI32 => i32,
     core::sync::atomic::AtomicU32 => u32,
+}
+
+#[cfg(target_has_atomic = "64")]
+impl_atomic! {
+    core::sync::atomic::AtomicI64 => i64,
     core::sync::atomic::AtomicU64 => u64,
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl_atomic! {
+    core::sync::atomic::AtomicIsize => isize,
     core::sync::atomic::AtomicUsize => usize,
 }
 

@@ -18,11 +18,9 @@ use alloc::vec::Vec;
 
 use crate::de::{Decoder, FormatDecoder, Mark, NsonDeserialize, Token};
 use crate::error::{Error, Result};
-use crate::formats::tree::CollectEncoder;
 use crate::formats::Format;
 use crate::number::Number;
 use crate::ser::NsonSerialize;
-use crate::value::Value;
 
 /// NDJSON format marker.
 #[derive(Clone, Copy, Debug)]
@@ -35,25 +33,11 @@ impl Format for Ndjson {
     const BINARY: bool = false;
 
     fn encode<T: NsonSerialize + ?Sized>(self, value: &T) -> Result<Vec<u8>> {
-        let mut collector = CollectEncoder::new();
-        T::nextencode(value, &mut collector)?;
-        let root = collector.take_root()?;
-        let mut out = Vec::new();
-        match root {
-            Value::Array(items) => {
-                for item in items {
-                    let line = crate::nextencode(&item)?;
-                    out.extend_from_slice(&line);
-                    out.push(b'\n');
-                }
-            }
-            other => {
-                let line = crate::nextencode(&other)?;
-                out.extend_from_slice(&line);
-                out.push(b'\n');
-            }
-        }
-        Ok(out)
+        let mut encoder = crate::ser::Encoder::<Vec<u8>, true, true>::for_vec(
+            crate::ser::EncodeConfig::compact(),
+        );
+        value.nextencode(&mut encoder)?;
+        encoder.finish_vec()
     }
 
     fn decode<'de, T: NsonDeserialize<'de>>(self, input: &'de [u8]) -> Result<T> {
@@ -153,42 +137,27 @@ impl<'de> NdjsonDecoder<'de> {
     /// Advance to the next non-empty line and load a fresh inner decoder.
     /// Returns `false` at EOF (leaving `current = None`).
     fn load_next_line(&mut self) -> Result<bool> {
-        'lines: loop {
-            let input = self.input;
-            let line_begin = self.line_start;
-            let mut i = line_begin;
-            let mut saw_content = false;
-            while i < input.len() {
-                if input[i] == b'\n' {
-                    let mut line = &input[line_begin..i];
-                    if line.last() == Some(&b'\r') {
-                        line = &line[..line.len() - 1];
-                    }
-                    self.line_start = i + 1;
-                    if !saw_content {
-                        continue 'lines; // blank line, keep scanning
-                    }
-                    self.current_start = line_begin;
-                    self.current = Some(Decoder::new(line));
-                    return Ok(true);
-                }
-                match input[i] {
-                    b' ' | b'\t' | b'\r' => {}
-                    _ => saw_content = true,
-                }
-                i += 1;
+        while self.line_start < self.input.len() {
+            let start = self.line_start;
+            let rest = &self.input[start..];
+            let width = rest
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .unwrap_or(rest.len());
+            self.line_start = start + width + usize::from(width < rest.len());
+            let mut line = &rest[..width];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
             }
-            if saw_content {
-                let line = &input[line_begin..];
-                self.line_start = input.len();
-                self.current_start = line_begin;
-                self.current = Some(Decoder::new(line));
-                return Ok(true);
+            if line.iter().all(|byte| matches!(byte, b' ' | b'\t' | b'\r')) {
+                continue;
             }
-            self.line_start = input.len();
-            self.current = None;
-            return Ok(false);
+            self.current_start = start;
+            self.current = Some(Decoder::new(line));
+            return Ok(true);
         }
+        self.current = None;
+        Ok(false)
     }
 
     /// Ensure a line is loaded (single-value mode entry).

@@ -1,5 +1,9 @@
 # Reproducible Benchmark
 
+The [2026-11-08 no_std measurements](../benchmarks/results/nostd-2026-11-08/report.md)
+compare checked JSON, MessagePack, RON and NDJSON paths with the pre-change
+working tree and locked Serde codecs. Raw samples accompany the report.
+
 Current public JSON and CBOR entry points validate serialization events.
 Historical measurements below that used unchecked entry points are retained
 as historical observations, not current performance claims. Re-run the harness
@@ -203,7 +207,7 @@ on shared hardware.
 ## The `simd` feature and the GitHub Actions benchmark workflow
 
 `nextjson` exposes an opt-in `simd` feature that accelerates the JSON string
-scanning hot paths: SSE2 plus runtime-detected AVX2 on x86-64, NEON on
+scanning hot paths: SSE2 or compile-time-enabled AVX2 on x86-64, NEON on
 aarch64, with a portable register-width (8/16-byte SWAR) fallback everywhere
 else and a scalar reference scan for short inputs and tails. Default builds
 keep `#![deny(unsafe_code)]`; the `unsafe` is confined to `src/scan.rs` and

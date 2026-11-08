@@ -1,3 +1,9 @@
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+
 use nextjson::{DecodeSlot, Error, NsonDeserialize, Value, Write};
 
 #[test]
@@ -158,19 +164,18 @@ fn f32_decode_rejects_finite_f64_that_overflows() {
     assert_eq!(nextjson::from_str::<f32>("3.5").unwrap(), 3.5);
 }
 
-thread_local! {
-    static DROPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
+use core::sync::atomic::{AtomicUsize, Ordering};
+static DROPS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 
-struct DropProbe;
+struct DropProbe<const ID: usize>;
 
-impl Drop for DropProbe {
+impl<const ID: usize> Drop for DropProbe<ID> {
     fn drop(&mut self) {
-        DROPS.with(|d| d.set(d.get() + 1));
+        DROPS[ID].fetch_add(1, Ordering::Relaxed);
     }
 }
 
-impl<'de> NsonDeserialize<'de> for DropProbe {
+impl<'de, const ID: usize> NsonDeserialize<'de> for DropProbe<ID> {
     fn nextdecode_into<D: nextjson::FormatDecoder<'de>>(
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
@@ -183,49 +188,42 @@ impl<'de> NsonDeserialize<'de> for DropProbe {
 
 #[derive(NsonDeserialize)]
 #[allow(dead_code)]
-struct ResourceOwner {
-    resource: DropProbe,
+struct ResourceOwner<const ID: usize> {
+    resource: DropProbe<ID>,
     count: u32,
-}
-
-fn drops() -> usize {
-    DROPS.with(|d| d.get())
-}
-fn reset_drops() {
-    DROPS.with(|d| d.set(0));
 }
 
 #[test]
 fn derived_struct_drops_initialized_fields_after_later_error() {
-    reset_drops();
-    let result = nextjson::from_str::<ResourceOwner>(r#"{"resource":"open","count":"bad"}"#);
+    DROPS[0].store(0, Ordering::Relaxed);
+    let result = nextjson::from_str::<ResourceOwner<0>>(r#"{"resource":"open","count":"bad"}"#);
 
     assert!(result.is_err());
-    assert_eq!(drops(), 1);
+    assert_eq!(DROPS[0].load(Ordering::Relaxed), 1);
 }
 
 #[test]
 fn duplicate_field_error_drops_the_initialized_value() {
-    reset_drops();
-    let error = match nextjson::from_str::<ResourceOwner>(
+    DROPS[1].store(0, Ordering::Relaxed);
+    let error = match nextjson::from_str::<ResourceOwner<1>>(
         r#"{"resource":"first","resource":"second","count":1}"#,
     ) {
         Ok(_) => panic!("duplicate field must fail"),
         Err(error) => error,
     };
 
-    assert_eq!(drops(), 1);
+    assert_eq!(DROPS[1].load(Ordering::Relaxed), 1);
     assert_eq!(error.classification(), "duplicate field");
 }
 
 #[test]
 fn map_key_replay_handles_escapes_and_rejects_prefix_parses() {
     let input = r#"{"quote\"slash\\":7}"#;
-    let map: std::collections::BTreeMap<String, u32> = nextjson::from_str(input).unwrap();
+    let map: alloc::collections::BTreeMap<String, u32> = nextjson::from_str(input).unwrap();
     assert_eq!(map.get("quote\"slash\\"), Some(&7));
 
     let malformed_numeric_key =
-        nextjson::from_str::<std::collections::BTreeMap<u32, u32>>(r#"{"1x":7}"#);
+        nextjson::from_str::<alloc::collections::BTreeMap<u32, u32>>(r#"{"1x":7}"#);
     assert!(malformed_numeric_key.is_err());
 }
 

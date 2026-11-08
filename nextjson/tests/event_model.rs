@@ -6,9 +6,16 @@
 //! - source integer width (`write_u8..u32` / `write_i8..i32`);
 //! - `is_human_readable` split between text and binary formats.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use alloc::collections::BTreeMap;
 use nextjson::formats::{self, Format};
 use nextjson::{Bytes, Map};
-use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // P0.1 bytes
@@ -16,15 +23,9 @@ use std::collections::BTreeMap;
 
 #[test]
 fn bytes_wrapper_roundtrips_as_json_array() {
-    // Plain `Vec<u8>` keeps the sequence spelling (matches serde), so a
-    // wrapped `Bytes` encodes to a JSON array of numbers.
     let value = Bytes(b"\x00\x01binary");
     let json = formats::encode_with(&value, formats::Json).unwrap();
     assert_eq!(json, b"[0,1,98,105,110,97,114,121]");
-
-    // `Bytes` is a *borrowed* wrapper, so it decodes from an unescaped JSON
-    // string (borrowed bytes) rather than from an owned array or an escaped
-    // string — the same borrowing rule as `&[u8]` / serde's `deserialize_bytes`.
     let back: Bytes<'_> = formats::decode_with(b"\"abc\"", formats::Json).unwrap();
     assert_eq!(back.as_bytes(), b"abc");
 }
@@ -241,14 +242,9 @@ fn width_typed_scalars_still_roundtrip_in_every_format() {
     check(formats::Bencode);
     check(formats::Pickle);
 
-    // BSON is document-oriented; a tuple maps to an array element inside a
-    // document, so it still round-trips through the marker's own entry point.
     let encoded = formats::Bson.encode(&values).unwrap();
     let back: (i8, i16, i32, i64, u8, u16, u32, u64) = formats::Bson.decode(&encoded).unwrap();
     assert_eq!(back, values);
-
-    // Postcard is unsigned-only at the scalar level (documented), so check
-    // the width-specific unsigned path there.
     let unsigned = (5u8, 6u16, 7u32, 8u64);
     let pc = formats::encode_with(&unsigned, formats::Postcard).unwrap();
     let back: (u8, u16, u32, u64) = formats::decode_with(&pc, formats::Postcard).unwrap();
@@ -296,6 +292,4 @@ fn value_and_map_still_roundtrip() {
     check(formats::Json);
     check(formats::MsgPack);
     check(formats::Bencode);
-    // Postcard is not self-describing, so a schema-less `Map` (which decodes
-    // through `Value`) is rejected there — a documented limitation.
 }

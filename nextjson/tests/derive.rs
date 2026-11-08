@@ -1,5 +1,12 @@
 //! 派生宏：结构体属性的集成测试。
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize};
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -298,6 +305,7 @@ fn transparent_newtype() {
 #[test]
 fn with_module() {
     mod custom {
+        use alloc::string::String;
         use nextjson::{FormatDecoder, FormatEncoder};
 
         pub fn serialize<E: FormatEncoder>(
@@ -372,16 +380,16 @@ fn flatten_struct() {
 
 #[test]
 fn flatten_map() {
-    use std::collections::HashMap;
+    use alloc::collections::BTreeMap;
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
     struct Outer {
         a: i32,
         #[njson(flatten)]
-        extra: HashMap<String, i32>,
+        extra: BTreeMap<String, i32>,
     }
     let o = Outer {
         a: 1,
-        extra: HashMap::from([("b".to_string(), 2), ("c".to_string(), 3)]),
+        extra: BTreeMap::from([("b".to_string(), 2), ("c".to_string(), 3)]),
     };
     let text = to_string(&o).unwrap();
     let back: Outer = from_str(&text).unwrap();
@@ -430,11 +438,11 @@ fn custom_bound() {
     struct S<T> {
         v: T,
         #[njson(skip)]
-        marker: std::marker::PhantomData<T>,
+        marker: core::marker::PhantomData<T>,
     }
     let s: S<i32> = S {
         v: 7,
-        marker: std::marker::PhantomData,
+        marker: core::marker::PhantomData,
     };
     let text = to_string(&s).unwrap();
     assert_eq!(text, r#"{"v":7}"#);
@@ -466,11 +474,11 @@ fn nested_containers() {
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
     struct Root {
         items: Vec<Option<Vec<i32>>>,
-        table: std::collections::BTreeMap<String, Vec<(i32, bool)>>,
+        table: alloc::collections::BTreeMap<String, Vec<(i32, bool)>>,
     }
     let r = Root {
         items: vec![Some(vec![1, 2]), None, Some(vec![])],
-        table: std::collections::BTreeMap::from([("k".to_string(), vec![(1, true), (2, false)])]),
+        table: alloc::collections::BTreeMap::from([("k".to_string(), vec![(1, true), (2, false)])]),
     };
     let text = to_string(&r).unwrap();
     let back: Root = from_str(&text).unwrap();

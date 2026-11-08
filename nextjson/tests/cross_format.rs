@@ -1,3 +1,10 @@
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::cross_format::{self, CborSink, EventSink};
 use nextjson::{Error, Number, Result, Value, Write};
 

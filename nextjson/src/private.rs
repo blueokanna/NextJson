@@ -449,6 +449,14 @@ impl<E: FormatEncoder> FormatEncoder for FlattenEncoder<'_, E> {
         self.inner.write_some()
     }
 
+    fn end_some(&mut self) -> Result<(), Self::Error> {
+        if self.depth == 0 {
+            Ok(())
+        } else {
+            self.inner.end_some()
+        }
+    }
+
     fn map_key<K: NsonSerialize>(&mut self, key: &K) -> Result<(), Self::Error> {
         if !self.started || self.finished || self.depth == 0 {
             return Err(Self::error("flatten: map key outside object"));

@@ -1,6 +1,6 @@
-//! 流式读取：从 `std::io::Read` 增量解码，边到边处理（示例 5/6）。
+//! 流式读取：从 `nextjson::Read` 增量解码，边到边处理（示例 5/6）。
 //!
-//! 运行：`cargo run -p nextjson --example streaming_reader`
+//! 运行：`cargo check -p nextjson --example streaming_reader`
 //!
 //! 网络/管道场景里整段载荷往往不会一次性到齐。`StreamDecoder` 只按需向
 //! `Read` 拉取字节，因此解码可以在数据尚未全部到达时就开始：
@@ -10,7 +10,13 @@
 //! 示例用一个"每次最多吐 3 字节"的 `ChunkedReader` 模拟慢速 socket，
 //! 证明解码不依赖整包到达。
 
-use std::io::{Cursor, Read};
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use nextjson::Read;
 
 use nextjson::{from_reader, NsonDeserialize, NsonSerialize, StreamDecoder};
 
@@ -28,7 +34,7 @@ struct ChunkedReader<R> {
 }
 
 impl<R: Read> Read for ChunkedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
         let want = buf.len().min(self.chunk);
         let mut slice = buf;
         slice = &mut slice[..want];
@@ -36,7 +42,16 @@ impl<R: Read> Read for ChunkedReader<R> {
     }
 }
 
-fn main() -> nextjson::Result<()> {
+/// Execute the checks and return their diagnostic text without host I/O.
+pub fn run() -> nextjson::Result<String> {
+    let mut diagnostic_text = String::new();
+    macro_rules! record {
+        ($($arg:tt)*) => {{
+            diagnostic_text.push_str(&alloc::format!($($arg)*));
+            diagnostic_text.push('\n');
+        }}
+    }
+
     let messages = vec![
         Message {
             id: 1,
@@ -52,17 +67,17 @@ fn main() -> nextjson::Result<()> {
         },
     ];
 
-    // 1. 顶层入口：把一条 JSON 载荷放进 Cursor，再包一层慢速读取器。
+    // 1. 顶层入口：为 JSON 字节切片包一层分片读取器。
     let payload = nextjson::to_vec(&messages)?;
-    println!("序列化载荷: {} 字节", payload.len());
+    record!("序列化载荷: {} 字节", payload.len());
 
     let slow = ChunkedReader {
-        inner: Cursor::new(payload.clone()),
+        inner: payload.as_slice(),
         chunk: 3,
     };
     let decoded: Vec<Message> = from_reader(slow)?;
     assert_eq!(decoded, messages);
-    println!(
+    record!(
         "from_reader + 3 字节/次: 解码 {} 条消息，与源数据一致",
         decoded.len()
     );
@@ -74,7 +89,7 @@ fn main() -> nextjson::Result<()> {
     };
     let one_payload = nextjson::to_vec(&single)?;
     let slow_one = ChunkedReader {
-        inner: Cursor::new(one_payload),
+        inner: one_payload.as_slice(),
         chunk: 2,
     };
 
@@ -82,19 +97,28 @@ fn main() -> nextjson::Result<()> {
     let value: Message = Message::nextdecode(&mut decoder)?;
     decoder.end()?;
     assert_eq!(value, single);
-    println!("StreamDecoder + 2 字节/次: 解码 msg id = {}", value.id);
+    record!("StreamDecoder + 2 字节/次: 解码 msg id = {}", value.id);
 
     // 3. 流式容器：数组到达时逐条解码（消息没有一次性到齐也没关系）。
-    let mut full = Cursor::new(nextjson::to_vec(&messages)?);
+    let full = nextjson::to_vec(&messages)?;
+    let mut full = full.as_slice();
     let mut d = StreamDecoder::new(&mut full);
     let streamed: Vec<Message> = Vec::<Message>::nextdecode(&mut d)?;
     d.end()?;
     assert_eq!(streamed, messages);
-    println!(
+    record!(
         "流式解码整个数组: {} 条消息，首条 id = {}",
         streamed.len(),
         streamed[0].id
     );
 
-    Ok(())
+    Ok(diagnostic_text)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exercise_no_std_api() {
+        super::run().unwrap();
+    }
 }

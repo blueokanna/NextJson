@@ -3,7 +3,14 @@
 //!
 //! These tests verify that nextjson can consume types written as `#[serde(...)]` with "zero property changes",
 //! Supports `into` / `from` / `try_from` / `getter` / `remote` / `expecting`,
-//! and incrementally pull decoding from `std::io::Read`.
+//! and incrementally pull decoding from `nextjson::Read`.
+
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use nextjson::{from_reader, from_str, to_string, FormatDecoder, NsonDeserialize, NsonSerialize};
 
@@ -256,6 +263,7 @@ fn try_from_conversion() {
 // ---------------------------------------------------------------------------
 
 mod external {
+    use alloc::string::String;
     pub struct External {
         inner: String,
     }
@@ -295,6 +303,7 @@ fn remote_with_getter() {
 }
 
 mod external_pub {
+    use alloc::string::String;
     pub struct Public {
         pub id: u64,
         pub label: String,
@@ -366,8 +375,8 @@ fn stream_decoder_roundtrip() {
 fn stream_decoder_chunked_reader() {
     // A reader that only yields 1 byte at a time, forcing the streaming decoder to pull byte by byte.
     struct OneByte<'a>(&'a [u8], usize);
-    impl<'a> std::io::Read for OneByte<'a> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    impl<'a> nextjson::Read for OneByte<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
             if self.1 >= self.0.len() {
                 return Ok(0);
             }
@@ -422,8 +431,8 @@ fn stream_decoder_matches_slice_on_varying_chunks() {
         pos: usize,
         size: usize,
     }
-    impl<'a> std::io::Read for Chunked<'a> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    impl<'a> nextjson::Read for Chunked<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
             if self.pos >= self.data.len() {
                 return Ok(0);
             }

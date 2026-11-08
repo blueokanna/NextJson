@@ -1,6 +1,15 @@
 //! Core API integration testing: application entry point, Value,
 //! Map, Number, json! macros, error handling.
 
+#![no_std]
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::{json, to_value, Error, Map, NsonDeserialize, Number, Value};
 
 // ---------------------------------------------------------------------------
@@ -35,7 +44,7 @@ fn to_string_pretty() {
 fn from_slice_and_reader() {
     let v: Value = nextjson::from_slice(br#"{"x":1}"#).unwrap();
     assert_eq!(v["x"], 1.into());
-    let cursor = std::io::Cursor::new(br#"{"y":[1,2]}"#);
+    let cursor = br#"{"y":[1,2]}"#.as_slice();
     let v: Value = nextjson::from_reader(cursor).unwrap();
     assert_eq!(v["y"][0], 1.into());
 }
@@ -193,19 +202,19 @@ fn number_big_values() {
 
 #[test]
 fn std_collections_roundtrip() {
-    let m = std::collections::BTreeMap::from([
+    let m = alloc::collections::BTreeMap::from([
         ("a".to_string(), vec![1, 2]),
         ("b".to_string(), vec![]),
     ]);
     let text = nextjson::to_string(&m).unwrap();
     assert_eq!(text, r#"{"a":[1,2],"b":[]}"#);
-    let back: std::collections::BTreeMap<String, Vec<i32>> = nextjson::from_str(&text).unwrap();
+    let back: alloc::collections::BTreeMap<String, Vec<i32>> = nextjson::from_str(&text).unwrap();
     assert_eq!(back, m);
 
-    let s: std::collections::BTreeSet<i32> = [3, 1, 2].into_iter().collect();
+    let s: alloc::collections::BTreeSet<i32> = [3, 1, 2].into_iter().collect();
     let text = nextjson::to_string(&s).unwrap();
     assert_eq!(text, "[1,2,3]");
-    let back: std::collections::BTreeSet<i32> = nextjson::from_str(&text).unwrap();
+    let back: alloc::collections::BTreeSet<i32> = nextjson::from_str(&text).unwrap();
     assert_eq!(back, s);
 }
 
@@ -226,37 +235,34 @@ fn tuple_and_array_roundtrip() {
 
 #[test]
 fn misc_types_roundtrip() {
-    let dur = std::time::Duration::from_nanos(123);
+    let dur = core::time::Duration::from_nanos(123);
     assert_eq!(nextjson::to_string(&dur).unwrap(), "123");
     assert_eq!(
-        nextjson::from_str::<std::time::Duration>("123").unwrap(),
+        nextjson::from_str::<core::time::Duration>("123").unwrap(),
         dur
     );
 
-    let long_duration = std::time::Duration::new(u64::MAX, 999_999_999);
+    let long_duration = core::time::Duration::new(u64::MAX, 999_999_999);
     let encoded = nextjson::to_string(&long_duration).unwrap();
     assert_eq!(encoded, long_duration.as_nanos().to_string());
     assert_eq!(
-        nextjson::from_str::<std::time::Duration>(&encoded).unwrap(),
+        nextjson::from_str::<core::time::Duration>(&encoded).unwrap(),
         long_duration
     );
     let overflow = (long_duration.as_nanos() + 1).to_string();
-    assert!(nextjson::from_str::<std::time::Duration>(&overflow).is_err());
+    assert!(nextjson::from_str::<core::time::Duration>(&overflow).is_err());
 
-    let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let ip: core::net::IpAddr = "127.0.0.1".parse().unwrap();
     assert_eq!(nextjson::to_string(&ip).unwrap(), r#""127.0.0.1""#);
     assert_eq!(
-        nextjson::from_str::<std::net::IpAddr>(r#""127.0.0.1""#).unwrap(),
+        nextjson::from_str::<core::net::IpAddr>(r#""127.0.0.1""#).unwrap(),
         ip
     );
 
-    let p = std::path::PathBuf::from("/tmp/a");
-    assert_eq!(nextjson::to_string(&p).unwrap(), r#""/tmp/a""#);
-
-    let r: std::ops::Range<i32> = 1..5;
+    let r: core::ops::Range<i32> = 1..5;
     assert_eq!(nextjson::to_string(&r).unwrap(), "[1,5]");
     assert_eq!(
-        nextjson::from_str::<std::ops::Range<i32>>("[1,5]").unwrap(),
+        nextjson::from_str::<core::ops::Range<i32>>("[1,5]").unwrap(),
         r
     );
 
@@ -276,7 +282,7 @@ fn boxed_and_atomic() {
     let b = Box::new(vec![1, 2]);
     assert_eq!(nextjson::to_string(&b).unwrap(), "[1,2]");
 
-    let a = std::sync::atomic::AtomicI32::new(5);
+    let a = core::sync::atomic::AtomicI32::new(5);
     assert_eq!(nextjson::to_string(&a).unwrap(), "5");
 }
 

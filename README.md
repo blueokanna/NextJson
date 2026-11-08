@@ -63,14 +63,14 @@ nextjson-derive
 
 ### Installation
 
-Default `std + derive` configuration:
+All library configurations use `no_std + alloc`. The default enables derive macros:
 
 ```toml
 [dependencies]
 nextjson = "0.1"
 ```
 
-Core `no_std + alloc` configuration:
+Without derive macros:
 
 ```toml
 [dependencies]
@@ -86,9 +86,8 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 
 | Feature  | Default | Purpose                                                        |
 | -------- | ------: | -------------------------------------------------------------- |
-| `std`    |     yes | Standard I/O adapters and standard-library-specific types      |
 | `derive` |     yes | Repository-owned `NsonSerialize` and `NsonDeserialize` derives |
-| `simd`   |      no | Opt-in architecture acceleration for JSON string scanning: SSE2 + runtime-detected AVX2 on x86-64, NEON on aarch64, with a portable register-width fallback elsewhere. The unsafe code is confined to the `scan` module and gated behind this feature; default builds remain `#![deny(unsafe_code)]` with zero `unsafe`. |
+| `simd`   |      no | Opt-in architecture acceleration for JSON string scanning: SSE2 + compile-time-selected AVX2 on x86-64, NEON on aarch64, with a portable register-width fallback elsewhere. The unsafe code is confined to the `scan` module and gated behind this feature; default builds remain `#![deny(unsafe_code)]` with zero `unsafe`. |
 
 ### Native API
 
@@ -339,7 +338,7 @@ let json = formats::encode_with(&42_i64, formats::Json)?; // format by value
 | Text, self-descr.    | `json`, `json5`, `hjson`, `yaml`, `toml`, `ron`, `sexpr`, `csv`, `urlform`, `ndjson`, `ini`, `edn` |
 | Binary, self-descr.  | `cbor`, `msgpack`, `ubjson`, `smile`, `bson`, `bencode`, `pickle`           |
 | Binary, schema-light | `postcard`                                                                 |
-| Environment          | `envy` (deserialization only, requires `std`)                              |
+| Environment          | `envy` (deserialization only, caller-supplied KEY=value pairs)                              |
 
 Transcoding between compatible format models needs no typed value:
 
@@ -364,7 +363,7 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | **Hjson** | 同 JSON | `array`, `object`（+ 未加引号键/字符串、注释） | 编码器输出严格 JSON |
 | **YAML** | `null`, `bool`, `int`, `float`, `str` | 块式 + 流式子集 | 块式 map/序列（`key: value`、`-`、`---`、`{...}`/`[...]`）；块标量 `|` / `>`（含 `-`/`+` chomping 与缩进指示符）；锚点 `&name` 与别名 `*name`（块上下文，复制解析 + 100 万节点展开预算）；标准 tag（`!!str`/`!!int`/`!!float`/`!!bool`/`!!null`，拒绝自定义 tag）；支持 merge 键 `<<:`、文档结束标记 `...`；拒绝非有限浮点（`.inf`/`.nan`）与多文档流 |
 | **TOML** | `bool`, `int`, `float`, `str`（无 `null`） | 表、数组、内联表、多行字符串 | 拒绝裸标量根；支持 `"""`/`'''` 多行字符串与 `\` 续行；支持 10/16/8/2 进制整数（含 `_` 分隔符）；严格校验日期时间形态（TOML 1.0 四种形态：offset/local date-time, date, time）后保留为字符串 |
-| **RON** | `bool`, `int`, `float`, `str`, `char` | `map`, `seq`, 元组, 结构体, 枚举 | `Some(...)` 包装可双向往返 |
+| **RON** | `bool`, `int`, `float`, `str`, `char` | `map`, `seq`; structs/enums use the shared data model | Nested `Some(...)`; native RON struct/enum syntax is not fully interchangeable |
 | **S-expr** | 原子、带引号字符串、数字、`#t`/`#f`, `nil` | 列表（`map` 编为 `alist`） | 无模式 `Value` 解码嵌套 `map` 存在歧义，请使用类型化目标 |
 | **CSV** | `int`, `float`, `bool`, `str` | 行、带表头的对象行 | RFC 4180 |
 | **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
@@ -379,7 +378,7 @@ codec-subset limits are reported as errors instead of silent lossy fallback:
 | **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
 | **Postcard** | `null`, `bool`, 无符号整数, `str` | `seq`, `map` | 非自描述：拒绝有符号整数、`float`、`Option`、`Value` 和 `peek` |
 | **Pickle** | `None`, `bool`, `int`, `float`, `str` | `list`, `dict`, `tuple` | CPython 协议 2 子集；128 位整数经 `LONG1` 处理 |
-| **Envy** | `int`, `float`, `bool`, `str` | 扁平 `map`（环境变量） | 仅反序列化；需要 `std` |
+| **Envy** | `int`, `float`, `bool`, `str` | flat `map` | Decode caller-provided pairs or `KEY=value` lines |
 
 `detect()` is heuristic and intentionally conservative: it claims only strong
 structural signatures (pickle protocol header, bencode intro, BSON length
@@ -482,15 +481,15 @@ unrepresentable cross-format values are errors. Applications must still impose
 deployment-specific byte, collection, time, and output limits.
 
 `from_slice` / `from_str` operate on a complete in-memory input; `from_reader`
-(std) pulls incrementally from any `std::io::Read` source (see
+pulls incrementally from any `nextjson::Read` source (see
 `StreamDecoder`). The default JSON and CBOR nesting limit is 128. See the [Safety Model](https://github.com/blueokanna/NextJson/blob/main/docs/SAFETY.md) for the auditable invariants and remaining
 application responsibilities.
 
 ### Examples
 
-Six complete, runnable programs live in `nextjson/examples/` (each returns
-`Result` and prints its results; run with `cargo run -p nextjson --example
-<name>`):
+Six `no_std` library examples live in `nextjson/examples/`. Each exports
+`run() -> Result<String>` and returns diagnostics without process I/O. Compile with
+`cargo check -p nextjson --example <name>`; their checks also run in the test suite:
 
 | Example              | Demonstrates                                                                                                                                                              |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -498,11 +497,11 @@ Six complete, runnable programs live in `nextjson/examples/` (each returns
 | `multi_format`       | one value through all 14 wire formats: encoded size, exact round-trip, cross-format transcode chain                                                                       |
 | `cross_format_relay` | streaming JSON ⇄ CBOR relay with no intermediate `Value`, plus writer variants and batch size comparison                                                                  |
 | `zero_copy_reuse`    | borrowed `&str` / `Bytes` decode (pointer-verified against the input slice) and `DecodeSlot` reuse in a sustained decode loop                                             |
-| `streaming_reader`   | incremental decode from any `std::io::Read` source (`from_reader`, `StreamDecoder`) over a chunked "slow socket" reader                                                   |
+| `streaming_reader`   | incremental decode from any `nextjson::Read` source (`from_reader`, `StreamDecoder`) over a chunked "slow socket" reader                                                   |
 | `custom_codec`       | hand-written `NsonSchema` / `NsonSerialize` / `NsonDeserialize` and `#[njson(with = "module")]` field codecs                                                              |
 
 ```text
-cargo run -p nextjson --example contract_engine
+cargo check -p nextjson --example contract_engine
 ```
 
 ### Benchmark

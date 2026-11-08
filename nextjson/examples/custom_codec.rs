@@ -1,7 +1,7 @@
 //! 手写编解码器：不依赖 derive 的 `NsonSchema` / `NsonSerialize` /
 //! `NsonDeserialize` 实现，以及 `#[njson(with = "...")]` 字段级定制（示例 6/6）。
 //!
-//! 运行：`cargo run -p nextjson --example custom_codec`
+//! 运行：`cargo check -p nextjson --example custom_codec`
 //!
 //! 某些类型无法用 derive 表达（例如"以十六进制字符串上线的字节串"）。
 //! 此时可以手写实现：
@@ -11,6 +11,13 @@
 //!
 //! 同一份实现即对所有 14 种格式通用——这正是统一 token 流的价值。
 //! 另外演示 `with` 模块：在 derive 的结构体上按字段挂接自定义编解码。
+
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use nextjson::formats::Format;
 use nextjson::{
@@ -89,6 +96,7 @@ impl<'de> NsonDeserialize<'de> for HexBytes {
 // ---- with 模块：derive 结构体按字段挂接自定义编解码 ----
 
 mod hex_module {
+    use alloc::vec::Vec;
     /// 序列化 `&Vec<u8>` 为十六进制字符串。
     pub fn serialize<E: nextjson::FormatEncoder>(
         value: &[u8],
@@ -114,26 +122,35 @@ struct Packet {
     seq: u32,
 }
 
-fn main() -> nextjson::Result<()> {
+/// Execute the checks and return their diagnostic text without host I/O.
+pub fn run() -> nextjson::Result<String> {
+    let mut diagnostic_text = String::new();
+    macro_rules! record {
+        ($($arg:tt)*) => {{
+            diagnostic_text.push_str(&alloc::format!($($arg)*));
+            diagnostic_text.push('\n');
+        }}
+    }
+
     // ---- 手写类型：JSON 上线 = 十六进制字符串 ----
     let blob = HexBytes(vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
     let json = nextjson::to_string(&blob)?;
-    println!("HexBytes as JSON: {json}");
+    record!("HexBytes as JSON: {json}");
 
     let back: HexBytes = nextjson::from_str(&json)?;
     assert_eq!(back, blob);
-    println!("JSON 往返一致: {:?}", back.0);
+    record!("JSON 往返一致: {:?}", back.0);
 
     // 同一类型直接切到二进制格式（统一 token 流的通用性）。
     let cbor = nextjson::formats::Cbor.encode(&blob)?;
     let back2: HexBytes = nextjson::formats::Cbor.decode(&cbor)?;
     assert_eq!(back2, blob);
-    println!("CBOR 往返一致: {:?}", back2.0);
+    record!("CBOR 往返一致: {:?}", back2.0);
 
     // 非法输入必须报错（不是 panic）。
     let bad = r#""xyz""#;
     let err = nextjson::from_str::<HexBytes>(bad).unwrap_err();
-    println!("非法 hex 输入被拒绝: {err}");
+    record!("非法 hex 输入被拒绝: {err}");
 
     // ---- with 模块 ----
     let packet = Packet {
@@ -141,14 +158,22 @@ fn main() -> nextjson::Result<()> {
         seq: 3,
     };
     let pj = nextjson::to_string_pretty(&packet)?;
-    println!("\nPacket as JSON:\n{pj}");
+    record!("\nPacket as JSON:\n{pj}");
     let pback: Packet = nextjson::from_str(r#"{"digest":"00ff10","seq":3}"#)?;
     assert_eq!(pback, packet);
-    println!("Packet(with) 往返一致");
+    record!("Packet(with) 往返一致");
 
     // 导出 JSON Schema：手写类型与 derive 类型都能生成。
     let schema = nextjson::to_json_schema::<Packet>();
-    println!("\nPacket JSON Schema: {}", nextjson::to_string(&schema)?);
+    record!("\nPacket JSON Schema: {}", nextjson::to_string(&schema)?);
 
-    Ok(())
+    Ok(diagnostic_text)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exercise_no_std_api() {
+        super::run().unwrap();
+    }
 }

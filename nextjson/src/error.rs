@@ -36,8 +36,8 @@ pub(crate) enum ErrorKind {
     InvalidSurrogate,
     InvalidUtf8,
     RecursionLimitExceeded,
-    #[cfg(feature = "std")]
     InputLimitExceeded,
+    Interrupted,
     UnknownField(String),
     DuplicateField(&'static str),
     MissingField(&'static str),
@@ -74,10 +74,14 @@ impl Error {
         Error::new(ErrorKind::Custom(msg.into()), None, None, 0)
     }
 
-    /// IO error (only reachable under the `std` feature).
-    #[cfg(feature = "std")]
-    pub(crate) fn io(err: std::io::Error) -> Self {
-        Error::custom(alloc::format!("io error: {err}"))
+    /// A retryable interruption reported by a byte source.
+    pub fn interrupted() -> Self {
+        Error::new(ErrorKind::Interrupted, None, None, 0)
+    }
+
+    /// Whether a byte source requested a retry.
+    pub fn is_interrupted(&self) -> bool {
+        matches!(self.kind, ErrorKind::Interrupted)
     }
 
     /// A required field is missing.
@@ -134,6 +138,7 @@ impl Error {
     pub fn classification(&self) -> &'static str {
         match &self.kind {
             ErrorKind::Eof => "unexpected end of input",
+            ErrorKind::Interrupted => "read interrupted",
             ErrorKind::Expected { .. } => "expected a specific token",
             ErrorKind::InvalidNumber => "invalid number",
             ErrorKind::NumberOutOfRange => "number out of range",
@@ -142,7 +147,6 @@ impl Error {
             ErrorKind::InvalidSurrogate => "invalid surrogate pair",
             ErrorKind::InvalidUtf8 => "invalid utf-8",
             ErrorKind::RecursionLimitExceeded => "recursion limit exceeded",
-            #[cfg(feature = "std")]
             ErrorKind::InputLimitExceeded => "input byte limit exceeded",
             ErrorKind::UnknownField(_) => "unknown field",
             ErrorKind::DuplicateField(_) => "duplicate field",
@@ -160,6 +164,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ErrorKind::Eof => write!(f, "unexpected end of input"),
+            ErrorKind::Interrupted => write!(f, "read interrupted"),
             ErrorKind::Expected { what, found } => match found {
                 Some(b) => write!(
                     f,
@@ -182,7 +187,6 @@ impl fmt::Display for Error {
             }
             ErrorKind::InvalidUtf8 => write!(f, "invalid utf-8 sequence in string"),
             ErrorKind::RecursionLimitExceeded => write!(f, "recursion limit exceeded"),
-            #[cfg(feature = "std")]
             ErrorKind::InputLimitExceeded => write!(f, "input byte limit exceeded"),
             ErrorKind::UnknownField(field) => write!(f, "unknown field `{field}`"),
             ErrorKind::DuplicateField(field) => write!(f, "duplicate field `{field}`"),
@@ -207,28 +211,6 @@ impl fmt::Display for Error {
             write!(f, " at line {line} column {column}")?;
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
-
-#[cfg(feature = "std")]
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Error::io(err)
-    }
-}
-
-impl From<String> for Error {
-    fn from(msg: String) -> Self {
-        Error::custom(msg)
-    }
-}
-
-impl From<&str> for Error {
-    fn from(msg: &str) -> Self {
-        Error::custom(msg)
     }
 }
 

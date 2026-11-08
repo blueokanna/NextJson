@@ -1,5 +1,8 @@
 //! Attribute (`#[njson(...)]`) parsing.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use crate::{join, split_top, P};
 use proc_macro::{Delimiter, TokenTree};
 

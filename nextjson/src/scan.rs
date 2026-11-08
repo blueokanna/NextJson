@@ -17,8 +17,8 @@
 //!   platform. The `u128` form processes 16 bytes per iteration and is used
 //!   wherever the target can hold 128-bit integers natively.
 //! - **`simd` feature (opt-in):** on `x86_64` the scan uses SSE2 (present on
-//!   every x86-64 CPU) and, when the `std` feature is enabled, AVX2 after a
-//!   runtime CPUID check (`is_x86_feature_detected!`). On `aarch64` it uses
+//!   every x86-64 CPU) and AVX2 only when the compilation target enables it.
+//!   There is no operating-system feature detection. On aarch64 it uses
 //!   NEON (present on every AArch64 CPU). Every vector load is guarded by a
 //!   length check, so the unsafe code cannot read out of bounds.
 //!
@@ -243,7 +243,7 @@ mod portable {
 }
 
 // ---------------------------------------------------------------------------
-// x86-64: SSE2 (baseline) + AVX2 (runtime-detected under `std`)
+// x86-64: SSE2 (baseline) + AVX2 (enabled by target features)
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -254,26 +254,32 @@ mod imp {
         if bytes.len() < 32 {
             return scan_scalar(bytes, check_non_ascii);
         }
-        #[cfg(feature = "std")]
-        if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: `avx2` was confirmed present by CPUID.
-            return unsafe { scan_avx2(bytes, check_non_ascii) };
+        #[cfg(target_feature = "avx2")]
+        {
+            // SAFETY: the compilation target requires AVX2.
+            unsafe { scan_avx2(bytes, check_non_ascii) }
         }
         // SAFETY: SSE2 is always present on x86-64.
-        unsafe { scan_sse2(bytes, check_non_ascii) }
+        #[cfg(not(target_feature = "avx2"))]
+        unsafe {
+            scan_sse2(bytes, check_non_ascii)
+        }
     }
 
     pub(super) fn skip_ws(input: &[u8], pos: usize) -> usize {
         if input.len().saturating_sub(pos) < 32 {
             return skip_ws_scalar(input, pos);
         }
-        #[cfg(feature = "std")]
-        if std::is_x86_feature_detected!("avx2") {
-            // SAFETY: `avx2` was confirmed present by CPUID.
-            return unsafe { skip_ws_avx2(input, pos) };
+        #[cfg(target_feature = "avx2")]
+        {
+            // SAFETY: the compilation target requires AVX2.
+            unsafe { skip_ws_avx2(input, pos) }
         }
         // SAFETY: SSE2 is always present on x86-64.
-        unsafe { skip_ws_sse2(input, pos) }
+        #[cfg(not(target_feature = "avx2"))]
+        unsafe {
+            skip_ws_sse2(input, pos)
+        }
     }
 
     #[inline]
@@ -307,7 +313,7 @@ mod imp {
         scan_scalar(&bytes[i..], check_non_ascii).map(|off| i + off)
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(target_feature = "avx2")]
     #[target_feature(enable = "avx2")]
     unsafe fn scan_avx2(bytes: &[u8], check_non_ascii: bool) -> Option<usize> {
         use core::arch::x86_64::*;
@@ -363,7 +369,7 @@ mod imp {
         skip_ws_scalar(input, pos)
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(target_feature = "avx2")]
     #[target_feature(enable = "avx2")]
     unsafe fn skip_ws_avx2(input: &[u8], mut pos: usize) -> usize {
         use core::arch::x86_64::*;

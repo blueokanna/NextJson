@@ -1,8 +1,16 @@
 //! Input integrity regressions for text formats and streaming adapters.
 
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use alloc::borrow::Cow;
 use nextjson::formats::{self, Csv, Ndjson, UrlForm};
 use nextjson::{FormatDecoder, NsonDeserialize};
-use std::borrow::Cow;
 
 #[test]
 fn csv_lookahead_preserves_string_spelling() {
@@ -221,10 +229,10 @@ fn speculative_allocations_are_bounded_even_for_external_codecs() {
 
 #[test]
 fn streamed_large_strings_preserve_utf8_across_buffer_boundaries() {
-    use std::io::Read;
+    use nextjson::Read;
     struct Chunked<'a>(&'a [u8], usize);
     impl Read for Chunked<'_> {
-        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        fn read(&mut self, out: &mut [u8]) -> nextjson::Result<usize> {
             let len = out.len().min(self.1);
             self.0.read(&mut out[..len])
         }

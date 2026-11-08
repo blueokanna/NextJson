@@ -2,6 +2,10 @@
 //! identically to the in-memory decoder, and truncated inputs must fail
 //! without panicking regardless of chunking.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+
 use nextjson::Value;
 
 struct Chunked<R> {
@@ -9,8 +13,8 @@ struct Chunked<R> {
     size: usize,
 }
 
-impl<R: std::io::Read> std::io::Read for Chunked<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+impl<R: nextjson::Read> nextjson::Read for Chunked<R> {
+    fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
         let n = self.size.min(buf.len());
         self.inner.read(&mut buf[..n])
     }
@@ -51,8 +55,8 @@ fn stream_decoder_matches_in_memory_on_truncation() {
 fn stream_decoder_typed_scalars_across_chunks() {
     // Typed scalar reads (u64, i64, f64, bool, char) through a 1-byte reader.
     struct OneByte<R>(R);
-    impl<R: std::io::Read> std::io::Read for OneByte<R> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    impl<R: nextjson::Read> nextjson::Read for OneByte<R> {
+        fn read(&mut self, buf: &mut [u8]) -> nextjson::Result<usize> {
             if buf.is_empty() {
                 return Ok(0);
             }

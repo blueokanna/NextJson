@@ -1,5 +1,13 @@
 //! Cross-format matrix tests: every supported structure × every format.
 
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats::{self, Format};
 
 struct MissingArraySeparator;
@@ -82,7 +90,7 @@ fn ron_wire() {
     assert_eq!(formats::Ron.encode(&"hi".to_string()).unwrap(), b"\"hi\"");
     assert_eq!(formats::Ron.encode(&vec![1_i64, 2]).unwrap(), b"[1, 2]");
     assert_eq!(formats::Ron.encode(&Option::<i64>::None).unwrap(), b"None");
-    assert_eq!(formats::Ron.encode(&Some(5_i64)).unwrap(), b"5");
+    assert_eq!(formats::Ron.encode(&Some(5_i64)).unwrap(), b"Some(5)");
 }
 
 #[test]
@@ -165,16 +173,17 @@ fn sexpr_wire() {
 
 #[test]
 fn urlform_roundtrips() {
-    let mut m = std::collections::BTreeMap::new();
+    let mut m = alloc::collections::BTreeMap::new();
     m.insert("name".to_string(), "Next Json".to_string());
     m.insert("count".to_string(), "42".to_string());
     roundtrip(&m, formats::UrlForm);
     // Percent-encoding round-trip with special characters.
-    let mut m = std::collections::BTreeMap::new();
+    let mut m = alloc::collections::BTreeMap::new();
     m.insert("q".to_string(), "a+b/c d%".to_string());
     let bytes = formats::UrlForm.encode(&m).unwrap();
     assert_eq!(bytes, b"q=a%2Bb%2Fc+d%25");
-    let back: std::collections::BTreeMap<String, String> = formats::UrlForm.decode(&bytes).unwrap();
+    let back: alloc::collections::BTreeMap<String, String> =
+        formats::UrlForm.decode(&bytes).unwrap();
     assert_eq!(back.get("q").unwrap(), "a+b/c d%");
 }
 
@@ -716,7 +725,7 @@ fn msgpack_containers_wire() {
         &[0x93, 0x01, 0x02, 0x03]
     );
     // {"a":1} -> fixmap(1) + fixstr(1) + uint
-    let mut map = std::collections::BTreeMap::new();
+    let mut map = alloc::collections::BTreeMap::new();
     map.insert("a".to_string(), 1_u8);
     assert_eq!(
         formats::MsgPack.encode(&map).unwrap(),
@@ -766,13 +775,13 @@ fn msgpack_large_containers_need_wide_headers() {
     assert_eq!(back, v);
 
     // 20 entries forces map16.
-    let mut m = std::collections::BTreeMap::new();
+    let mut m = alloc::collections::BTreeMap::new();
     for i in 0..20_u8 {
         m.insert(i.to_string(), i);
     }
     let bytes = formats::MsgPack.encode(&m).unwrap();
     assert_eq!(&bytes[..3], &[0xde, 0x00, 0x14]);
-    let back: std::collections::BTreeMap<String, u8> = formats::MsgPack.decode(&bytes).unwrap();
+    let back: alloc::collections::BTreeMap<String, u8> = formats::MsgPack.decode(&bytes).unwrap();
     assert_eq!(back, m);
 }
 
@@ -848,7 +857,7 @@ fn postcard_typed_roundtrips() {
     roundtrip(&vec![1_u64, 2, 3], formats::Postcard);
     roundtrip(&"hello".to_string(), formats::Postcard);
     roundtrip(&["a".to_string(), "b".to_string()], formats::Postcard);
-    let mut m = std::collections::BTreeMap::new();
+    let mut m = alloc::collections::BTreeMap::new();
     m.insert("x".to_string(), 7_u64);
     m.insert("y".to_string(), 8_u64);
     roundtrip(&m, formats::Postcard);
@@ -1170,7 +1179,7 @@ fn urlform_percent_utf8_roundtrip() {
     let bytes = b"q=%C3%A9";
     let value: nextjson::Value = formats::UrlForm.decode(bytes).unwrap();
     assert_eq!(value["q"], nextjson::Value::from("é"));
-    let mut m = std::collections::BTreeMap::new();
+    let mut m = alloc::collections::BTreeMap::new();
     m.insert("q".to_string(), "é✓".to_string());
     roundtrip(&m, formats::UrlForm);
 }
@@ -1183,7 +1192,7 @@ fn urlform_option_and_value_decode() {
     let value: nextjson::Value = formats::UrlForm.decode(bytes).unwrap();
     assert_eq!(value["a"], nextjson::Value::from("1"));
     assert_eq!(value["b"], nextjson::Value::from("2"));
-    let opt: std::collections::BTreeMap<String, Option<i64>> =
+    let opt: alloc::collections::BTreeMap<String, Option<i64>> =
         formats::UrlForm.decode(bytes).unwrap();
     assert_eq!(opt.get("a"), Some(&Some(1)));
     assert_eq!(opt.get("b"), Some(&Some(2)));

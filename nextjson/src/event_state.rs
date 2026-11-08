@@ -19,7 +19,7 @@
 //! separator before a value.
 
 use crate::error::{Error, ErrorKind, Result};
-use alloc::vec::Vec;
+use crate::stack::Stack;
 
 /// Match the default decoder depth so ordinary encode/decode round trips have
 /// the same nesting boundary and recursive serializers fail before exhaustion.
@@ -38,13 +38,14 @@ pub(crate) enum Kind {
     Object,
 }
 
+#[derive(Clone, Copy)]
 enum Frame {
     Array { ready: bool },
     Object { pending_value: bool },
 }
 
 pub(crate) struct EventState {
-    frames: Vec<Frame>,
+    frames: Stack<Frame>,
     root_written: bool,
     separators: bool,
 }
@@ -57,7 +58,7 @@ impl EventState {
     ///` in JSON), `false` for value-concatenated encodings (CBOR).
     pub(crate) fn new(separators: bool) -> Self {
         EventState {
-            frames: Vec::new(),
+            frames: Stack::new(),
             root_written: false,
             separators,
         }

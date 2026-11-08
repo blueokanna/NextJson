@@ -3,6 +3,10 @@
 //! success and error paths execute parser branches that round-trip tests
 //! never reach.
 
+#![no_std]
+extern crate alloc;
+use alloc::vec;
+
 use nextjson::formats;
 use nextjson::Value;
 

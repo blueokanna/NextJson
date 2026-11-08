@@ -13,8 +13,7 @@ categories = ["encoding", "parser-implementations", "no-std"]
 readme = "../README.md"
 
 [features]
-default = ["std", "derive"]
-std = []
+default = ["derive"]
 derive = ["dep:nextjson-derive"]
 simd = []
 
@@ -32,3 +31,39 @@ harness = false
 [[bench]]
 name = "resource_paths"
 harness = false
+
+[[example]]
+name = "contract_engine"
+crate-type = ["lib"]
+required-features = ["derive"]
+test = true
+
+[[example]]
+name = "cross_format_relay"
+crate-type = ["lib"]
+required-features = ["derive"]
+test = true
+
+[[example]]
+name = "custom_codec"
+crate-type = ["lib"]
+required-features = ["derive"]
+test = true
+
+[[example]]
+name = "multi_format"
+crate-type = ["lib"]
+required-features = ["derive"]
+test = true
+
+[[example]]
+name = "streaming_reader"
+crate-type = ["lib"]
+required-features = ["derive"]
+test = true
+
+[[example]]
+name = "zero_copy_reuse"
+crate-type = ["lib"]
+required-features = ["derive"]
+test = true

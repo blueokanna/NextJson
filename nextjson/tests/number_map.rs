@@ -1,5 +1,12 @@
 //! The public API coverage of Number/Map provides a safety margin for coverage access control
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::{Map, Number, Value};
 
 #[test]

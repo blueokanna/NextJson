@@ -17,6 +17,12 @@
 //! 4. **Semantics under ambiguity**: duplicate keys and unknown fields
 //!    behave identically across formats.
 
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats;
 use nextjson::formats::{Cbor, Hjson, Json, Json5, MsgPack, Ron, Yaml};
 use nextjson::Value;
@@ -263,9 +269,7 @@ fn random_differential_transcode() {
         let value = random_value(&mut rng, 4);
         for source in JSON_FAMILY {
             let Ok(bytes) = source.encode(&value) else {
-                continue; // a value this generator produced may exceed a
-                          // format's wire model; round-trips of such values
-                          // are covered by the per-format tests.
+                continue;
             };
             for dest in JSON_FAMILY {
                 let relayed = match source.transcode_to(&bytes, dest) {

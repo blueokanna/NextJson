@@ -58,12 +58,14 @@ nextjson-derive
 nextjson = "0.1"
 ```
 
-纯 `no_std + alloc`：
+所有库配置均为 `no_std + alloc`，默认只开启 derive。关闭派生宏：
 
 ```toml
 [dependencies]
 nextjson = { version = "0.1", default-features = false }
 ```
+
+从旧版 std 接口迁移时，参见 [no_std 迁移与验证记录](docs/NO_STD_REVIEW_CN.md)。
 
 启用自有派生宏但不启用 `std`：
 
@@ -76,9 +78,8 @@ nextjson = { version = "0.1", default-features = false, features = ["derive"] }
 
 | Feature  | 默认 | 作用                                                |
 | -------- | ---: | --------------------------------------------------- |
-| `std`    |   是 | 启用标准 IO 适配器和标准库专属类型                  |
 | `derive` |   是 | 启用自有 `NsonSerialize` / `NsonDeserialize` 派生宏 |
-| `simd`   |   否 | 可选的架构加速：JSON 字符串扫描在 x86-64 使用 SSE2 + 运行时检测的 AVX2，在 aarch64 使用 NEON，其它平台回退到可移植寄存器宽度 SWAR。`unsafe` 代码被限定在 `scan` 模块并仅在启用该 feature 时编译；默认构建保持 `#![deny(unsafe_code)]` 零 `unsafe`。 |
+| `simd`   |   否 | 可选的架构加速：x86-64 使用 SSE2，编译目标显式启用 AVX2 时使用 AVX2；aarch64 使用 NEON，其它平台回退到可移植 SWAR。`unsafe` 代码限定在 `scan` 模块；默认构建禁止 `unsafe`。 |
 
 ### 原生 nextencode / nextdecode
 
@@ -336,7 +337,7 @@ let json = formats::encode_with(&42_i64, formats::Json)?; // 按值选择格式
 | 文本、自描述   | `json`、`json5`、`hjson`、`yaml`、`toml`、`ron`、`sexpr`、`csv`、`urlform`、`ndjson`、`ini`、`edn` |
 | 二进制、自描述 | `cbor`、`msgpack`、`ubjson`、`smile`、`bson`、`bencode`、`pickle`           |
 | 二进制、轻模式 | `postcard`                                                                 |
-| 环境           | `envy`（仅反序列化，需要 `std`）                                           |
+| 配置键值对     | `envy`（仅反序列化，由调用方提供数据）                                      |
 
 数据模型兼容的格式之间无需类型化值即可互转：
 
@@ -361,7 +362,7 @@ assert_eq!(json2, json);
 | **Hjson** | 同 JSON | `array`, `object`（+ 未加引号键/字符串、注释） | 编码器输出严格 JSON |
 | **YAML** | `null`, `bool`, `int`, `float`, `str` | 块式 + 流式子集 | 块式 map/序列（`key: value`、`-`、`---`、`{...}`/`[...]`）；块标量 `|` / `>`（含 `-`/`+` chomping 与缩进指示符）；锚点 `&name` 与别名 `*name`（块上下文，复制解析 + 100 万节点展开预算）；标准 tag（`!!str`/`!!int`/`!!float`/`!!bool`/`!!null`，拒绝自定义 tag）；支持 merge 键 `<<:`、文档结束标记 `...`；拒绝非有限浮点（`.inf`/`.nan`）与多文档流 |
 | **TOML** | `bool`, `int`, `float`, `str`（无 `null`） | 表、数组、内联表、多行字符串 | 拒绝裸标量根；支持 `"""`/`'''` 多行字符串与 `\` 续行；支持 10/16/8/2 进制整数（含 `_` 分隔符）；严格校验日期时间形态（TOML 1.0 四种形态：offset/local date-time, date, time）后保留为字符串 |
-| **RON** | `bool`, `int`, `float`, `str`, `char` | `map`, `seq`, 元组, 结构体, 枚举 | `Some(...)` 包装可双向往返 |
+| **RON** | `bool`, `int`, `float`, `str`, `char` | `map`, `seq`；结构体/枚举使用共同数据模型 | 支持嵌套 `Some(...)`；不保证原生 RON 结构体/枚举语法互换 |
 | **S-expr** | 原子、带引号字符串、数字、`#t`/`#f`, `nil` | 列表（`map` 编为 `alist`） | 无模式 `Value` 解码嵌套 `map` 存在歧义，请使用类型化目标 |
 | **CSV** | `int`, `float`, `bool`, `str` | 行、带表头的对象行 | RFC 4180 |
 | **Urlform** | `int`, `float`, `bool`, `str` | 仅扁平 key/value `map` | RFC 3986 百分号编码 |
@@ -376,7 +377,7 @@ assert_eq!(json2, json);
 | **Bencode** | 整数, UTF-8 字符串 | `list`, `dict` | Key 规范排序；无 `null`/`float`；`bool` 映射为 `1`/`0` |
 | **Postcard** | `null`, `bool`, 无符号整数, `str` | `seq`, `map` | 非自描述：拒绝有符号整数、`float`、`Option`、`Value` 和 `peek` |
 | **Pickle** | `None`, `bool`, `int`, `float`, `str` | `list`, `dict`, `tuple` | CPython 协议 2 子集；128 位整数经 `LONG1` 处理 |
-| **Envy** | `int`, `float`, `bool`, `str` | 扁平 `map`（环境变量） | 仅反序列化；需要 `std` |
+| **Envy** | `int`, `float`, `bool`, `str` | 扁平 `map`（配置键值对） | 仅反序列化；输入为 KEY=value 行或显式迭代器 |
 
 `detect()` 是启发式且刻意保守：只认定强结构签名（pickle 协议头、bencode 开头、
 BSON 长度前缀、文本格式 ASCII 开头、MessagePack/CBOR 二进制签名、SMILE `:)\n`
@@ -447,15 +448,16 @@ let json_schema = nextjson::to_json_schema::<Point>();
 - JSON 和 CBOR 默认最多嵌套 128 层；
 - 整数使用检查运算，支持完整 Rust `i128/u128` 范围；
 - 拒绝非有限浮点、非法 UTF-8、非法 surrogate、尾随逗号和尾随数据；
-- `from_slice` / `from_str` 针对完整内存输入；`from_reader`（std）从任意 `std::io::Read` 增量拉取（见 `StreamDecoder`）；
+- `from_slice` / `from_str` 针对完整内存输入；`from_reader` 从 `nextjson::Read` 增量拉取（见 `StreamDecoder`）；
 - 库不能替代应用层的总长度、集合长度、CPU 时间和输出配额。
 
 详细说明见[安全模型](docs/SAFETY_CN.md)。
 
 ### 示例
 
-`nextjson/examples/` 下有 6 个完整可运行的程序（每个都返回 `Result` 并打印
-结果，用 `cargo run -p nextjson --example <名称>` 运行）：
+`nextjson/examples/` 下的 6 个目标均为 `no_std` 库，公开
+`run() -> Result<String>` 返回诊断文本，无进程 I/O。使用
+`cargo check -p nextjson --example <名称>` 编译，其断言也纳入测试：
 
 | 示例                 | 演示内容                                                                                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -463,11 +465,11 @@ let json_schema = nextjson::to_json_schema::<Point>();
 | `multi_format`       | 同一个值走遍全部 14 种线格式：编码体积、精确往返、跨格式转码链                                                       |
 | `cross_format_relay` | 流式 JSON ⇄ CBOR 中继（不构造中间 `Value`）、writer 变体、批量体积对比                                               |
 | `zero_copy_reuse`    | 借用型 `&str` / `Bytes` 解码（指针级验证零拷贝）、`DecodeSlot` 在持续解码循环中的复用                                |
-| `streaming_reader`   | 从任意 `std::io::Read` 增量解码（`from_reader`、`StreamDecoder`），用分片"慢速 socket"读取器演示                     |
+| `streaming_reader`   | 从任意 `nextjson::Read` 增量解码（`from_reader`、`StreamDecoder`），用分片"慢速 socket"读取器演示                     |
 | `custom_codec`       | 手写 `NsonSchema` / `NsonSerialize` / `NsonDeserialize` 与 `#[njson(with = "module")]` 字段级定制编解码              |
 
 ```text
-cargo run -p nextjson --example contract_engine
+cargo check -p nextjson --example contract_engine
 ```
 
 ### Benchmark

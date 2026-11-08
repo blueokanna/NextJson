@@ -1,4 +1,4 @@
-//! Streaming JSON decoding from a `std::io::Read` source.
+//! Streaming JSON decoding from a `crate::Read` source.
 //!
 //! [`StreamDecoder`] pulls bytes from the reader on demand instead of
 //! buffering the complete input up front, which is what the top-level
@@ -114,7 +114,7 @@ impl<R> StreamDecoder<R> {
     /// `nextdecode`.
     pub fn end(&mut self) -> Result<()>
     where
-        R: std::io::Read,
+        R: crate::Read,
     {
         self.end_impl()
     }
@@ -155,7 +155,7 @@ impl<R> StreamDecoder<R> {
     }
 }
 
-impl<R: std::io::Read> StreamDecoder<R> {
+impl<R: crate::Read> StreamDecoder<R> {
     /// Read more bytes until `buf.len() >= upto` or the reader hits EOF.
     #[inline]
     fn fill(&mut self, upto: usize) -> Result<()> {
@@ -178,8 +178,8 @@ impl<R: std::io::Read> StreamDecoder<R> {
             let read_len = remaining.clamp(1, CHUNK);
             let n = match self.reader.read(&mut chunk[..read_len]) {
                 Ok(n) => n,
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(Error::io(err)),
+                Err(err) if err.is_interrupted() => continue,
+                Err(err) => return Err(err),
             };
             if n > read_len {
                 return Err(Error::custom("reader returned more bytes than requested"));
@@ -698,7 +698,7 @@ fn lift_token<'de>(token: Token<'static>) -> Token<'de> {
     }
 }
 
-impl<'de, R: std::io::Read> FormatDecoder<'de> for StreamDecoder<R> {
+impl<'de, R: crate::Read> FormatDecoder<'de> for StreamDecoder<R> {
     type Error = Error;
 
     fn begin_object(&mut self) -> Result<()> {

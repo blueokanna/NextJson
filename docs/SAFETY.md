@@ -1,9 +1,21 @@
 # Safety model
 
 NextJson's default build denies unsafe Rust. The optional `simd` feature permits
-intrinsics only in `src/scan.rs`; vector loads have length guards and AVX2 uses
-runtime detection. These are reviewable implementation properties, not a claim
+intrinsics only in `src/scan.rs`; vector loads have length guards and AVX2 requires
+an explicit compilation target feature. These are reviewable implementation properties, not a claim
 that the library has no bugs or needs no deployment testing.
+
+## no_std boundary
+
+All library configurations use core and alloc; there is no std feature.
+Streaming input and output use `nextjson::Read` and `nextjson::Write`.
+The application supplies device adapters, an allocator, startup code and a panic
+policy. Arc and atomic implementations are gated by target capabilities.
+
+Derive source uses core/alloc; its proc_macro API runs on the compiler host,
+not the deployment target. Rust's host test runner is distinct from the no_std
+library and test bodies. Benchmark timing and host unwind checks are isolated
+in benchmark targets.
 
 ## Decoding
 
@@ -78,7 +90,8 @@ cargo doc --workspace --all-features --no-deps --locked
 
 `tests/production_regressions.rs` exercises chunk boundaries, malformed ignored
 values, interrupted I/O, input quotas, lookahead/backtracking, invalid custom
-serializers, deep encoding, and map consistency after a predicate panic. The
+serializers and deep encoding. Map consistency after a predicate panic is
+checked in `benchmarks/serde-comparison/tests/host_unwind.rs`. The
 rest of the suite includes wire fixtures, numeric boundaries, partial drops,
 and scalar-versus-SIMD comparisons. Passing these checks is evidence for the
 tested cases; it is not an independent security audit or a substitute for

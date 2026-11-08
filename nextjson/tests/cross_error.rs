@@ -1,5 +1,11 @@
 //! The cross_format relay entry and Error Display branch are covered
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+
 use nextjson::cross_format::{self, EventSink};
 use nextjson::Error;
 

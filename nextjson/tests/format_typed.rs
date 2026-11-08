@@ -4,6 +4,13 @@
 //! `write_i16`, `write_char`, `write_f32`, etc., width branches; structures with fully scalar type
 //! Round trip can cover these branches for all formats in one go.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats::Format;
 use nextjson::{NsonDeserialize, NsonSerialize};
 
@@ -21,7 +28,7 @@ struct IntBag {
     i128_: i128,
     s: String,
     seq: Vec<i32>,
-    map: std::collections::BTreeMap<String, u16>,
+    map: alloc::collections::BTreeMap<String, u16>,
 }
 
 #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
@@ -48,7 +55,7 @@ fn int_bag() -> IntBag {
         i128_: -5,
         s: "text".into(),
         seq: vec![1, 2, 3],
-        map: std::collections::BTreeMap::from([("k".to_string(), 7)]),
+        map: alloc::collections::BTreeMap::from([("k".to_string(), 7)]),
     }
 }
 
@@ -153,7 +160,7 @@ struct UnsignedBag {
     u128_: u128,
     s: String,
     seq: Vec<u32>,
-    map: std::collections::BTreeMap<String, u16>,
+    map: alloc::collections::BTreeMap<String, u16>,
 }
 
 /// Postcard: Not self-describing, rejects signed scalars; uses unsigned sets for wire routing
@@ -168,7 +175,7 @@ fn postcard_typed_roundtrip() {
         u128_: 5,
         s: "text".into(),
         seq: vec![1, 2, 3],
-        map: std::collections::BTreeMap::from([("k".to_string(), 7)]),
+        map: alloc::collections::BTreeMap::from([("k".to_string(), 7)]),
     };
     let bytes = Postcard.encode(&v).unwrap();
     assert_eq!(Postcard.decode::<UnsignedBag>(&bytes).unwrap(), v);

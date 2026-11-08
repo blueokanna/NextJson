@@ -18,6 +18,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque};
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
+#[cfg(target_has_atomic = "ptr")]
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -278,6 +279,11 @@ pub trait FormatDecoder<'de> {
     fn bool(&mut self) -> Result<bool, Self::Error>;
     /// Read a number.
     fn number(&mut self) -> Result<Number, Self::Error>;
+    /// Read a numeric value as `f64`. Binary codecs may bypass the generic
+    /// number representation. Typed float deserialization still checks finiteness.
+    fn f64(&mut self) -> Result<f64, Self::Error> {
+        Ok(self.number()?.as_f64())
+    }
     /// Read a string (may borrow the source).
     fn string(&mut self) -> Result<Cow<'de, str>, Self::Error>;
     /// Read a single character (a one-scalar string).
@@ -361,6 +367,12 @@ pub trait FormatDecoder<'de> {
         }
     }
 
+    /// Finish an option payload after [`Self::option_tag`] returned `Some`.
+    /// The default has no closing delimiter to consume.
+    fn end_some(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Read the next map key.
     ///
     /// Returns `None` at object end. The default reads a string key and
@@ -411,9 +423,11 @@ impl<'de> FormatDecoder<'de> for Decoder<'de> {
     fn end_array(&mut self) -> Result<(), Self::Error> {
         Decoder::end_array(self)
     }
+    #[inline]
     fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Decoder::array_has_more(self)
     }
+    #[inline]
     fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         Decoder::array_entry_sep(self)
     }
@@ -564,6 +578,7 @@ impl<'de> BytesReader<'de> {
         Ok(self.lookahead.as_ref().expect("just set").clone())
     }
 
+    #[inline]
     fn number(&mut self, scratch: &mut String) -> Result<Number> {
         if self.lookahead.is_some() {
             return match self.next_token(scratch)? {
@@ -885,7 +900,8 @@ impl<'de> BytesReader<'de> {
         } else {
             false
         };
-        let mut magnitude: Option<u64> = Some(0);
+        let mut magnitude = 0u64;
+        let digits_start = i;
         match input[i] {
             b'0' => {
                 i += 1;
@@ -894,14 +910,14 @@ impl<'de> BytesReader<'de> {
                 }
             }
             b'1'..=b'9' => {
-                magnitude = Some((input[i] - b'0') as u64);
-                i += 1;
+                // Any 19 decimal digits fit in u64. Check overflow only on
+                // the uncommon wide-integer path, after lexical validation.
+                let fast_end = input.len().min(i.saturating_add(19));
+                while i < fast_end && input[i].is_ascii_digit() {
+                    magnitude = magnitude * 10 + u64::from(input[i] - b'0');
+                    i += 1;
+                }
                 while i < input.len() && input[i].is_ascii_digit() {
-                    // cannot underflow.
-                    if let Some(mag) = magnitude {
-                        let digit = (input[i] - b'0') as u64;
-                        magnitude = mag.checked_mul(10).and_then(|v| v.checked_add(digit));
-                    }
                     i += 1;
                 }
             }
@@ -936,24 +952,23 @@ impl<'de> BytesReader<'de> {
         let raw = &input[start..i];
         self.pos = i;
 
-        if !is_float {
-            if let Some(mag) = magnitude {
-                let value = if negative {
-                    let min_magnitude = 1_u64 << 63; // |i64::MIN|
-                    if mag <= min_magnitude {
-                        Number::I64(if mag == min_magnitude {
-                            i64::MIN
-                        } else {
-                            -(mag as i64)
-                        })
+        if !is_float && i - digits_start <= 19 {
+            let mag = magnitude;
+            let value = if negative {
+                let min_magnitude = 1_u64 << 63; // |i64::MIN|
+                if mag <= min_magnitude {
+                    Number::I64(if mag == min_magnitude {
+                        i64::MIN
                     } else {
-                        Number::I128(-(mag as i128))
-                    }
+                        -(mag as i64)
+                    })
                 } else {
-                    Number::U64(mag)
-                };
-                return Ok(value);
-            }
+                    Number::I128(-(mag as i128))
+                }
+            } else {
+                Number::U64(mag)
+            };
+            return Ok(value);
         }
         Number::parse(raw, is_float).map_err(|_| self.err_at(ErrorKind::InvalidNumber, start))
     }
@@ -1028,6 +1043,7 @@ impl<'de> BytesReader<'de> {
         }
     }
 
+    #[inline]
     fn array_has_more(&mut self) -> Result<bool> {
         let input = self.input;
         let pos = self.skip_ws();
@@ -1037,6 +1053,7 @@ impl<'de> BytesReader<'de> {
         Ok(input[pos] != b']')
     }
 
+    #[inline]
     fn array_entry_sep(&mut self) -> Result<bool> {
         let input = self.input;
         let pos = self.skip_ws();
@@ -1160,10 +1177,12 @@ impl<'de> TreeReader<'de> {
         Ok(!matches!(self.peek_token()?, Token::EndObject))
     }
 
+    #[inline]
     fn array_has_more(&mut self) -> Result<bool> {
         Ok(!matches!(self.peek_token()?, Token::EndArray))
     }
 
+    #[inline]
     fn array_entry_sep(&mut self) -> Result<bool> {
         Ok(!matches!(self.peek_token()?, Token::EndArray))
     }
@@ -1353,6 +1372,7 @@ impl<'de> Decoder<'de> {
     }
 
     /// Whether the array has more elements (`]` not consumed).
+    #[inline]
     pub fn array_has_more(&mut self) -> Result<bool> {
         match &mut self.inner {
             Inner::Bytes(r) => r.array_has_more(),
@@ -1362,6 +1382,7 @@ impl<'de> Decoder<'de> {
 
     /// Array entry separator: `true` if more elements follow (`，` consumed),
     /// `false` at array end (`]` left for `end_array`).
+    #[inline]
     pub fn array_entry_sep(&mut self) -> Result<bool> {
         match &mut self.inner {
             Inner::Bytes(r) => r.array_entry_sep(),
@@ -1395,6 +1416,7 @@ impl<'de> Decoder<'de> {
     }
 
     /// Read a number.
+    #[inline]
     pub fn number(&mut self) -> Result<Number> {
         match &mut self.inner {
             Inner::Bytes(r) => r.number(&mut self.scratch),
@@ -1549,7 +1571,7 @@ impl<'de> Decoder<'de> {
 }
 
 // ---------------------------------------------------------------------------
-// std / alloc NsonDeserialize implementations
+// core / alloc NsonDeserialize implementations
 // ---------------------------------------------------------------------------
 
 macro_rules! impl_signed_de {
@@ -1587,8 +1609,7 @@ impl<'de> NsonDeserialize<'de> for f64 {
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
-        let n = decoder.number()?;
-        let value = n.as_f64();
+        let value = decoder.f64()?;
         if !value.is_finite() {
             return Err(Error::new(ErrorKind::NumberOutOfRange, None, None, 0).into());
         }
@@ -1602,8 +1623,7 @@ impl<'de> NsonDeserialize<'de> for f32 {
         decoder: &mut D,
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
-        let n = decoder.number()?;
-        let value = n.as_f64() as f32;
+        let value = decoder.f64()? as f32;
         if !value.is_finite() {
             return Err(Error::new(ErrorKind::NumberOutOfRange, None, None, 0).into());
         }
@@ -1728,6 +1748,7 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Option<T> {
             OptionTag::None => out.write(None),
             OptionTag::Some => {
                 let v = T::nextdecode(decoder)?;
+                decoder.end_some()?;
                 out.write(Some(v));
             }
         }
@@ -1742,11 +1763,10 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Vec<T> {
     ) -> Result<(), D::Error> {
         decoder.begin_array()?;
         let mut v = Vec::with_capacity(initial_capacity::<T>(decoder.array_len_hint()));
-        while decoder.array_has_more()? {
+        let mut more = decoder.array_has_more()?;
+        while more {
             v.push(T::nextdecode(decoder)?);
-            if !decoder.array_entry_sep()? {
-                break;
-            }
+            more = decoder.array_entry_sep()?;
         }
         decoder.end_array()?;
         out.write(v);
@@ -1798,6 +1818,7 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Rc<T> {
     }
 }
 
+#[cfg(target_has_atomic = "ptr")]
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Arc<T> {
     fn nextdecode_into<D: FormatDecoder<'de>>(
         decoder: &mut D,
@@ -1915,43 +1936,6 @@ pub(crate) fn nextdecode_map_key<K: for<'a> NsonDeserialize<'a>>(key: &str) -> R
     Ok(value)
 }
 
-#[cfg(feature = "std")]
-impl<'de, K: for<'a> NsonDeserialize<'a> + Eq + core::hash::Hash, V: NsonDeserialize<'de>>
-    NsonDeserialize<'de> for std::collections::HashMap<K, V>
-{
-    fn nextdecode_into<D: FormatDecoder<'de>>(
-        decoder: &mut D,
-        out: &mut DecodeSlot<Self>,
-    ) -> Result<(), D::Error> {
-        let mut map = std::collections::HashMap::new();
-        decoder.begin_object()?;
-        while let Some(k) = decoder.map_key::<K>()? {
-            let v = V::nextdecode(decoder)?;
-            map.insert(k, v);
-            if !decoder.object_entry_sep()? {
-                break;
-            }
-        }
-        decoder.end_object()?;
-        out.write(map);
-        Ok(())
-    }
-}
-
-#[cfg(feature = "std")]
-impl<'de, T: NsonDeserialize<'de> + Eq + core::hash::Hash> NsonDeserialize<'de>
-    for std::collections::HashSet<T>
-{
-    fn nextdecode_into<D: FormatDecoder<'de>>(
-        decoder: &mut D,
-        out: &mut DecodeSlot<Self>,
-    ) -> Result<(), D::Error> {
-        let v = Vec::<T>::nextdecode(decoder)?;
-        out.write(v.into_iter().collect());
-        Ok(())
-    }
-}
-
 macro_rules! impl_tuple_de {
     ($(($first:ident : $First:ident $(, $i:ident : $T:ident)*)),* $(,)?) => {$(
         impl<'de, $First: NsonDeserialize<'de> $(, $T: NsonDeserialize<'de>)*> NsonDeserialize<'de> for ($First, $( $T, )*) {
@@ -2052,7 +2036,6 @@ impl<'de> NsonDeserialize<'de> for Duration {
     }
 }
 
-#[cfg(feature = "std")]
 macro_rules! impl_parse_str_de {
     ($($t:ty => $what:literal),* $(,)?) => {$(
         impl<'de> NsonDeserialize<'de> for $t {
@@ -2066,26 +2049,13 @@ macro_rules! impl_parse_str_de {
     )*};
 }
 
-#[cfg(feature = "std")]
 impl_parse_str_de! {
-    std::net::IpAddr => "an IP address",
-    std::net::Ipv4Addr => "an IPv4 address",
-    std::net::Ipv6Addr => "an IPv6 address",
-    std::net::SocketAddr => "a socket address",
-    std::net::SocketAddrV4 => "an IPv4 socket address",
-    std::net::SocketAddrV6 => "an IPv6 socket address",
-}
-
-#[cfg(feature = "std")]
-impl<'de> NsonDeserialize<'de> for std::path::PathBuf {
-    fn nextdecode_into<D: FormatDecoder<'de>>(
-        decoder: &mut D,
-        out: &mut DecodeSlot<Self>,
-    ) -> Result<(), D::Error> {
-        let s = decoder.string()?;
-        out.write(std::path::PathBuf::from(s.into_owned()));
-        Ok(())
-    }
+    core::net::IpAddr => "an IP address",
+    core::net::Ipv4Addr => "an IPv4 address",
+    core::net::Ipv6Addr => "an IPv6 address",
+    core::net::SocketAddr => "a socket address",
+    core::net::SocketAddrV4 => "an IPv4 socket address",
+    core::net::SocketAddrV6 => "an IPv6 socket address",
 }
 
 impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Range<T> {
@@ -2169,6 +2139,13 @@ impl<'de, T: ?Sized> NsonDeserialize<'de> for PhantomData<T> {
     }
 }
 
+#[cfg(any(
+    target_has_atomic = "8",
+    target_has_atomic = "16",
+    target_has_atomic = "32",
+    target_has_atomic = "64",
+    target_has_atomic = "ptr"
+))]
 macro_rules! impl_atomic_de {
     ($($t:ty => $inner:ident),* $(,)?) => {$(
         impl<'de> NsonDeserialize<'de> for $t {
@@ -2180,17 +2157,34 @@ macro_rules! impl_atomic_de {
         }
     )*};
 }
+#[cfg(target_has_atomic = "8")]
 impl_atomic_de! {
     core::sync::atomic::AtomicBool => bool,
     core::sync::atomic::AtomicI8 => i8,
-    core::sync::atomic::AtomicI16 => i16,
-    core::sync::atomic::AtomicI32 => i32,
-    core::sync::atomic::AtomicI64 => i64,
-    core::sync::atomic::AtomicIsize => isize,
     core::sync::atomic::AtomicU8 => u8,
+}
+
+#[cfg(target_has_atomic = "16")]
+impl_atomic_de! {
+    core::sync::atomic::AtomicI16 => i16,
     core::sync::atomic::AtomicU16 => u16,
+}
+
+#[cfg(target_has_atomic = "32")]
+impl_atomic_de! {
+    core::sync::atomic::AtomicI32 => i32,
     core::sync::atomic::AtomicU32 => u32,
+}
+
+#[cfg(target_has_atomic = "64")]
+impl_atomic_de! {
+    core::sync::atomic::AtomicI64 => i64,
     core::sync::atomic::AtomicU64 => u64,
+}
+
+#[cfg(target_has_atomic = "ptr")]
+impl_atomic_de! {
+    core::sync::atomic::AtomicIsize => isize,
     core::sync::atomic::AtomicUsize => usize,
 }
 

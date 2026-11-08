@@ -1,5 +1,8 @@
 //! Codegen for `NsonSerialize` implementations.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use crate::attr::{self, ContainerAttrs, FieldAttrs};
 use crate::{Fields, Input};
 
@@ -45,7 +48,19 @@ pub(crate) fn serialize_struct(name: &str, fields: &Fields, input: &Input, cp: &
                 c.l("::core::result::Result::Ok(())");
                 return c.out();
             }
-            c.l("__e.begin_object()?;");
+            let fixed_count = f.iter().all(|field| {
+                let attrs = attr::field_attrs(&field.attrs);
+                attrs.skip_serializing || (!attrs.flatten && attrs.skip_serializing_if.is_none())
+            });
+            if fixed_count {
+                let count = f
+                    .iter()
+                    .filter(|field| !attr::field_attrs(&field.attrs).skip_serializing)
+                    .count();
+                c.l(&format!("__e.begin_object_len({count})?;"));
+            } else {
+                c.l("__e.begin_object()?;");
+            }
             for field in f {
                 let fa = attr::field_attrs(&field.attrs);
                 if fa.skip_serializing {

@@ -2,6 +2,12 @@
 //! transformation attributes, remote,
 //! Transparent, untagged, large structures, repeated keys, schema correctness, etc.
 
+#![no_std]
+extern crate alloc;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, TypeSchema, Value};
 
 // ---------------------------------------------------------------------------
@@ -529,14 +535,14 @@ fn deny_unknown_with_default() {
 struct FlatOuter {
     id: u32,
     #[njson(flatten)]
-    rest: std::collections::BTreeMap<String, Value>,
+    rest: alloc::collections::BTreeMap<String, Value>,
 }
 
 #[test]
 fn flatten_map_roundtrip() {
     let v = FlatOuter {
         id: 1,
-        rest: std::collections::BTreeMap::from([
+        rest: alloc::collections::BTreeMap::from([
             ("k".to_string(), Value::from(2)),
             ("s".to_string(), Value::from("x")),
         ]),

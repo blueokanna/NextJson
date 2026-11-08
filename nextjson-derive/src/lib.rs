@@ -23,14 +23,20 @@
 //! the macro fails with a loud `compile_error!` naming the leftover tokens
 //! instead of silently generating impls from a mis-parsed subset.
 
+#![no_std]
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![doc(html_root_url = "https://docs.rs/nextjson-derive")]
 
+#[macro_use]
+extern crate alloc;
 extern crate proc_macro;
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use core::str::FromStr;
 use proc_macro::{Delimiter, Spacing, TokenStream, TokenTree};
-use std::str::FromStr;
 
 mod attr;
 mod case;
@@ -144,7 +150,7 @@ pub(crate) fn split_top(toks: &[TokenTree], sep: char) -> Vec<Vec<TokenTree>> {
                 cur.push(tt.clone());
             }
             TokenTree::Punct(p) if angle == 0 && p.as_char() == sep => {
-                out.push(std::mem::take(&mut cur));
+                out.push(core::mem::take(&mut cur));
             }
             _ => cur.push(tt.clone()),
         }
@@ -1095,7 +1101,7 @@ mod tests {
             ident: "T".into(),
             generics: Generics::default(),
             data: Data::Struct(Fields::Unnamed(vec![unnamed_field(
-                "std::collections::BTreeMap<String, i32>",
+                "alloc::collections::BTreeMap<String, i32>",
                 vec![meta_flag("flatten")],
             )])),
             cattr: cattr(&[]),
@@ -1110,7 +1116,7 @@ mod tests {
             cattr(&[]),
             vec![named_field(
                 "m",
-                "std::collections::BTreeMap<String, i32>",
+                "alloc::collections::BTreeMap<String, i32>",
                 vec![
                     meta_flag("flatten"),
                     meta_named("skip_serializing_if", "Option::is_none"),
@@ -1144,7 +1150,7 @@ mod tests {
                 named_field("a", "i32", vec![]),
                 named_field(
                     "m",
-                    "std::collections::BTreeMap<String, i32>",
+                    "alloc::collections::BTreeMap<String, i32>",
                     vec![meta_flag("flatten")],
                 ),
             ],
@@ -1280,7 +1286,7 @@ mod tests {
             "::core::marker::PhantomData<T>"
         ));
         assert!(crate::schema::is_phantom_data(
-            "std::marker::PhantomData<T>"
+            "core::marker::PhantomData<T>"
         ));
         assert!(!crate::schema::is_phantom_data("Vec<T>"));
         assert!(!crate::schema::is_phantom_data("Option<PhantomData<T>>"));

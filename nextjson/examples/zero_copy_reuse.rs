@@ -1,6 +1,6 @@
 //! 零拷贝与解码存储复用（示例 4/6）。
 //!
-//! 运行：`cargo run -p nextjson --example zero_copy_reuse`
+//! 运行：`cargo check -p nextjson --example zero_copy_reuse`
 //!
 //! 演示 NextJson 的第三根支柱——reuse-first：
 //!
@@ -8,6 +8,12 @@
 //!    零分配），通过指针范围断言证明没有发生拷贝；
 //! 2. **`DecodeSlot` 就地解码**：`nextdecode_into` 把值写进调用方提供的槽，
 //!    在持续解码循环里复用同一个槽与缓冲区，避免每次消息重建存储。
+
+#![no_std]
+extern crate alloc;
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use nextjson::formats::Format;
 use nextjson::{Bytes, DecodeSlot, Decoder, NsonDeserialize, NsonSerialize};
@@ -33,14 +39,23 @@ struct HeaderOwned {
     seq: u64,
 }
 
-fn main() -> nextjson::Result<()> {
+/// Execute the checks and return their diagnostic text without host I/O.
+pub fn run() -> nextjson::Result<String> {
+    let mut diagnostic_text = String::new();
+    macro_rules! record {
+        ($($arg:tt)*) => {{
+            diagnostic_text.push_str(&alloc::format!($($arg)*));
+            diagnostic_text.push('\n');
+        }}
+    }
+
     // ---- 1. 零拷贝借用 ----
     // payload 用未转义字符串书写：JSON 解码器对未转义字符串返回 Cow::Borrowed，
     // 从而 `Bytes` 能直接借用输入切片（若写成 `[10,20,30,40]` 数组则必然拷贝，
     // 与 serde 的 `&[u8]` 借用语义一致）。
     let input = br#"{"event":"market.tick","payload":"raw-bytes","seq":7}"#;
     let header: Header = nextjson::from_slice(input)?;
-    println!(
+    record!(
         "借用解码: event = {:?}, payload = {:?}, seq = {}",
         header.event,
         header.payload.as_bytes(),
@@ -60,7 +75,7 @@ fn main() -> nextjson::Result<()> {
         (input_start..input_end).contains(&payload_ptr),
         "payload 必须借用输入，不能拷贝"
     );
-    println!("指针断言通过: event 与 payload 均直接指向输入切片");
+    record!("指针断言通过: event 与 payload 均直接指向输入切片");
 
     // 二进制格式通过 Value 中继，无法借用——改用拥有型等价物往返，
     // 证明同一数据模型在 CBOR 中原生字节串无损。
@@ -72,7 +87,7 @@ fn main() -> nextjson::Result<()> {
     let cbor = nextjson::formats::Cbor.encode(&owned)?;
     let back: HeaderOwned = nextjson::formats::Cbor.decode(&cbor)?;
     assert_eq!(back, owned);
-    println!("拥有型等价物经 CBOR 原生字节串往返一致: {} B", cbor.len());
+    record!("拥有型等价物经 CBOR 原生字节串往返一致: {} B", cbor.len());
 
     // ---- 2. 就地解码 + 槽复用 ----
     // 持续解码场景：同一个槽反复用于下一条消息，不重新分配存储。
@@ -95,7 +110,7 @@ fn main() -> nextjson::Result<()> {
     assert_eq!(decoded[0].seq, 1);
     assert_eq!(decoded[1].event, "b");
     assert_eq!(decoded[2].payload.as_bytes(), b"zzz");
-    println!(
+    record!(
         "槽复用: 3 条消息共用 1 个 DecodeSlot，逐条解码成功: {:?}",
         decoded.iter().map(|h| h.seq).collect::<Vec<_>>()
     );
@@ -111,10 +126,19 @@ fn main() -> nextjson::Result<()> {
     d2.end()?;
     let second = slot2.take().unwrap();
     assert_eq!((first.seq, second.seq), (1, 2));
-    println!(
+    record!(
         "同一个槽连续承载两条消息: seq {} -> seq {}",
-        first.seq, second.seq
+        first.seq,
+        second.seq
     );
 
-    Ok(())
+    Ok(diagnostic_text)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn exercise_no_std_api() {
+        super::run().unwrap();
+    }
 }

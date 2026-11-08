@@ -4,6 +4,10 @@
 //! Feeding in one by one and asserting "no panic" (error reporting is the correct behavior) systematically covers these branches.
 //! Text format is fed a set of structured malformed syntax.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+
 use nextjson::formats::Format;
 use nextjson::Value;
 

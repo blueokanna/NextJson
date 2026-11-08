@@ -1,3 +1,9 @@
+#![no_std]
+extern crate alloc;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats::{self, Format};
 use nextjson::map::Map;
 use nextjson::Value;

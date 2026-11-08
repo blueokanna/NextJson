@@ -1,3 +1,11 @@
+#![no_std]
+extern crate alloc;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::{from_str, to_string, NsonDeserialize, NsonSerialize, Number, Value};
 
 #[test]
@@ -101,7 +109,7 @@ fn internally_tagged() {
 
 #[test]
 fn internally_tagged_newtype_map() {
-    use std::collections::BTreeMap;
+    use alloc::collections::BTreeMap;
     #[derive(NsonSerialize, NsonDeserialize, Debug, PartialEq)]
     #[njson(tag = "type")]
     enum Cmd {

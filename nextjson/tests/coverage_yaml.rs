@@ -1,6 +1,9 @@
 //! Deep coverage for the YAML codec's feature branches (tags, merge keys,
 //! anchors/aliases, block scalars) using real documents.
 
+#![no_std]
+extern crate alloc;
+
 use nextjson::formats::{self, Format};
 use nextjson::Value;
 

@@ -62,6 +62,7 @@ struct Frame {
     start: usize,
     kind: FrameKind,
     count: u64,
+    expected: Option<u32>,
 }
 
 /// Streaming MessagePack encoder.
@@ -111,6 +112,12 @@ impl<W: Write> MsgPackEncoder<W> {
     }
 
     fn patch_container(&mut self, frame: Frame) -> Result<()> {
+        if let Some(expected) = frame.expected {
+            if frame.count != u64::from(expected) {
+                return Err(Error::custom("msgpack: declared container length mismatch"));
+            }
+            return Ok(());
+        }
         if frame.count > u32::MAX as u64 {
             return Err(Error::custom("msgpack: container exceeds u32 wire limit"));
         }
@@ -151,6 +158,31 @@ impl<W: Write> MsgPackEncoder<W> {
         Ok(())
     }
 
+    fn begin_sized(&mut self, kind: FrameKind, len: usize) -> Result<()> {
+        let count = u32::try_from(len)
+            .map_err(|_| Error::custom("msgpack: container exceeds u32 wire limit"))?;
+        let (small, medium, large) = match kind {
+            FrameKind::Array => (0x90, 0xDC, 0xDD),
+            FrameKind::Map => (0x80, 0xDE, 0xDF),
+        };
+        self.frames.push(Frame {
+            start: self.buf.len(),
+            kind,
+            count: 0,
+            expected: Some(count),
+        });
+        if count <= 15 {
+            self.buf.push(small | count as u8);
+        } else if count <= u16::MAX as u32 {
+            self.buf.push(medium);
+            self.buf.extend_from_slice(&(count as u16).to_be_bytes());
+        } else {
+            self.buf.push(large);
+            self.buf.extend_from_slice(&count.to_be_bytes());
+        }
+        Ok(())
+    }
+
     /// Flush the internal buffer and return the underlying writer.
     pub fn finish(mut self) -> Result<W> {
         self.writer.write_all(&self.buf)?;
@@ -167,11 +199,47 @@ impl<W: Write> MsgPackEncoder<W> {
 impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
     type Error = crate::error::Error;
 
+    fn write_u64_array(&mut self, values: &[u64]) -> Result<()> {
+        self.begin_array_len(values.len())?;
+        self.frames.last_mut().expect("array frame").count = values.len() as u64;
+        for &value in values {
+            self.write_u64(value)?;
+        }
+        self.end_array()
+    }
+
+    fn write_i64_array(&mut self, values: &[i64]) -> Result<()> {
+        self.begin_array_len(values.len())?;
+        self.frames.last_mut().expect("array frame").count = values.len() as u64;
+        for &value in values {
+            self.write_i64(value)?;
+        }
+        self.end_array()
+    }
+
+    fn write_f64_array(&mut self, values: &[f64]) -> Result<()> {
+        self.begin_array_len(values.len())?;
+        self.frames.last_mut().expect("array frame").count = values.len() as u64;
+        for &value in values {
+            self.write_f64(value)?;
+        }
+        self.end_array()
+    }
+
+    fn begin_array_len(&mut self, len: usize) -> Result<()> {
+        self.begin_sized(FrameKind::Array, len)
+    }
+
+    fn begin_object_len(&mut self, len: usize) -> Result<()> {
+        self.begin_sized(FrameKind::Map, len)
+    }
+
     fn begin_array(&mut self) -> Result<(), Self::Error> {
         self.frames.push(Frame {
             start: self.buf.len(),
             kind: FrameKind::Array,
             count: 0,
+            expected: None,
         });
         self.buf.push(0x90); // placeholder fixarray
         Ok(())
@@ -200,6 +268,7 @@ impl<W: Write> FormatEncoder for MsgPackEncoder<W> {
             start: self.buf.len(),
             kind: FrameKind::Map,
             count: 0,
+            expected: None,
         });
         self.buf.push(0x80); // placeholder fixmap
         Ok(())
@@ -641,6 +710,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
         Ok(())
     }
 
+    #[inline]
     fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         Ok(self
             .frames
@@ -649,6 +719,7 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
             .unwrap_or(false))
     }
 
+    #[inline]
     fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         // Count-based containers have no separator byte; the standard array
         // decode loop calls `array_entry_sep` once after every element, so it
@@ -708,6 +779,37 @@ impl<'de> FormatDecoder<'de> for MsgPackDecoder<'de> {
             Token::Bool(b) => Ok(b),
             other => Err(Error::invalid_type("bool", token_name(&other))),
         }
+    }
+
+    #[inline]
+    fn u64(&mut self) -> Result<u64> {
+        if self.lookahead.is_none() {
+            let byte = self.header()?;
+            match byte {
+                0x00..=0x7f => return Ok(u64::from(byte)),
+                0xcc => return self.read_u8().map(u64::from),
+                0xcd => return self.read_be_u16().map(u64::from),
+                0xce => return self.read_be_u32().map(u64::from),
+                0xcf => return self.read_be_u64(),
+                _ => self.cur.rewind(1),
+            }
+        }
+        self.number()?
+            .as_u64()
+            .ok_or_else(|| Error::invalid_type("u64", "a number"))
+    }
+
+    #[inline]
+    fn f64(&mut self) -> Result<f64> {
+        if self.lookahead.is_none() {
+            let byte = self.header()?;
+            match byte {
+                0xcb => return self.read_be_u64().map(f64::from_bits),
+                0xca => return self.read_be_u32().map(|bits| f32::from_bits(bits) as f64),
+                _ => self.cur.rewind(1),
+            }
+        }
+        Ok(self.number()?.as_f64())
     }
 
     fn number(&mut self) -> Result<Number, Self::Error> {

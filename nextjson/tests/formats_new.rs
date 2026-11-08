@@ -1,5 +1,12 @@
 //! Tests for the Phase 22 format additions: UBJSON, SMILE, NDJSON, INI, EDN.
 
+#![no_std]
+extern crate alloc;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use nextjson::formats::{self, Format};
 use nextjson::Value;
 use nextjson::{NsonDeserialize, NsonSerialize};
