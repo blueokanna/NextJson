@@ -65,6 +65,22 @@ pub(crate) fn parse_float(s: &str) -> Option<f64> {
     }
 }
 
+/// Parse a scalar from an untyped text cell without rounding integer overflow
+/// through `f64`. Cell formats permit a leading plus and leading zeroes.
+pub(crate) fn parse_cell_number(s: &str) -> Result<Number> {
+    let raw = s.strip_prefix('+').unwrap_or(s);
+    let digits = s
+        .strip_prefix('+')
+        .or_else(|| s.strip_prefix('-'))
+        .unwrap_or(s);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Number::parse(raw.as_bytes(), false);
+    }
+    parse_float(s)
+        .map(Number::F64)
+        .ok_or_else(|| Error::custom("expected a finite number"))
+}
+
 enum Builder {
     Array(Vec<Value>),
     Object {

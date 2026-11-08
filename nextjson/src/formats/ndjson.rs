@@ -91,11 +91,13 @@ pub struct NdjsonDecoder<'de> {
     input: &'de [u8],
     /// Start offset of the next unconsumed line.
     line_start: usize,
+    current_start: usize,
     /// Persistent decoder over the current line (or `None` when no line is
     /// loaded).
     current: Option<Decoder<'de>>,
     /// Line-stream mode (root `begin_array` was the first call).
     stream_mode: bool,
+    stream_closed: bool,
     /// Container nesting inside the current element; 0 is the stream root.
     depth: u32,
     /// Whether the first protocol call happened (single-value mode only).
@@ -108,8 +110,10 @@ impl<'de> NdjsonDecoder<'de> {
         NdjsonDecoder {
             input,
             line_start: 0,
+            current_start: 0,
             current: None,
             stream_mode: false,
+            stream_closed: false,
             depth: 0,
             started: false,
         }
@@ -123,13 +127,17 @@ impl<'de> NdjsonDecoder<'de> {
     fn expect_end(&mut self) -> Result<()> {
         if self.stream_mode {
             // Stream mode consumes the whole input line by line.
-            if self.current.is_some() {
+            if !self.stream_closed || self.current.is_some() || self.line_start < self.input.len() {
                 return Err(Error::custom("ndjson: trailing data after array"));
             }
             Ok(())
         } else if self.started {
             // The root was parsed from the first line; any further non-empty
             // lines are trailing garbage.
+            self.current
+                .as_mut()
+                .ok_or_else(|| Error::custom("ndjson: no line loaded"))?
+                .end()?;
             self.current = None;
             let has_more = self.load_next_line()?;
             if has_more {
@@ -160,6 +168,7 @@ impl<'de> NdjsonDecoder<'de> {
                     if !saw_content {
                         continue 'lines; // blank line, keep scanning
                     }
+                    self.current_start = line_begin;
                     self.current = Some(Decoder::new(line));
                     return Ok(true);
                 }
@@ -169,10 +178,10 @@ impl<'de> NdjsonDecoder<'de> {
                 }
                 i += 1;
             }
-            // EOF: the final line may lack a trailing newline.
             if saw_content {
                 let line = &input[line_begin..];
                 self.line_start = input.len();
+                self.current_start = line_begin;
                 self.current = Some(Decoder::new(line));
                 return Ok(true);
             }
@@ -228,7 +237,17 @@ impl<'de> FormatDecoder<'de> for NdjsonDecoder<'de> {
     fn end_array(&mut self) -> Result<(), Self::Error> {
         if self.at_stream_root() {
             // Root stream array closed; all lines consumed as elements.
+            if self.stream_closed {
+                return Err(Error::custom("ndjson: stream already closed"));
+            }
+            if let Some(current) = &mut self.current {
+                current.end()?;
+            }
             self.current = None;
+            if self.load_next_line()? {
+                return Err(Error::custom("ndjson: unread records"));
+            }
+            self.stream_closed = true;
             return Ok(());
         }
         self.depth = self.depth.saturating_sub(1);
@@ -237,6 +256,9 @@ impl<'de> FormatDecoder<'de> for NdjsonDecoder<'de> {
 
     fn array_has_more(&mut self) -> Result<bool, Self::Error> {
         if self.at_stream_root() {
+            if self.stream_closed {
+                return Err(Error::custom("ndjson: stream already closed"));
+            }
             if self.current.is_none() {
                 self.load_next_line()?;
             }
@@ -248,6 +270,10 @@ impl<'de> FormatDecoder<'de> for NdjsonDecoder<'de> {
     fn array_entry_sep(&mut self) -> Result<bool, Self::Error> {
         if self.at_stream_root() {
             // The element (one line) is complete; move to the next line.
+            self.current
+                .as_mut()
+                .ok_or_else(|| Error::custom("ndjson: no line loaded"))?
+                .end()?;
             self.current = None;
             return self.load_next_line();
         }
@@ -305,15 +331,39 @@ impl<'de> FormatDecoder<'de> for NdjsonDecoder<'de> {
     }
 
     fn save(&self) -> Mark {
-        Mark::new(self.line_start, 0)
+        Mark {
+            pos: if self.current.is_some() {
+                self.current_start
+            } else {
+                self.line_start
+            },
+            depth: self.depth,
+            frame_len: self
+                .current
+                .as_ref()
+                .map_or(0, |decoder| decoder.save().pos()),
+            tag: Some(
+                u8::from(self.started)
+                    | (u8::from(self.stream_mode) << 1)
+                    | (u8::from(self.current.is_some()) << 2)
+                    | (u8::from(self.stream_closed) << 3),
+            ),
+        }
     }
 
     fn restore(&mut self, mark: Mark) {
         self.line_start = mark.pos;
         self.current = None;
-        self.started = true;
-        // Reload the current line so subsequent reads continue from the mark.
-        let _ = self.load_next_line();
+        self.depth = mark.depth;
+        let flags = mark.tag.unwrap_or(0);
+        self.started = flags & 1 != 0;
+        self.stream_mode = flags & 2 != 0;
+        self.stream_closed = flags & 8 != 0;
+        if flags & 4 != 0 && self.load_next_line().unwrap_or(false) {
+            if let Some(current) = &mut self.current {
+                current.restore(Mark::new(mark.frame_len, mark.depth));
+            }
+        }
     }
 
     fn is_human_readable(&self) -> bool {

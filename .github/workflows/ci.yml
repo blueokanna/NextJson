@@ -177,7 +177,11 @@ jobs:
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
       - name: Compile in-workspace format benchmark (with simd)
-        run: cargo bench -p nextjson --bench format_comparison --features simd --no-run --locked
+        run: cargo bench -p nextjson --benches --features simd --no-run --locked
+      - name: Test benchmark report validation
+        run: |
+          rustc --edition=2021 --test -D warnings benchmarks/serde-comparison/src/bin/bench_report.rs -o target/report-tests
+          target/report-tests
       - name: Compile serde comparison benchmark (out-of-workspace)
         working-directory: benchmarks/serde-comparison
         run: cargo build --release --locked

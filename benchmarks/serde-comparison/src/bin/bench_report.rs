@@ -5,7 +5,7 @@
 //! 1. `--serde-csv`: the standalone matrix benchmark output (sections
 //!    `# throughput` and `# security`, CSV rows with a single header per
 //!    section).
-//! 2. `--format-csv`: the in-workspace 14-format matrix.
+//! 2. `--format-csv`: the in-workspace format and API-path matrix.
 //!
 //! The throughput section is grouped per data-shape fixture; each row shows
 //! encode/decode MB/s for nextjson and the serde implementation, the ratio,
@@ -45,75 +45,106 @@ struct SecRow {
     sd_panics: u64,
 }
 
-fn parse_bool(s: &str) -> bool {
-    matches!(s.trim(), "true" | "1")
-}
-
-/// Parse the standalone matrix CSV. Returns (throughput rows, security rows).
-fn parse_sections(path: &str) -> (Vec<Row>, Vec<SecRow>) {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path));
+/// Parse a complete benchmark CSV. Invalid or duplicate rows are errors:
+/// a report must never replace missing measurements with invented zeroes.
+fn parse_csv(text: &str, source: &str) -> Result<(Vec<Row>, Vec<SecRow>), String> {
     let mut throughput = Vec::new();
     let mut security = Vec::new();
-    let mut section = "";
-    for (lineno, line) in text.lines().enumerate() {
+    let mut section = "throughput";
+    let mut seen = std::collections::BTreeSet::new();
+    for (lineno, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        let error = |message: &str| format!("{source}:{}: {message}", lineno + 1);
         if let Some(name) = line.strip_prefix('#') {
-            section = name.trim();
+            section = match name.trim() {
+                "throughput" => "throughput",
+                "security" => "security",
+                _ => return Err(error("unknown CSV section")),
+            };
             continue;
         }
-        if line.starts_with("case,")
-            || line.starts_with("format,")
-            || line.starts_with("security_case,")
+        if line == "case,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps"
+            || line == "format,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps"
         {
+            if section != "throughput" {
+                return Err(error("throughput header inside security section"));
+            }
             continue;
         }
-        let cols: Vec<&str> = line.split(',').collect();
-        match section {
-            "security" => {
-                if cols.len() < 8 {
-                    eprintln!(
-                        "warning: {path}:{} malformed security row: {}",
-                        lineno + 1,
-                        line
-                    );
-                    continue;
-                }
-                security.push(SecRow {
-                    name: cols[0].trim().to_string(),
-                    bytes: cols[1].trim().parse().unwrap_or(0),
-                    nj_us: cols[2].trim().parse().unwrap_or(0.0),
-                    sd_us: cols[3].trim().parse().unwrap_or(0.0),
-                    nj_rejects: parse_bool(cols[4]),
-                    sd_rejects: parse_bool(cols[5]),
-                    nj_panics: cols[6].trim().parse().unwrap_or(0),
-                    sd_panics: cols[7].trim().parse().unwrap_or(0),
-                });
+        if line == "security_case,bytes,nextjson_us_per_op,serde_us_per_op,nextjson_rejects,serde_rejects,nextjson_panics,serde_panics" {
+            if section != "security" { return Err(error("security header outside security section")); }
+            continue;
+        }
+        let cols: Vec<_> = line.split(',').map(str::trim).collect();
+        let expected = if section == "security" { 8 } else { 6 };
+        if cols.len() != expected {
+            return Err(error("wrong column count"));
+        }
+        if cols[0].is_empty()
+            || !cols[0]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-()".contains(&b))
+        {
+            return Err(error("invalid case name"));
+        }
+        if !seen.insert((section, cols[0])) {
+            return Err(error("duplicate case"));
+        }
+        let integer = |index: usize| -> Result<u64, String> {
+            cols[index]
+                .parse()
+                .map_err(|_| error("invalid unsigned integer"))
+        };
+        let number = |index: usize, positive: bool| -> Result<f64, String> {
+            let value: f64 = cols[index]
+                .parse()
+                .map_err(|_| error("invalid measurement"))?;
+            if !value.is_finite() || value < 0.0 || (positive && value == 0.0) {
+                return Err(error("measurement must be finite and in range"));
             }
-            _ => {
-                if cols.len() < 6 {
-                    eprintln!(
-                        "warning: {path}:{} malformed row ({} cols): {}",
-                        lineno + 1,
-                        cols.len(),
-                        line
-                    );
-                    continue;
-                }
-                throughput.push(Row {
-                    name: cols[0].trim().to_string(),
-                    size: cols[1].trim().parse().unwrap_or(0),
-                    encode_ops: cols[2].trim().parse().unwrap_or(0.0),
-                    encode_mbps: cols[3].trim().parse().unwrap_or(0.0),
-                    decode_ops: cols[4].trim().parse().unwrap_or(0.0),
-                    decode_mbps: cols[5].trim().parse().unwrap_or(0.0),
-                });
+            Ok(value)
+        };
+        let boolean = |index: usize| -> Result<bool, String> {
+            match cols[index] {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                _ => Err(error("invalid boolean")),
             }
+        };
+        if section == "security" {
+            security.push(SecRow {
+                name: cols[0].into(),
+                bytes: integer(1)?,
+                nj_us: number(2, false)?,
+                sd_us: number(3, false)?,
+                nj_rejects: boolean(4)?,
+                sd_rejects: boolean(5)?,
+                nj_panics: integer(6)?,
+                sd_panics: integer(7)?,
+            });
+        } else {
+            throughput.push(Row {
+                name: cols[0].into(),
+                size: integer(1)?,
+                encode_ops: number(2, true)?,
+                encode_mbps: number(3, false)?,
+                decode_ops: number(4, true)?,
+                decode_mbps: number(5, false)?,
+            });
         }
     }
-    (throughput, security)
+    if throughput.is_empty() && security.is_empty() {
+        return Err(format!("{source}: no measurements"));
+    }
+    Ok((throughput, security))
+}
+
+fn parse_sections(path: &str) -> Result<(Vec<Row>, Vec<SecRow>), String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    parse_csv(&text, path)
 }
 
 fn rustc_version() -> String {
@@ -138,10 +169,14 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn commit_sha() -> String {
-    env::var("GITHUB_SHA")
-        .ok()
-        .or_else(|| git(&["rev-parse", "HEAD"]))
-        .unwrap_or_else(|| "n/a".to_string())
+    if let Ok(sha) = env::var("GITHUB_SHA") {
+        return sha;
+    }
+    let mut sha = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "n/a".to_string());
+    if git(&["status", "--porcelain"]).is_some_and(|status| !status.is_empty()) {
+        sha.push_str(" + working-tree changes");
+    }
+    sha
 }
 
 fn ref_name() -> String {
@@ -157,7 +192,10 @@ fn generated_at() -> String {
             .map(|id| format!("see workflow run #{id}"))
             .unwrap_or_else(|_| "see workflow run".to_string());
     }
-    git(&["log", "-1", "--format=%cI"]).unwrap_or_else(|| "n/a".to_string())
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| format!("Unix timestamp {} (UTC)", elapsed.as_secs()))
+        .unwrap_or_else(|_| "unavailable".to_string())
 }
 
 fn cpu_model() -> String {
@@ -178,9 +216,6 @@ fn split_case(name: &str) -> (String, String, String) {
         return (String::new(), String::new(), name.to_string());
     }
     let impl_ = parts[0].to_string();
-    if name == "nextjson_bincode(na)" {
-        return (impl_, "bincode".to_string(), "na".to_string());
-    }
     if name == "serde_bincode" {
         // bincode is only benched on the `records` fixture; report it there.
         return (impl_, "records".to_string(), "bincode".to_string());
@@ -236,6 +271,13 @@ const FIXTURE_DESCRIPTIONS: &[(&str, &str)] = &[
 ];
 
 fn main() {
+    if let Err(error) = run() {
+        eprintln!("benchmark report: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
     let mut format_csv = None;
     let mut serde_csv = None;
@@ -253,35 +295,43 @@ fn main() {
             }
             "--out" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    out = v.clone();
-                }
+                out = args.get(i).cloned().ok_or("--out requires a path")?;
             }
             other => {
-                eprintln!("warning: unknown argument {other}");
+                return Err(format!("unknown argument {other}"));
             }
         }
         i += 1;
     }
-    let format_csv = format_csv.expect("--format-csv is required");
-    let serde_csv = serde_csv.expect("--serde-csv is required");
+    let format_csv = format_csv.ok_or("--format-csv is required")?;
+    let serde_csv = serde_csv.ok_or("--serde-csv is required")?;
 
-    let (throughput, security) = parse_sections(&serde_csv);
-    let format_rows = parse_sections(&format_csv).0;
+    let (throughput, security) = parse_sections(&serde_csv)?;
+    let (format_rows, unexpected_security) = parse_sections(&format_csv)?;
+    if throughput.is_empty()
+        || security.is_empty()
+        || format_rows.is_empty()
+        || !unexpected_security.is_empty()
+    {
+        return Err("missing or misplaced benchmark sections".into());
+    }
 
     let mut by_fixture: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     for row in &throughput {
         let (impl_, fixture, format) = split_case(&row.name);
-        if impl_ == "nextjson" && fixture == "bincode" && format == "na" {
-            continue;
+        if !["nextjson", "serde", "simd"].contains(&impl_.as_str())
+            || !FIXTURE_ORDER.contains(&fixture.as_str())
+            || !FORMAT_ORDER.contains(&format.as_str())
+        {
+            return Err(format!("unrecognized throughput case: {}", row.name));
         }
         by_fixture.entry(fixture).or_default().push(row.clone());
     }
 
     let mut md = String::new();
-    md.push_str("# GitHub Actions 基准报告 — NextJson vs Serde 生态\n\n");
+    md.push_str("# 基准报告 — NextJson vs Serde 生态\n\n");
     md.push_str(
-        "> 本报告由 `.github/workflows/benchmark.yml` 自动生成，原始 CSV 随工作流产物一起上传。\n",
+        "> 本报告由 `bench_report` 从原始 CSV 生成；GitHub Actions 运行时会上传 CSV 与报告。\n",
     );
     md.push_str("> 所有数字均为 **release** 构建（`opt-level=3`, `lto=thin`, `codegen-units=1`），预热后按固定时间窗测量。\n\n");
 
@@ -302,6 +352,10 @@ fn main() {
         env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local run".to_string())
     ));
     md.push_str(&format!("| 生成时间 | `{}` |\n", generated_at()));
+    md.push_str(&format!(
+        "| 当前进程 NEXTJSON_BENCH_MS | `{}`（原始 CSV 不含时间窗，需与测量环境核对） |\n",
+        env::var("NEXTJSON_BENCH_MS").unwrap_or_else(|_| "unset".to_string())
+    ));
     md.push('\n');
 
     // ---- Section 1: serde comparison grouped by data shape ----------------
@@ -370,13 +424,19 @@ fn main() {
     md.push_str("| 攻击向量 | 输入字节 | nextjson 拒绝 | serde 拒绝 | nextjson us/op | serde us/op | nextjson 加速 | nextjson panic | serde panic |\n");
     md.push_str("|---|---|---|---|---|---|---|---|---|\n");
     for row in &security {
-        let speedup = if row.sd_us > 0.0 {
-            row.sd_us / row.nj_us
+        let speedup = if row.nj_us > 0.0
+            && row.sd_us > 0.0
+            && row.nj_rejects
+            && row.sd_rejects
+            && row.nj_panics == 0
+            && row.sd_panics == 0
+        {
+            format!("{:.1}x", row.sd_us / row.nj_us)
         } else {
-            0.0
+            "—".to_string()
         };
         md.push_str(&format!(
-            "| `{}` | {} | {} | {} | {:.2} | {:.2} | {:.1}x | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} |\n",
             row.name,
             row.bytes,
             mark(row.nj_rejects),
@@ -384,16 +444,15 @@ fn main() {
             row.nj_us,
             row.sd_us,
             speedup,
-            mark(row.nj_panics == 0),
-            mark(row.sd_panics == 0),
+            row.nj_panics,
+            row.sd_panics,
         ));
     }
-    md.push_str("\n> 所有恶意输入必须被**拒绝且不 panic**（任何 panic 都是安全漏洞）。拒绝速度 = 每个输入的平均微秒数（越低越好）。\n");
-    md.push_str("> **浮点精度对比**：serde_json 1.0.151 的解析器对部分 17 位有效数字小数存在 1-ULP 误差（写对读错，如 `-0.012750000000000001` → `-0.01275`）；nextjson 与 simd-json 均完全 round-trip。\n\n");
+    md.push_str("\n> 表中记录本次运行的拒绝结果和 panic 次数，不代表完整安全审计。只有双方均拒绝且未 panic 时才比较拒绝耗时；零耗时不计算比值。\n\n");
 
     // ---- Section 3: nextjson full format matrix ---------------------------
     md.push_str(&format!(
-        "## 3. NextJson 全格式吞吐矩阵（{} 格式，encode / decode）\n\n",
+        "## 3. NextJson 吞吐矩阵（{} 测量路径，encode / decode）\n\n",
         format_rows.len()
     ));
     md.push_str("| 格式 | size(字节) | 编码 MB/s | 解码 MB/s | 编码 ns/op | 解码 ns/op |\n|---|---|---|---|---|---|\n");
@@ -417,30 +476,27 @@ fn main() {
 
     // ---- Section 4: methodology -------------------------------------------
     md.push_str(
-        "## 4. 方法学\n\n\
-- **构建**：`--release`，workspace `[profile.release]`（`opt-level=3`, `lto=\"thin\"`, `codegen-units=1`）。\n\
-- **测量**：每个 case 先做时间有界的预热（至少 10 次迭代、再稳定 ~250ms，避免大 fixture 或慢 codec 的固定 500 次预热拖垮整轮），再按 `NEXTJSON_BENCH_MS`（默认 2000ms）时间窗计数 encode 与 decode 的 ops，取吞吐量（MB/s = ops × size / 1e6）与延迟（ns/op = 1e9 / ops）。\n\
-- **同一进程**：nextjson 与 serde 使用相同的 fixture、相同的预热与测量循环，直接可比。\n\
-- **全量矩阵**：每个数据形状 fixture 对所有能表示它的格式都做对比（JSON 三引擎 + MessagePack/CBOR/JSON5/YAML/RON/UBJSON/SMILE/NDJSON/TOML/BSON/postcard/bincode），不再是只对比 json/msgpack/cbor 三个格式。\n\
-- **数据形状**：9 个 fixture 覆盖混合记录、浮点密集、Unicode、纯整数、长文本、大数组、小对象、深层嵌套、文档形态，避免单 fixture 偏差。\n\
-- **nextjson `simd` feature**：本报告中的 nextjson 数字启用了 `simd`（x86-64：SSE2 基线 + AVX2 运行时检测；aarch64：NEON）。`simd` 是 opt-in 特性，默认构建保持 `#![deny(unsafe_code)]` 零 unsafe。\n\
-- **诚实声明**：\n\
-  - `simd-json` 的 serde 解码要求可变输入缓冲（原地解析），因此其每次解码迭代包含一次 `to_vec()` 拷贝，该拷贝计入其耗时。\n\
-  - serde_json 1.0.151 对 17 位有效数字浮点的解析有 1-ULP 误差（见第 2 节）；其 `numbers` fixture 的 self-check 使用 1-ULP 容差并如实报告。\n\
-  - simd-json 的浮点序列化器对超出其格式化缓冲的极值（如次正规数 `5e-324`）报错，故 `numbers` fixture 的指数范围限定在 -6..+6。\n\
-  - **UBJSON / SMILE 的 serde 侧缺口**：`serde_ubj` 0.2.0 的**解码器只支持有符号 32/64 位整数**（`u8/u16/u32/u64/i128` 全部返回 `Unsupported`），`serde-smile` 0.2.2 对 `u64` 的处理同样不完整（`id: u64` 等字段无法往返），而本报告的所有 typed fixture 都含无符号字段——因此这两个格式只呈现 nextjson 的完整 encode+decode 行，不呈现 serde 对比行；这是生态 crate 的真实能力限制，不是测量省略。nextjson 的 UBJSON/SMILE 字节级互操作（计数式/强类型容器、共享字符串/键名引用等）由 `formats_new` 集成测试按规范字节验证。\n\
-  - 共享 CI 硬件的吞吐会随负载与散热漂移；本报告是单次运行的记录，不是严格的性能基准判决。\n\
-  - `bincode` 无 nextjson 对应实现；TOML/BSON 需文档根、postcard 拒有符号标量，这三者使用 `config` fixture。\n",
+        "## 4. 方法与边界\n\n\
+- release 构建，先预热，再按 NEXTJSON_BENCH_MS 分别测量编码与解码。原生矩阵固定预热 200 次；生态对照使用时间有界预热。\n\
+- MB/s = 每秒操作数 × 编码字节数 / 1e6；ns/op = 1e9 / 每秒操作数。不同格式的编码体积不同，不能仅凭 MB/s 排名。\n\
+- simd-json 的解码循环包含输入缓冲复制，其时间计入解码结果。\n\
+- numbers 用例的 serde_json 与 Serde NDJSON 往返自检允许最多 1 ULP 浮点误差，NextJson 与 simd-json 使用相等检查；这些自检条件不同，不能据此宣称双方具有相同的数值保真度。实际误差诊断写入运行日志。\n\
+- json 是默认校验路径；json-checked-explicit 与 json-trusted-explicit 使用相同 writer 缓冲方式比较策略；json-reader-limited 测量受输入配额约束的流式读取。\n\
+- 预读、校验和表示能力均属于测量条件。缺少对照行表示本次没有相应测量，不把缺失值写成零，也不自动归因于第三方库缺陷。\n\
+- 本报告只陈述输入 CSV 中的观测，不从吞吐数据推断浮点精度或安全结论。\n\
+- 共享运行器的负载、频率和温度会影响结果；单次比值不是性能保证，需用目标硬件和实际负载复测。\n",
     );
 
     let out_path = Path::new(&out);
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create output directory: {e}"))?;
         }
     }
-    fs::write(out_path, md).expect("write report");
+    fs::write(out_path, md).map_err(|e| format!("cannot write report: {e}"))?;
     eprintln!("wrote {out}");
+    Ok(())
 }
 
 fn mark(b: bool) -> &'static str {
@@ -448,5 +504,60 @@ fn mark(b: bool) -> &'static str {
         "✓"
     } else {
         "✗"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const ROW: &str = "json-reader-limited,10,200,0.002,100,0.001";
+
+    #[test]
+    fn keeps_hyphenated_paths_and_utf8_bom() {
+        let text = format!(
+            "\u{feff}format,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps\n{ROW}\n"
+        );
+        let (rows, security) = parse_csv(&text, "fixture").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "json-reader-limited");
+        assert!(security.is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_and_duplicate_rows() {
+        for text in [
+            format!("{ROW},extra"),
+            "json,10,broken,1,2,3".into(),
+            format!("{ROW}\n{ROW}"),
+            "json,10,1".into(),
+        ] {
+            let error = parse_csv(&text, "fixture.csv").unwrap_err();
+            assert!(error.starts_with("fixture.csv:"));
+        }
+    }
+
+    #[test]
+    fn rejects_non_finite_negative_and_missing_measurements() {
+        for number in ["NaN", "inf", "-1", "-inf", "", "0"] {
+            let text = format!("json,10,{number},1,2,3");
+            assert!(parse_csv(&text, "fixture").is_err(), "{number}");
+        }
+        for text in [
+            "",
+            "# security\n",
+            "# unknown\n",
+            "format,size_bytes,encode_ops,encode_MBps,decode_ops,decode_MBps\n",
+        ] {
+            assert!(parse_csv(text, "fixture").is_err());
+        }
+    }
+
+    #[test]
+    fn preserves_failed_security_outcomes_and_zero_timer_resolution() {
+        let (_, rows) = parse_csv("# security\ncase,10,0,0.01,false,true,2,0", "fixture").unwrap();
+        assert!(!rows[0].nj_rejects);
+        assert_eq!(rows[0].nj_panics, 2);
+        assert_eq!(rows[0].nj_us, 0.0);
+        assert!(parse_csv("# security\ncase,10,1,2,unknown,true,0,0", "fixture").is_err());
     }
 }

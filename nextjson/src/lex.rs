@@ -15,10 +15,10 @@ pub(crate) fn line_col(input: &[u8], pos: usize) -> (u32, u32) {
     let mut col = 1u32;
     for &b in &input[..pos] {
         if b == b'\n' {
-            line += 1;
+            line = line.saturating_add(1);
             col = 1;
         } else {
-            col += 1;
+            col = col.saturating_add(1);
         }
     }
     (line, col)
@@ -37,11 +37,8 @@ pub(crate) fn hex_digit(b: u8) -> Option<u8> {
 
 /// Parse exactly four hex digits starting at `start` (for `\uXXXX`).
 pub(crate) fn parse_hex4(input: &[u8], start: usize) -> Option<u16> {
-    if start + 4 > input.len() {
-        return None;
-    }
     let mut v: u16 = 0;
-    for &b in &input[start..start + 4] {
+    for &b in input.get(start..start.checked_add(4)?)? {
         v = v * 16 + hex_digit(b)? as u16;
     }
     Some(v)
@@ -122,6 +119,8 @@ mod tests {
         assert_eq!(parse_hex4(b"10FF", 0), Some(0x10FF));
         assert_eq!(parse_hex4(b"12", 0), None);
         assert_eq!(parse_hex4(b"12G4", 0), None);
+        assert_eq!(parse_hex4(b"1234", usize::MAX), None);
+        assert_eq!(parse_hex4(b"1234", usize::MAX - 3), None);
         // The cursor must point at the first digit.
         assert_eq!(parse_hex4(b"xx1a2b", 2), Some(0x1A2B));
     }

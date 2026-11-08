@@ -32,9 +32,23 @@ use crate::map::Map;
 use crate::number::Number;
 use crate::value::Value;
 
+/// Maximum speculative allocation before any collection elements are decoded.
+/// Actual elements may grow the collection beyond these initial limits.
+fn initial_capacity<T>(hint: Option<usize>) -> usize {
+    const MAX_ELEMENTS: usize = 4096;
+    const MAX_BYTES: usize = 64 * 1024;
+    hint.unwrap_or(0)
+        .min(MAX_ELEMENTS)
+        .min(MAX_BYTES / core::mem::size_of::<T>().max(1))
+}
+
 /// Parser configuration.
 #[derive(Clone, Debug)]
 pub struct DecodeConfig {
+    /// Maximum container nesting depth. Defaults to 128.
+    ///
+    /// Increasing this limit also increases recursive stack use. It does not
+    /// limit input bytes, collection sizes, or work done by custom decoders.
     pub max_depth: u32,
 }
 
@@ -62,6 +76,7 @@ pub struct Mark {
     pub(crate) pos: usize,
     pub(crate) depth: u32,
     pub(crate) frame_len: usize,
+    /// Codec-specific scalar state needed to reconstruct a checkpoint.
     pub(crate) tag: Option<u8>,
 }
 
@@ -241,7 +256,9 @@ pub trait FormatDecoder<'de> {
     /// array, when the wire format carries a length prefix.
     ///
     /// Collection decoders use this only as an allocation hint. Implementors
-    /// handling untrusted input must cap it by the bytes still available and
+    /// cannot force unbounded preallocation: built-in collection consumers cap
+    /// the initial reservation by both element count and element size.
+    /// Implementors handling untrusted input must cap it by the bytes still available and
     /// by a reasonable initial allocation budget so a forged length cannot
     /// trigger disproportionate allocation. The default returns `None`,
     /// preserving compatibility with existing codecs.
@@ -312,7 +329,7 @@ pub trait FormatDecoder<'de> {
             },
             Token::BeginArray => {
                 self.begin_array()?;
-                let mut out = Vec::with_capacity(self.array_len_hint().unwrap_or(0));
+                let mut out = Vec::with_capacity(initial_capacity::<u8>(self.array_len_hint()));
                 while self.array_has_more()? {
                     out.push(self.u8()?);
                     if !self.array_entry_sep()? {
@@ -1724,7 +1741,7 @@ impl<'de, T: NsonDeserialize<'de>> NsonDeserialize<'de> for Vec<T> {
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
         decoder.begin_array()?;
-        let mut v = Vec::with_capacity(decoder.array_len_hint().unwrap_or(0));
+        let mut v = Vec::with_capacity(initial_capacity::<T>(decoder.array_len_hint()));
         while decoder.array_has_more()? {
             v.push(T::nextdecode(decoder)?);
             if !decoder.array_entry_sep()? {
@@ -2198,7 +2215,9 @@ impl<'de> NsonDeserialize<'de> for Map {
         out: &mut DecodeSlot<Self>,
     ) -> Result<(), D::Error> {
         decoder.begin_object()?;
-        let mut map = Map::with_capacity(decoder.object_len_hint().unwrap_or(0));
+        let mut map = Map::with_capacity(initial_capacity::<(String, Value)>(
+            decoder.object_len_hint(),
+        ));
         while let Some(key) = decoder.object_key()? {
             let v = Value::nextdecode(decoder)?;
             map.insert(key.into_owned(), v);
@@ -2227,7 +2246,9 @@ impl<'de> NsonDeserialize<'de> for Value {
             Token::Str(_) => Value::String(decoder.string()?.into_owned()),
             Token::BeginObject => {
                 decoder.begin_object()?;
-                let mut map = Map::with_capacity(decoder.object_len_hint().unwrap_or(0));
+                let mut map = Map::with_capacity(initial_capacity::<(String, Value)>(
+                    decoder.object_len_hint(),
+                ));
                 while let Some(key) = decoder.object_key()? {
                     let v = Value::nextdecode(decoder)?;
                     map.insert(key.into_owned(), v);
@@ -2240,7 +2261,8 @@ impl<'de> NsonDeserialize<'de> for Value {
             }
             Token::BeginArray => {
                 decoder.begin_array()?;
-                let mut arr = Vec::with_capacity(decoder.array_len_hint().unwrap_or(0));
+                let mut arr =
+                    Vec::with_capacity(initial_capacity::<Value>(decoder.array_len_hint()));
                 while decoder.array_has_more()? {
                     arr.push(Value::nextdecode(decoder)?);
                     if !decoder.array_entry_sep()? {

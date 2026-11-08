@@ -1,17 +1,5 @@
 name: Benchmark
 
-# Full benchmark + report generation.
-#
-# Runs both benchmark suites (the in-workspace all-format matrix and the
-# standalone serde/simd-json comparison), merges the CSV results into
-# `benchmarks/results/Github_Action_Benchmark.md`, uploads the raw CSVs and
-# the report as workflow artifacts, and (on push to `main`, manual dispatch,
-# or the weekly schedule) commits the report back to the repository.
-#
-# The nextjson `simd` feature is enabled so the reported numbers reflect the
-# architecture-accelerated scanning paths (SSE2/AVX2 on x86-64, NEON on
-# aarch64) with runtime detection and scalar fallback.
-
 on:
   workflow_dispatch:
   push:
@@ -40,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write # required to commit results back on main / manual / schedule
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,32 +45,36 @@ jobs:
       - name: Install Rust stable
         run: rustup toolchain install stable --profile minimal
 
+      - name: Validate library and report parser before timing
+        run: |
+          cargo check --workspace --all-features --locked
+          mkdir -p target
+          rustc --edition=2021 --test benchmarks/serde-comparison/src/bin/bench_report.rs -o target/report-tests
+          target/report-tests
+
       - name: Run in-workspace all-format benchmark (with simd)
         run: |
           mkdir -p benchmarks/results
-          cargo bench -p nextjson --bench format_comparison --features simd --locked 2>&1 \
-            | tee /tmp/format_raw.txt
-          grep -E '^[A-Za-z0-9_]+,[0-9]+,[0-9.]+,[0-9.]+,[0-9.]+,[0-9.]+$' /tmp/format_raw.txt \
+          cargo bench -p nextjson --bench format_comparison --features simd --locked \
             > benchmarks/results/format_comparison.csv
+          cat benchmarks/results/format_comparison.csv
 
       - name: Run serde ecosystem comparison (with simd)
         working-directory: benchmarks/serde-comparison
         run: |
-          cargo run --release --locked 2>&1 | tee /tmp/serde_raw.txt
-          # Keep section markers (# throughput / # security), headers, and
-          # data rows; drop cargo noise lines.
-          grep -E '^(# |[A-Za-z0-9_()]+,[0-9]+,)' /tmp/serde_raw.txt \
-            > ../results/serde_comparison.csv
+          cargo run --release --locked > ../results/serde_comparison.csv
+          cat ../results/serde_comparison.csv
 
       - name: Generate Github_Action_Benchmark.md
         run: |
-          cargo run --release --manifest-path benchmarks/serde-comparison/Cargo.toml --bin bench_report -- \
+          rustc --edition=2021 -O benchmarks/serde-comparison/src/bin/bench_report.rs -o target/bench-report
+          target/bench-report \
             --format-csv benchmarks/results/format_comparison.csv \
             --serde-csv benchmarks/results/serde_comparison.csv \
             --out benchmarks/results/Github_Action_Benchmark.md
 
       - name: Upload benchmark artifacts
-        uses: actions/upload-artifact@v4 # official action; v4 tag
+        uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: |

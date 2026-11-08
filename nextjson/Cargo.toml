@@ -28,3 +28,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [[bench]]
 name = "format_comparison"
 harness = false
+
+[[bench]]
+name = "resource_paths"
+harness = false

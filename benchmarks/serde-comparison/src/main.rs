@@ -565,20 +565,24 @@ fn security_case(
     mut nextjson_ok: impl FnMut(&[u8]) -> bool,
     mut serde_ok: impl FnMut(&[u8]) -> bool,
 ) {
-    // Pre-flight: both must reject (or the test setup is wrong).
-    let nj_rejects = !nextjson_ok(input);
-    let sd_rejects = !serde_ok(input);
+    // Every measured outcome contributes to the result. A panic is recorded
+    // as a failure, not a successful rejection; there is no unguarded preflight.
+    let mut nj_rejects = true;
+    let mut sd_rejects = true;
 
     let mut nj_panics = 0_u64;
     let nj_start = Instant::now();
     let mut nj_ops = 0_u64;
-    while nj_start.elapsed() < duration {
+    while nj_ops == 0 || nj_start.elapsed() < duration {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             black_box(nextjson_ok(input))
         }));
         match result {
-            Ok(_) => {}
-            Err(_) => nj_panics += 1,
+            Ok(accepted) => nj_rejects &= !accepted,
+            Err(_) => {
+                nj_panics += 1;
+                nj_rejects = false;
+            }
         }
         nj_ops += 1;
     }
@@ -592,12 +596,15 @@ fn security_case(
     let mut sd_panics = 0_u64;
     let sd_start = Instant::now();
     let mut sd_ops = 0_u64;
-    while sd_start.elapsed() < duration {
+    while sd_ops == 0 || sd_start.elapsed() < duration {
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| black_box(serde_ok(input))));
         match result {
-            Ok(_) => {}
-            Err(_) => sd_panics += 1,
+            Ok(accepted) => sd_rejects &= !accepted,
+            Err(_) => {
+                sd_panics += 1;
+                sd_rejects = false;
+            }
         }
         sd_ops += 1;
     }
@@ -820,7 +827,7 @@ fn main() {
             black_box(decode_with::<Vec<Record>, _>(b, Edn).unwrap());
         },
     );
-    bench("nextjson_bincode(na)", duration, &|| Vec::new(), &|_| {});
+    eprintln!("not measured: nextjson has no bincode codec");
     bench(
         "serde_bincode",
         duration,

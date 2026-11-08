@@ -77,9 +77,6 @@ fn percent_decode(out: &mut String, bytes: &[u8]) -> Result<()> {
                 i += 1;
             }
             b'%' => {
-                // Need bytes[i+1] and bytes[i+2]; the strict bound is
-                // `i + 2 < bytes.len()`, i.e. `i + 2 >= bytes.len()` is an
-                // out-of-bounds read.
                 if i + 2 >= bytes.len() {
                     return Err(Error::custom("urlform: truncated percent escape"));
                 }
@@ -260,9 +257,9 @@ fn number_to_string(n: &Number) -> Result<String> {
 pub struct UrlFormDecoder<'de> {
     input: &'de [u8],
     pos: usize,
-    pending_key: Option<String>,
-    pending_value: Option<String>,
-    lookahead: Option<Token<'de>>,
+    // Keep the source range, not a consumed owned value, so checkpoints can
+    // restore a field without cloning its decoded text or storing snapshots.
+    pending_value: Option<(usize, usize)>,
     in_object: bool,
     root_written: bool,
 }
@@ -273,9 +270,7 @@ impl<'de> UrlFormDecoder<'de> {
         UrlFormDecoder {
             input,
             pos: 0,
-            pending_key: None,
             pending_value: None,
-            lookahead: None,
             in_object: false,
             root_written: false,
         }
@@ -287,14 +282,14 @@ impl<'de> UrlFormDecoder<'de> {
     }
 
     fn expect_end(&mut self) -> Result<()> {
-        if self.pos >= self.input.len() {
+        if self.pos == self.input.len() && !self.in_object && self.pending_value.is_none() {
             Ok(())
         } else {
             Err(Error::custom("urlform: trailing bytes after value"))
         }
     }
 
-    fn read_pair(&mut self) -> Result<Option<(String, String)>> {
+    fn read_pair(&mut self) -> Result<Option<(String, (usize, usize))>> {
         if self.pos >= self.input.len() {
             return Ok(None);
         }
@@ -304,15 +299,14 @@ impl<'de> UrlFormDecoder<'de> {
             .position(|b| *b == b'&')
             .map(|i| self.pos + i)
             .unwrap_or(self.input.len());
-        let pair = &self.input[self.pos..end];
+        let start = self.pos;
+        let pair = &self.input[start..end];
         self.pos = if end < self.input.len() { end + 1 } else { end };
         let eq = pair.iter().position(|b| *b == b'=').unwrap_or(pair.len());
         let mut key = String::new();
         percent_decode(&mut key, &pair[..eq])?;
-        let mut value = String::new();
         let vstart = if eq < pair.len() { eq + 1 } else { eq };
-        percent_decode(&mut value, &pair[vstart..])?;
-        Ok(Some((key, value)))
+        Ok(Some((key, (start + vstart, end))))
     }
 }
 
@@ -331,6 +325,9 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
     }
 
     fn end_object(&mut self) -> Result<(), Self::Error> {
+        if !self.in_object || self.pending_value.is_some() || self.pos != self.input.len() {
+            return Err(Error::custom("urlform: incomplete object"));
+        }
         self.in_object = false;
         Ok(())
     }
@@ -339,12 +336,11 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
         if !self.in_object {
             return Err(Error::custom("urlform: object key outside object"));
         }
-        // A new entry starts: discard any stale lookahead left by a peek on
-        // the previous entry's value.
-        self.lookahead = None;
+        if self.pending_value.is_some() {
+            return Err(Error::custom("urlform: previous value was not consumed"));
+        }
         match self.read_pair()? {
             Some((k, v)) => {
-                self.pending_key = Some(k.clone());
                 self.pending_value = Some(v);
                 Ok(Some(Cow::Owned(k)))
             }
@@ -353,6 +349,9 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
     }
 
     fn object_entry_sep(&mut self) -> Result<bool, Self::Error> {
+        if self.pending_value.is_some() {
+            return Err(Error::custom("urlform: previous value was not consumed"));
+        }
         Ok(self.pos < self.input.len())
     }
 
@@ -415,28 +414,19 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
     }
 
     fn peek_token(&mut self) -> Result<Token<'de>, Self::Error> {
-        if self.lookahead.is_none() {
-            self.lookahead = Some(if self.in_object {
-                // Peek must NOT consume the pending value: `Option` / `Value`
-                // / untagged decoding peeks first and then reads through
-                // `take_value`, which must still see the same value.
-                let v = self
-                    .pending_value
-                    .as_deref()
-                    .ok_or_else(|| Error::custom("urlform: missing value"))?;
-                Token::Str(Cow::Owned(v.to_string()))
-            } else {
-                // Root: a URL-form document is always an object. `Value`
-                // peeks before `begin_object`, so classify the root here.
-                Token::BeginObject
-            });
+        if self.in_object {
+            Ok(Token::Str(Cow::Owned(self.read_value()?)))
+        } else if !self.root_written {
+            Ok(Token::BeginObject)
+        } else {
+            Err(Error::custom("urlform: no value remains"))
         }
-        Ok(self.lookahead.as_ref().expect("set").clone())
     }
 
     fn next_token(&mut self) -> Result<Token<'de>, Self::Error> {
-        if let Some(t) = self.lookahead.take() {
-            return Ok(t);
+        if !self.root_written {
+            self.begin_object()?;
+            return Ok(Token::BeginObject);
         }
         self.read_token()
     }
@@ -444,26 +434,45 @@ impl<'de> FormatDecoder<'de> for UrlFormDecoder<'de> {
     fn save(&self) -> Mark {
         Mark {
             pos: self.pos,
-            depth: 0,
-            frame_len: 0,
-            tag: None,
+            depth: u32::from(self.in_object) | (u32::from(self.root_written) << 1),
+            frame_len: self.pending_value.map_or(0, |(start, _)| start),
+            tag: self.pending_value.map(|_| 1),
         }
     }
 
     fn restore(&mut self, mark: Mark) {
         self.pos = mark.pos;
+        self.in_object = mark.depth & 1 != 0;
+        self.root_written = mark.depth & 2 != 0;
+        self.pending_value = mark.tag.map(|_| {
+            let end = if self.input.get(mark.pos.wrapping_sub(1)) == Some(&b'&') {
+                mark.pos - 1
+            } else {
+                mark.pos
+            };
+            (mark.frame_len, end)
+        });
     }
 }
 
 impl<'de> UrlFormDecoder<'de> {
     fn take_value(&mut self) -> Result<String> {
-        if let Some(Token::Str(s)) = self.lookahead.take() {
-            return Ok(s.into_owned());
-        }
-        if let Some(v) = self.pending_value.take() {
-            return Ok(v);
-        }
-        Err(Error::custom("urlform: missing value"))
+        let value = self.read_value()?;
+        self.pending_value = None;
+        Ok(value)
+    }
+
+    fn read_value(&self) -> Result<String> {
+        let (start, end) = self
+            .pending_value
+            .ok_or_else(|| Error::custom("urlform: missing value"))?;
+        let bytes = self
+            .input
+            .get(start..end)
+            .ok_or_else(|| Error::custom("urlform: invalid value range"))?;
+        let mut value = String::new();
+        percent_decode(&mut value, bytes)?;
+        Ok(value)
     }
 
     fn read_token(&mut self) -> Result<Token<'de>> {
@@ -474,19 +483,5 @@ impl<'de> UrlFormDecoder<'de> {
 
 /// Parse a scalar string into a [`Number`].
 pub(crate) fn parse_number(s: &str) -> Result<Number> {
-    if let Ok(v) = s.parse::<i64>() {
-        return Ok(Number::from(v));
-    }
-    if let Ok(v) = s.parse::<u64>() {
-        return Ok(Number::from(v));
-    }
-    if let Ok(v) = s.parse::<f64>() {
-        if !v.is_finite() {
-            return Err(Error::custom("urlform: non-finite float"));
-        }
-        return Ok(Number::F64(v));
-    }
-    Err(Error::custom(alloc::format!(
-        "urlform: invalid number {s:?}"
-    )))
+    crate::formats::tree::parse_cell_number(s)
 }

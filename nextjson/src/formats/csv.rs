@@ -10,7 +10,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::de::{FormatDecoder, Mark, NsonDeserialize, Token};
+use crate::de::{FormatDecoder, Mark, NsonDeserialize, OptionTag, Token};
 use crate::error::{Error, Result};
 use crate::formats::tree;
 use crate::formats::Format;
@@ -475,7 +475,6 @@ pub struct CsvDecoder {
     depth: usize,
     mode: Mode,
     header: Vec<String>,
-    lookahead: Option<Token<'static>>,
 }
 
 impl CsvDecoder {
@@ -488,7 +487,6 @@ impl CsvDecoder {
             depth: 0,
             mode: Mode::Undecided,
             header: Vec::new(),
-            lookahead: None,
         }
     }
 
@@ -500,13 +498,13 @@ impl CsvDecoder {
     fn expect_end(&mut self) -> Result<()> {
         let done = match self.mode {
             // Object rows: one header row plus data rows, all consumed.
-            Mode::Objects => self.row_index >= self.rows.len().saturating_sub(1),
+            Mode::Objects => self.row_index >= self.rows.len(),
             // Array rows: every row consumed.
             Mode::Arrays => self.row_index >= self.rows.len(),
             // Bare scalar: a single-row input whose one cell was read.
             Mode::Undecided => self.rows.len() <= 1 && self.cell_index >= self.row(0).len(),
         };
-        if done {
+        if done && self.depth == 0 {
             Ok(())
         } else {
             Err(Error::custom("csv: unconsumed rows"))
@@ -601,11 +599,17 @@ impl FormatDecoder<'_> for CsvDecoder {
     fn end_array(&mut self) -> Result<(), Self::Error> {
         match self.depth {
             2 => {
+                if self.cell_index != self.row(self.row_index).len() {
+                    return Err(Error::custom("csv: row contains unread cells"));
+                }
                 self.row_index += 1;
                 self.depth = 1;
                 Ok(())
             }
             1 => {
+                if self.row_index != self.rows.len() {
+                    return Err(Error::custom("csv: table contains unread rows"));
+                }
                 self.depth = 0;
                 Ok(())
             }
@@ -630,7 +634,7 @@ impl FormatDecoder<'_> for CsvDecoder {
     }
 
     fn unit(&mut self) -> Result<(), Self::Error> {
-        let cell = self.scalar_cell()?;
+        let cell = self.next_cell()?;
         if cell != "null" {
             return Err(Error::custom("csv: expected null cell"));
         }
@@ -638,8 +642,8 @@ impl FormatDecoder<'_> for CsvDecoder {
     }
 
     fn bool(&mut self) -> Result<bool, Self::Error> {
-        let cell = self.scalar_cell()?;
-        match cell.as_str() {
+        let cell = self.next_cell()?;
+        match cell {
             "true" | "1" => Ok(true),
             "false" | "0" => Ok(false),
             other => Err(Error::custom(alloc::format!("csv: invalid bool {other:?}"))),
@@ -647,17 +651,15 @@ impl FormatDecoder<'_> for CsvDecoder {
     }
 
     fn number(&mut self) -> Result<Number, Self::Error> {
-        let cell = self.scalar_cell()?;
-        parse_number(&cell)
+        parse_number(self.next_cell()?)
     }
 
     fn string(&mut self) -> Result<Cow<'static, str>, Self::Error> {
-        let cell = self.scalar_cell()?;
-        Ok(Cow::Owned(cell))
+        Ok(Cow::Owned(self.next_cell()?.to_string()))
     }
 
     fn char(&mut self) -> Result<char, Self::Error> {
-        let s = self.scalar_cell()?;
+        let s = self.next_cell()?;
         let mut chars = s.chars();
         match (chars.next(), chars.next()) {
             (Some(c), None) => Ok(c),
@@ -671,71 +673,73 @@ impl FormatDecoder<'_> for CsvDecoder {
     }
 
     fn peek_token(&mut self) -> Result<Token<'static>, Self::Error> {
-        if self.lookahead.is_none() {
-            let cell = self.next_cell()?;
-            self.lookahead = Some(classify_cell(&cell));
-        }
-        Ok(self.lookahead.as_ref().expect("set").clone())
+        let cell = self
+            .row(self.row_index)
+            .get(self.cell_index)
+            .ok_or_else(|| Error::custom("csv: missing cell"))?;
+        Ok(classify_cell(cell))
     }
 
     fn next_token(&mut self) -> Result<Token<'static>, Self::Error> {
-        if let Some(t) = self.lookahead.take() {
-            return Ok(t);
-        }
         let cell = self.next_cell()?;
-        Ok(classify_cell(&cell))
+        Ok(classify_cell(cell))
+    }
+
+    fn option_tag(&mut self) -> Result<OptionTag, Self::Error> {
+        let cell = self
+            .row(self.row_index)
+            .get(self.cell_index)
+            .ok_or_else(|| Error::custom("csv: missing cell"))?;
+        if cell == "null" {
+            self.cell_index += 1;
+            Ok(OptionTag::None)
+        } else {
+            Ok(OptionTag::Some)
+        }
     }
 
     fn save(&self) -> Mark {
         Mark {
             pos: self.row_index,
-            depth: 0,
+            depth: self.depth as u32,
             frame_len: self.cell_index,
-            tag: None,
+            tag: Some(match self.mode {
+                Mode::Undecided => 0,
+                Mode::Arrays => 1,
+                Mode::Objects => 2,
+            }),
         }
     }
 
     fn restore(&mut self, mark: Mark) {
         self.row_index = mark.pos;
         self.cell_index = mark.frame_len;
+        self.depth = mark.depth as usize;
+        self.mode = match mark.tag {
+            Some(1) => Mode::Arrays,
+            Some(2) => Mode::Objects,
+            _ => Mode::Undecided,
+        };
     }
 }
 
 impl CsvDecoder {
-    fn next_cell(&mut self) -> Result<String> {
-        let row = self.row(self.row_index);
-        let cell = row
+    fn next_cell(&mut self) -> Result<&str> {
+        let cell = self
+            .rows
+            .get(self.row_index)
+            .ok_or_else(|| Error::custom("csv: missing row"))?
             .get(self.cell_index)
-            .cloned()
             .ok_or_else(|| Error::custom("csv: missing cell"))?;
         self.cell_index += 1;
         Ok(cell)
-    }
-
-    fn scalar_cell(&mut self) -> Result<String> {
-        if let Some(t) = self.lookahead.take() {
-            return Ok(match t {
-                Token::Str(s) => s.into_owned(),
-                Token::Number(n) => tree::number_string(&n)?,
-                Token::Bool(b) => b.to_string(),
-                Token::Null => "null".to_string(),
-                _ => return Err(Error::custom("csv: unexpected token in cell")),
-            });
-        }
-        self.next_cell()
     }
 }
 
 /// Classify a CSV cell into a typed token.
 fn classify_cell(cell: &str) -> Token<'static> {
-    if let Ok(v) = cell.parse::<i64>() {
-        return Token::Number(Number::from(v));
-    }
-    if let Ok(v) = cell.parse::<u64>() {
-        return Token::Number(Number::from(v));
-    }
-    if let Some(v) = tree::parse_float(cell) {
-        return Token::Number(Number::F64(v));
+    if let Ok(value) = tree::parse_cell_number(cell) {
+        return Token::Number(value);
     }
     match cell {
         "true" | "1" => Token::Bool(true),
@@ -746,17 +750,5 @@ fn classify_cell(cell: &str) -> Token<'static> {
 }
 
 fn parse_number(s: &str) -> Result<Number> {
-    if let Ok(v) = s.parse::<i64>() {
-        return Ok(Number::from(v));
-    }
-    if let Ok(v) = s.parse::<u64>() {
-        return Ok(Number::from(v));
-    }
-    if let Ok(v) = s.parse::<f64>() {
-        if !v.is_finite() {
-            return Err(Error::custom("csv: non-finite float"));
-        }
-        return Ok(Number::F64(v));
-    }
-    Err(Error::custom(alloc::format!("csv: invalid number {s:?}")))
+    tree::parse_cell_number(s)
 }

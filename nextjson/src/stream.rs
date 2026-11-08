@@ -157,8 +157,19 @@ impl<R> StreamDecoder<R> {
 
 impl<R: std::io::Read> StreamDecoder<R> {
     /// Read more bytes until `buf.len() >= upto` or the reader hits EOF.
+    #[inline]
     fn fill(&mut self, upto: usize) -> Result<()> {
         self.check_input_limit()?;
+        if self.buf.len() < upto && !self.eof {
+            self.read_more(upto)?;
+        }
+        Ok(())
+    }
+
+    // Keep the read buffer and I/O machinery off the per-byte hot path.
+    #[cold]
+    #[inline(never)]
+    fn read_more(&mut self, upto: usize) -> Result<()> {
         while self.buf.len() < upto && !self.eof {
             let mut chunk = [0u8; CHUNK];
             let remaining = self
@@ -307,22 +318,21 @@ impl<R: std::io::Read> StreamDecoder<R> {
         let start = self.pos + 1;
         let mut i = start;
         loop {
-            // Scan a run of unescaped bytes. Each iteration pulls the byte
-            // first, so a multi-byte UTF-8 character is never split across
-            // fill boundaries.
+            // Scan buffered runs in bulk. Keep the entire run until a special
+            // byte or EOF, so UTF-8 scalars may straddle any reader boundary.
             let seg_start = i;
             loop {
                 if !self.has_more(i)? {
                     break; // data exhausted (EOF handled below)
                 }
-                let b = self.buf[i];
-                if b == b'"' || b == b'\\' {
+                if let Some(offset) = crate::scan::find_string_special(&self.buf[i..]) {
+                    i += offset;
+                    if self.buf[i] < 0x20 {
+                        return Err(self.err_at(ErrorKind::ControlCharInString, i));
+                    }
                     break;
                 }
-                if b < 0x20 {
-                    return Err(self.err_at(ErrorKind::ControlCharInString, i));
-                }
-                i += 1;
+                i = self.buf.len();
             }
             if i > seg_start {
                 let seg = core::str::from_utf8(&self.buf[seg_start..i]).map_err(|e| {
